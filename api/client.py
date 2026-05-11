@@ -94,6 +94,3 @@ def push_default_roi(machine_id: str, local_config_path: str = "data/roi_config.
             print(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
     except Exception as e:
         print(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
-
-
-# wdwd
