@@ -1,16 +1,27 @@
 package controllers
 
 import (
+	"MotionDetectionForVendingMachine/models"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"vending-backend/config"
-	"vending-backend/models"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+type events struct {
+	main_db *gorm.DB
+}
+
+func Event(db *gorm.DB) events {
+	e := events{
+		main_db: db,
+	}
+	return e
+}
 
 // APIKeyMiddleware ตรวจสอบ X-API-Key header
 // ถ้า API_KEY env ว่างเปล่า → ข้ามการตรวจสอบ (ช่วง development)
@@ -23,63 +34,82 @@ func APIKeyMiddleware() gin.HandlerFunc {
 		}
 		key := c.GetHeader("X-API-Key")
 		if key != secret {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"status":  "401",
+				"message": "Unauthorized",
+			})
 			return
 		}
 		c.Next()
 	}
 }
 
-func ReceiveEvent(c *gin.Context) {
-	event := strings.TrimSpace(c.PostForm("event"))
-	transactionID := strings.TrimSpace(c.PostForm("transaction_id"))
-	machineID := strings.TrimSpace(c.PostForm("machine_id"))
-	landTime := strings.TrimSpace(c.PostForm("land_time"))
+// Receive รับ event และรูปภาพจากตู้ vending
+func (self_db events) Receive(c *gin.Context) {
 
-	// #9 Validate required fields
-	if event == "" || transactionID == "" || machineID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "event, transaction_id และ machine_id ต้องไม่ว่าง"})
+	event := strings.TrimSpace(c.PostForm("event"))
+	transaction_id := strings.TrimSpace(c.PostForm("transaction_id"))
+	machine_id := strings.TrimSpace(c.PostForm("machine_id"))
+	land_time := strings.TrimSpace(c.PostForm("land_time"))
+
+	// Validate required fields
+	if event == "" || transaction_id == "" || machine_id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":  "400",
+			"message": "event, transaction_id และ machine_id ต้องไม่ว่าง",
+		})
 		return
 	}
 
+	main_db := self_db.main_db.Session(&gorm.Session{})
+
+	// หาตู้หรือสร้างใหม่ถ้ายังไม่มี
 	var machine models.Machine
-	if err := config.DB.Where("machine_id = ?", machineID).FirstOrCreate(&machine, models.Machine{
-		MachineID: machineID,
-		Name:      "ตู้เพิ่มใหม่ (" + machineID + ")",
+	if err := main_db.Where("machine_id = ?", machine_id).FirstOrCreate(&machine, models.Machine{
+		MachineID: machine_id,
+		Name:      "ตู้เพิ่มใหม่ (" + machine_id + ")",
 		Location:  "ยังไม่ระบุ",
 	}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถตรวจสอบตู้ได้"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "500",
+			"message": "ไม่สามารถตรวจสอบตู้ได้",
+		})
 		return
 	}
 
-	// #10 Handle duplicate transaction_id
+	// Handle duplicate transaction_id
 	var existing models.Transaction
-	if err := config.DB.Where("transaction_id = ?", transactionID).First(&existing).Error; err == nil {
+	if err := main_db.Where("transaction_id = ?", transaction_id).First(&existing).Error; err == nil {
 		// มีอยู่แล้ว → ส่ง 200 กลับเลย ไม่ insert ซ้ำ
-		c.JSON(http.StatusOK, gin.H{"status": "duplicate", "message": "transaction_id นี้ถูกบันทึกแล้ว"})
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "duplicate",
+			"message": "transaction_id นี้ถูกบันทึกแล้ว",
+		})
 		return
 	}
 
-	// #11 บันทึกรูปภาพและสร้าง URL แทน path ดิบ
-	var landedImageURL string
+	// บันทึกรูปภาพ
+	var landed_image_path string
 	file, err := c.FormFile("landed_image")
 	if err == nil {
-		filename := fmt.Sprintf("%s_landed%s", transactionID, filepath.Ext(file.Filename))
-		savePath := "server_images/" + filename
-		if saveErr := c.SaveUploadedFile(file, savePath); saveErr == nil {
-			// สร้าง URL ที่ frontend เรียกได้โดยตรง
-			landedImageURL = "/images/" + filename
+		filename := fmt.Sprintf("%s_landed%s", transaction_id, filepath.Ext(file.Filename))
+		save_path := "server_images/" + filename
+		if save_err := c.SaveUploadedFile(file, save_path); save_err == nil {
+			landed_image_path = save_path
 		}
 	}
 
 	txn := models.Transaction{
-		TransactionID:   transactionID,
-		MachineID:       machineID,
+		TransactionID:   transaction_id,
+		MachineID:       machine_id,
 		EventStatus:     event,
-		LandTime:        landTime,
-		LandedImagePath: landedImageURL,
+		LandTime:        land_time,
+		LandedImagePath: landed_image_path,
 	}
-	config.DB.Create(&txn)
+	main_db.Create(&txn)
 
-	c.JSON(http.StatusOK, gin.H{"status": "success"})
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "000",
+		"message": "success",
+	})
 }
