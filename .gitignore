@@ -1,3 +1,19 @@
-.venv
+# ซ่อนรหัสผ่านและค่าติดตั้ง (สำคัญที่สุด 🌟)
+.env
+
+
+# ละเว้นไฟล์ขยะที่ Python สร้างขึ้นเองอัตโนมัติ
+__pycache__/
+*.pyc
+
+# (ถ้าคุณมีการจำลอง Environment ของ Python ให้ละเว้นด้วย)
+venv/
+.venv/
+
+evidence_images/
 
 logs/
+
+*.log
+
+data/
