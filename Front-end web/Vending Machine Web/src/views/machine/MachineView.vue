@@ -23,7 +23,7 @@ const getMachines = () => {
     .then((response) => {
         console.log(response.data);
 
-        machine_data.machines = response.data.machines;
+        machine_data.machines = response.data;
     })
     .catch((error) => {
         console.error('Error fetching data:', error);
@@ -137,7 +137,7 @@ watch(
         
           <div class="flex items-center justify-between border-b border-default pb-4 md:pb-5">
             <h3 class="text-lg font-medium text-heading">
-              Update Machine
+              Update Machine {{selectedMachineId}}
             </h3>
     
             <button
@@ -153,18 +153,6 @@ watch(
     
           <form @submit.prevent="submitUpdateMachine">
             <div class="grid gap-4 grid-cols-2 py-4 md:py-6">
-            
-              <div class="col-span-2">
-                <label class="block mb-2.5 text-sm font-medium text-heading">
-                  Machine ID
-                </label>
-                <input
-                  v-model="updateForm.machine_id"
-                  type="text"
-                  class="bg-neutral-secondary-medium border border-default-medium text-heading text-sm rounded-base focus:ring-brand focus:border-brand block w-full px-3 py-2.5 shadow-xs placeholder:text-body"
-                  placeholder="VENDING_01"
-                />
-              </div>
     
               <div class="col-span-2">
                 <label class="block mb-2.5 text-sm font-medium text-heading">
