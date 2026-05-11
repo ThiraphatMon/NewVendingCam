@@ -23,7 +23,7 @@ const getMachines = () => {
     .then((response) => {
         console.log(response.data);
 
-        machine_data.machines = response.data;
+        machine_data.machines = response.data.machines;
     })
     .catch((error) => {
         console.error('Error fetching data:', error);
