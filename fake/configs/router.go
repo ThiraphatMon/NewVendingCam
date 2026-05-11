@@ -23,6 +23,7 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	}))
 
 	router.GET("/api/machines", controllers.Machine(db).Get_list)
+	router.PATCH("/api/machines/:machine_id", controllers.Machine(db).Update)
 
 	router.GET("/api/machines/:machine_id", controllers.Transaction(db).Get_list)
 
