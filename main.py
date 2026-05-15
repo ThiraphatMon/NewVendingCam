@@ -69,11 +69,8 @@ def main():
     # ==========================================
 
     bg_tensor = None
-    LR = 0.1
+    LR = 0.05
     MOT_THRESH = 25
-    SHAKE_THRESHOLD = 0.40
-    STABLE_THRESHOLD = 0.10
-    is_shaking = False
     RECONNECT_DELAY = 2  # วินาทีก่อน reconnect กล้อง
 
     while True:
@@ -104,7 +101,12 @@ def main():
             torch.tensor(255.0, device=device),
             torch.tensor(0.0, device=device),
         )
-        bg_tensor = (1 - LR) * bg_tensor + LR * frame_tensor
+        # Freeze background update ถ้ายังมี active object อยู่
+        freeze_background = len(tracker.objects) > 0
+        # อัปเดต background เฉพาะตอนที่ไม่มี object
+        if not freeze_background:
+            bg_tensor = (1 - LR) * bg_tensor + LR * frame_tensor
+
         fgmask = mask_tensor.byte().cpu().numpy()
 
         k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -112,45 +114,7 @@ def main():
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_DILATE, k5, iterations=2)
 
         roi_manager.reload_if_changed()
-        roi_mask = roi_manager.build_mask(fgmask.shape)
 
-        # ── Shake Detection (ใช้ทั้ง frame ไม่ใช่แค่ใน ROI) ──
-        total_pixels = fgmask.shape[0] * fgmask.shape[1]
-        white_pixel_count = cv2.countNonZero(fgmask)
-        white_ratio = white_pixel_count / max(1, total_pixels)
-
-        fgmask = cv2.bitwise_and(fgmask, roi_mask)  # ตัด ROI หลังจาก shake check แล้ว
-
-        if not is_shaking and white_ratio >= SHAKE_THRESHOLD:
-            is_shaking = True
-            bg_tensor = frame_tensor.clone()
-            tracker.clear_all()
-            if sm.state != "IDLE":
-                sm.reset()
-            print(f"⚠️  SHAKE DETECTED ({white_ratio:.0%}) — paused")
-
-        elif is_shaking and white_ratio < STABLE_THRESHOLD:
-            is_shaking = False
-            bg_tensor = frame_tensor.clone()
-            print(f"✅  Camera stable ({white_ratio:.0%}) — resuming")
-
-        if is_shaking:
-            cv2.rectangle(frame, (0, 0), (actual_w, actual_h), (0, 0, 255), 6)
-            cv2.putText(
-                frame,
-                f"CAMERA SHAKE ({white_ratio:.0%}) — PAUSED",
-                (actual_w // 2 - 260, actual_h // 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 0, 255),
-                3,
-            )
-            roi_manager.draw(frame)
-            cv2.imshow("Vending System", frame)
-            cv2.imshow("Motion Mask", fgmask)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-            continue
         # ─────────────────────────────────────────────────────
 
         contours, _ = cv2.findContours(

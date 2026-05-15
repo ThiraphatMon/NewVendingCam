@@ -78,10 +78,24 @@ class MemoryTracker:
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
 
+                # ถ้าวัตถุยังขยับจริง
                 if dist > STILL_DIST:
                     if obj["state"] != "CONFIRMED_STOP":
                         obj["state"] = "MOVING"
                         obj["still_start"] = None
+
+                # ถ้าวัตถุแทบไม่ขยับแล้ว
+                else:
+                    if obj["still_start"] is None:
+                        obj["still_start"] = current_time
+
+                    elapsed = current_time - obj["still_start"]
+
+                    # ครบเวลาที่กำหนด → ถือว่าหยุดนิ่งจริง
+                    if elapsed >= CONFIRM_TIME:
+                        obj["state"] = "CONFIRMED_STOP"
+                    else:
+                        obj["state"] = f"WAITING ({int(CONFIRM_TIME - elapsed)}s)"
                 new_objects[best_id] = obj
             else:
                 new_objects[self.next_id] = {
