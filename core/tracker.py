@@ -4,6 +4,10 @@ from config import CONFIRM_TIME, STILL_DIST, FRAME_W, FRAME_H
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 
+# จำนวน frame ติดต่อกันที่ shape ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง" ได้
+SHAPE_STABLE_FRAMES = 5
+SHAPE_SIZE_TOLERANCE = 0.20  # ขนาด w*h เปลี่ยนได้ไม่เกิน 20% จึงถือว่า stable
+
 
 def group_close_boxes(boxes, max_dist=50):
     if not boxes:
@@ -78,10 +82,32 @@ class MemoryTracker:
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
 
-                if dist > STILL_DIST:
-                    if obj["state"] != "CONFIRMED_STOP":
-                        obj["state"] = "MOVING"
-                        obj["still_start"] = None
+                # ── [CHANGE 1] Shape stability check ────────────────────────────
+                # ไม่ใช้ STILL_DIST อีกต่อไปในการตัดสิน CONFIRMED_STOP
+                # ใช้การนับ frame ที่ขนาด bounding box เสถียรแทน
+                if obj["state"] != "CONFIRMED_STOP":
+                    prev_area = old_w * old_h
+                    curr_area = w * h
+                    area_ratio = abs(curr_area - prev_area) / max(1, prev_area)
+                    if area_ratio <= SHAPE_SIZE_TOLERANCE:
+                        obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
+                    else:
+                        obj["shape_stable_count"] = 0
+                        if (
+                            obj.get("shape_confirmed_time") is None
+                        ):  # ยังไม่เคย confirm → reset ได้
+                            obj["state"] = "DETECTING"
+                        # ถ้า confirm แล้ว ไม่ถอยกลับเป็น DETECTING แม้ noise จะทำให้ shape เปลี่ยนชั่วคราว
+
+                    if obj["shape_stable_count"] >= SHAPE_STABLE_FRAMES:
+                        if obj.get("shape_confirmed_time") is None:
+                            obj["shape_confirmed_time"] = current_time
+                        # ไม่ reset shape_confirmed_time ถ้า confirm แล้ว
+                        obj["state"] = "SHAPE_CONFIRMED"
+                    else:
+                        obj["state"] = "DETECTING"
+                # ────────────────────────────────────────────────────────────────
+
                 new_objects[best_id] = obj
             else:
                 new_objects[self.next_id] = {
@@ -90,6 +116,8 @@ class MemoryTracker:
                     "state": "MOVING",
                     "still_start": None,
                     "first_seen": current_time,
+                    "shape_stable_count": 0,
+                    "shape_confirmed_time": None,
                 }
                 self.next_id += 1
 
@@ -100,7 +128,7 @@ class MemoryTracker:
             if obj["state"] == "MOVING" and (current_time - obj["first_seen"]) < 0.5:
                 continue
 
-            # #7 Edge kill: ถ้า object อยู่ชิดขอบ frame ให้ตัดทิ้งเลย ไม่รอ CONFIRMED_STOP
+            # Edge kill
             cx, cy = obj["centroid"]
             w, h = obj["shape"]
             at_edge = (
@@ -110,8 +138,9 @@ class MemoryTracker:
                 or cy + h // 2 >= FRAME_H - EDGE_MARGIN
             )
             if at_edge and obj["state"] != "CONFIRMED_STOP":
-                continue  # ไม่เก็บ object ที่ชิดขอบ
+                continue
 
+            # วัตถุหายออกจาก frame ชั่วคราว (noise) → เข้า WAITING countdown
             if obj["state"] != "CONFIRMED_STOP":
                 if obj["still_start"] is None:
                     obj["still_start"] = current_time
