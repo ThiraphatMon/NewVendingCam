@@ -78,24 +78,10 @@ class MemoryTracker:
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
 
-                # ถ้าวัตถุยังขยับจริง
                 if dist > STILL_DIST:
                     if obj["state"] != "CONFIRMED_STOP":
                         obj["state"] = "MOVING"
                         obj["still_start"] = None
-
-                # ถ้าวัตถุแทบไม่ขยับแล้ว
-                else:
-                    if obj["still_start"] is None:
-                        obj["still_start"] = current_time
-
-                    elapsed = current_time - obj["still_start"]
-
-                    # ครบเวลาที่กำหนด → ถือว่าหยุดนิ่งจริง
-                    if elapsed >= CONFIRM_TIME:
-                        obj["state"] = "CONFIRMED_STOP"
-                    else:
-                        obj["state"] = f"WAITING ({int(CONFIRM_TIME - elapsed)}s)"
                 new_objects[best_id] = obj
             else:
                 new_objects[self.next_id] = {
@@ -123,33 +109,17 @@ class MemoryTracker:
                 or cy - h // 2 <= EDGE_MARGIN
                 or cy + h // 2 >= FRAME_H - EDGE_MARGIN
             )
-
-            # ถ้า object confirm แล้ว
-            # ให้ออกจากระบบเมื่อหลุดขอบจริง
-            if at_edge and obj["state"] == "CONFIRMED_STOP":
-                continue
-
-            # object ปกติที่ติดขอบ ไม่เก็บ
             if at_edge and obj["state"] != "CONFIRMED_STOP":
-                continue
+                continue  # ไม่เก็บ object ที่ชิดขอบ
 
-            # ถ้า CONFIRMED_STOP แล้ว
-            # ให้ค้าง object ไว้จนกว่าจะออกขอบ ROI/เฟรมจริง
-            if obj["state"] == "CONFIRMED_STOP":
-                new_objects[obj_id] = obj
-                continue
-
-            # object ยังไม่ confirm
-            if obj["still_start"] is None:
-                obj["still_start"] = current_time
-
-            elapsed = current_time - obj["still_start"]
-
-            if elapsed >= CONFIRM_TIME:
-                obj["state"] = "CONFIRMED_STOP"
-            else:
-                obj["state"] = f"WAITING ({int(CONFIRM_TIME-elapsed)}s)"
-
+            if obj["state"] != "CONFIRMED_STOP":
+                if obj["still_start"] is None:
+                    obj["still_start"] = current_time
+                elapsed = current_time - obj["still_start"]
+                if elapsed >= CONFIRM_TIME:
+                    obj["state"] = "CONFIRMED_STOP"
+                else:
+                    obj["state"] = f"WAITING ({int(CONFIRM_TIME-elapsed)}s)"
             new_objects[obj_id] = obj
 
         self.objects = new_objects
