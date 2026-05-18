@@ -156,4 +156,6 @@ class MemoryTracker:
 
     def clear_all(self):
         self.objects.clear()
-        self.next_id = 1
+        # ✅ ไม่ reset next_id กลับเป็น 1
+        # เพราะถ้า reset แล้ว object ใหม่จะได้ id ซ้ำกับที่ sm.land_obj_id จำอยู่
+        # ทำให้ของชิ้นใหม่ถูก skip โดยไม่ตั้งใจ

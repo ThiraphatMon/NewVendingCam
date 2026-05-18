@@ -1,5 +1,5 @@
 import cv2
-import torch
+import numpy as np
 import time
 import argparse
 from config import (
@@ -12,6 +12,7 @@ from config import (
     CONFIRM_TIME,
     CONFIRMED_HOLD_TIMEOUT,
     MACHINE_ID,
+    HEADLESS,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi
@@ -30,6 +31,7 @@ def main():
     args = parser.parse_args()
 
     print(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
+    print(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
 
     start_cleanup_thread()
 
@@ -47,9 +49,7 @@ def main():
         daemon=True,
     ).start()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 เริ่มระบบประมวลผลด้วย: {device.type.upper()}")
-
+    # ✅ ลบ PyTorch ออกทั้งหมด — ใช้ NumPy แทน เร็วกว่าบน Pi CPU มาก
     tracker = MemoryTracker()
     sm = VendingStateMachine()
     sm.machine_id = args.machine
@@ -64,7 +64,7 @@ def main():
 
     threading.Thread(target=roi_polling_task, daemon=True).start()
 
-    bg_tensor = None
+    bg_np = None  # ✅ background เป็น NumPy array แทน Tensor
     LR = 0.1
     MOT_THRESH = 25
     bg_frozen = False
@@ -79,37 +79,32 @@ def main():
             cap = cv2.VideoCapture(CAMERA_INDEX)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-            bg_tensor = None
+            bg_np = None
             bg_frozen = False
             continue
 
         frame = cv2.flip(frame, 1)
         now = time.time()
 
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        frame_tensor = torch.from_numpy(frame_gray).to(device).float()
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
-        if bg_tensor is None:
-            bg_tensor = frame_tensor.clone()
+        # ✅ Background subtraction ด้วย NumPy/OpenCV ล้วนๆ — ไม่ต้องใช้ PyTorch
+        if bg_np is None:
+            bg_np = frame_gray.copy()
             continue
 
-        diff = torch.abs(frame_tensor - bg_tensor)
-        mask_tensor = torch.where(
-            diff > MOT_THRESH,
-            torch.tensor(255.0, device=device),
-            torch.tensor(0.0, device=device),
-        )
+        diff = cv2.absdiff(frame_gray, bg_np)
+        fgmask = np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
 
         if not bg_frozen:
-            bg_tensor = (1 - LR) * bg_tensor + LR * frame_tensor
-
-        fgmask = mask_tensor.byte().cpu().numpy()
+            # weighted update: bg = (1-LR)*bg + LR*frame
+            cv2.addWeighted(bg_np, 1 - LR, frame_gray, LR, 0, dst=bg_np)
 
         k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k5)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_DILATE, k5, iterations=2)
 
-        roi_manager.reload_if_changed()
+        roi_manager.reload_if_changed()  # ✅ throttled — เช็คจริงแค่ทุก 5 วินาที
         roi_mask = roi_manager.build_mask(fgmask.shape)
         fgmask = cv2.bitwise_and(fgmask, roi_mask)
 
@@ -130,6 +125,14 @@ def main():
             for obj in tracked.values()
         )
 
+        def do_reset():
+            sm.reset()
+            tracker.clear_all()
+            nonlocal bg_frozen, bg_np
+            bg_frozen = False
+            bg_np = None
+            print("🌅 Background UNFROZEN — กลับสู่ IDLE")
+
         if motion_in_roi and sm.state == "IDLE":
             if not bg_frozen:
                 bg_frozen = True
@@ -138,7 +141,6 @@ def main():
 
         if sm.state == "DROP_DETECTED":
             for obj_id, obj in tracked.items():
-                # [CHANGE 1] trigger เมื่อ SHAPE_CONFIRMED แทน CONFIRMED_STOP
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
                     and (now - obj.get("shape_confirmed_time", now)) >= CONFIRM_TIME
@@ -147,25 +149,17 @@ def main():
                     break
             if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
                 sm.trigger("timeout")
-
-        def do_reset():
-            sm.reset()
-            tracker.clear_all()
-            nonlocal bg_frozen, bg_tensor
-            bg_frozen = False
-            bg_tensor = None
-            print("🌅 Background UNFROZEN — กลับสู่ IDLE")
+                do_reset()  # ← ล้าง tracker + bg_frozen + bg_np ด้วย
+                # (sm.reset() ถูกเรียกใน trigger แล้ว แต่ do_reset เรียกซ้ำได้ ไม่มีผลเสีย)
 
         if sm.state == "EVIDENCE_CAPTURED":
             landed_obj = tracked.get(sm.land_obj_id)
             hold_elapsed = now - sm.capture_time
 
-            # [CHANGE 2] Force reset ถ้าค้างนานเกิน CONFIRMED_HOLD_TIMEOUT
             if hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
                 print(f"⏰ Force reset หลังค้าง {CONFIRMED_HOLD_TIMEOUT}s")
                 do_reset()
             elif landed_obj:
-                # วัตถุยังอยู่ → track กรอบสีเขียว + แสดง auto-reset countdown
                 cx, cy = landed_obj["centroid"]
                 w, h = landed_obj["shape"]
                 time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
@@ -186,7 +180,6 @@ def main():
                     1,
                 )
             else:
-                # วัตถุออกจาก ROI → reset ทันที
                 print("✅ วัตถุออกจาก ROI → RESET")
                 do_reset()
 
@@ -252,20 +245,26 @@ def main():
                 1,
             )
 
-        cv2.imshow("Vending System", frame)
-        cv2.imshow("Motion Mask", fgmask)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("r"):
-            sm.reset()
-            tracker.clear_all()
-            bg_tensor = None
-            bg_frozen = False
+        # ✅ imshow และ waitKey จะทำงานเฉพาะตอน HEADLESS=0 (ทดสอบบน PC)
+        if not HEADLESS:
+            cv2.imshow("Vending System", frame)
+            cv2.imshow("Motion Mask", fgmask)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            elif key == ord("r"):
+                sm.reset()
+                tracker.clear_all()
+                bg_np = None
+                bg_frozen = False
+        else:
+            # Headless: ไม่มี waitKey → ต้องมีทางออกจาก loop บ้าง
+            # รองรับ SIGTERM จาก systemd หรือ kill ได้ตามปกติ
+            pass
 
     cap.release()
-    cv2.destroyAllWindows()
+    if not HEADLESS:
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
