@@ -1,6 +1,6 @@
 import math
 import time
-from config import CONFIRM_TIME, STILL_DIST, FRAME_W, FRAME_H
+from config import CONFIRM_TIME, FRAME_W, FRAME_H
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 

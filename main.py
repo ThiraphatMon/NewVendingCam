@@ -150,7 +150,6 @@ def main():
             if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
                 sm.trigger("timeout")
                 do_reset()  # ← ล้าง tracker + bg_frozen + bg_np ด้วย
-                # (sm.reset() ถูกเรียกใน trigger แล้ว แต่ do_reset เรียกซ้ำได้ ไม่มีผลเสีย)
 
         if sm.state == "EVIDENCE_CAPTURED":
             landed_obj = tracked.get(sm.land_obj_id)
