@@ -15,7 +15,6 @@ def _headers():
 def post_event(payload, image_path=None):
     try:
         if image_path and os.path.exists(image_path):
-            # ใช้ with-statement เพื่อให้ปิด file handle อัตโนมัติ
             with open(image_path, "rb") as img_file:
                 files = {"landed_image": img_file}
                 resp = requests.post(
@@ -37,6 +36,38 @@ def post_event(payload, image_path=None):
         print(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Golang ปิดอยู่): {e}")
 
 
+def register_machine(machine_id: str):
+    """
+    ลงทะเบียนตู้กับ Server โดยส่ง SYSTEM_ONLINE event ไปที่ POST /api/events
+    Server จะ FirstOrCreate machine อัตโนมัติจาก machine_id ที่ส่งไป
+    (Server ไม่มี POST /machines — สร้าง machine ผ่าน event endpoint เท่านั้น)
+    """
+    from datetime import datetime
+
+    try:
+        transaction_id = datetime.now().strftime(f"BOOT-{machine_id}-%Y%m%d-%H%M%S")
+        payload = {
+            "machine_id": machine_id,
+            "event": "SYSTEM_ONLINE",
+            "transaction_id": transaction_id,
+            "land_time": "",
+        }
+        resp = requests.post(
+            CLOUD_API_URL,
+            data=payload,
+            headers=_headers(),
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            print(f"[{machine_id}] ✅ ลงทะเบียนตู้สำเร็จ (SYSTEM_ONLINE)")
+        else:
+            print(
+                f"[{machine_id}] ⚠️ register_machine ล้มเหลว: {resp.status_code} - {resp.text}"
+            )
+    except Exception as e:
+        print(f"[{machine_id}] ⚠️ register_machine error: {e}")
+
+
 def fetch_remote_roi(machine_id):
     """ดึง ROI จาก Server แล้วเขียนทับ local file (ถ้ามีข้อมูล)"""
     try:
@@ -50,7 +81,6 @@ def fetch_remote_roi(machine_id):
                 with open("data/roi_config.json", "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
-        # เน็ตหลุดก็ปล่อยผ่านไป ใช้ของเก่าในเครื่อง
         pass
 
 
@@ -63,16 +93,13 @@ def push_default_roi(machine_id: str, local_config_path: str = "data/roi_config.
         base_url = CLOUD_API_URL.replace("/events", "")
         roi_url = f"{base_url}/machines/{machine_id}/roi"
 
-        # เช็คก่อนว่า server มี ROI อยู่แล้วหรือยัง
         check = requests.get(roi_url, headers=_headers(), timeout=5)
         if check.status_code == 200:
             data = check.json()
             if data.get("status") != "no_config":
-                # Server มีค่าอยู่แล้ว ไม่ต้อง push ทับ
                 print(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
                 return
 
-        # Server ยังว่าง → ส่ง local default ขึ้นไป
         if not os.path.exists(local_config_path):
             print(
                 f"[{machine_id}] ⚠️ ไม่พบ {local_config_path} ไม่สามารถ push default ROI ได้"

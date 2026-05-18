@@ -15,7 +15,7 @@ from config import (
     HEADLESS,
 )
 import threading
-from api.client import fetch_remote_roi, push_default_roi
+from api.client import fetch_remote_roi, push_default_roi, register_machine
 from core.tracker import MemoryTracker, group_close_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
@@ -42,6 +42,12 @@ def main():
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     roi_manager = ROIManager(actual_w, actual_h, config_path="data/roi_config.json")
+
+    threading.Thread(
+        target=register_machine,
+        args=(args.machine,),
+        daemon=True,
+    ).start()
 
     threading.Thread(
         target=push_default_roi,
@@ -83,7 +89,6 @@ def main():
             bg_frozen = False
             continue
 
-        # frame = cv2.flip(frame, 1)
         now = time.time()
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
