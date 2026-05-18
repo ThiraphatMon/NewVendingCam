@@ -83,7 +83,7 @@ def main():
             bg_frozen = False
             continue
 
-        frame = cv2.flip(frame, 1)
+        # frame = cv2.flip(frame, 1)
         now = time.time()
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -116,6 +116,13 @@ def main():
         ]
 
         merged = group_close_boxes(raw_boxes, max_dist=GROUP_DIST)
+
+        # [BUG FIX 2] เลือกเฉพาะชิ้นใหญ่ที่สุดชิ้นเดียว
+        # ของจากตู้หล่นมาทีละชิ้น noise เล็กๆ ที่มาพร้อมกันให้มองข้าม
+        if merged:
+            biggest = max(merged, key=lambda b: b[2] * b[3])
+            merged = [biggest]
+
         detected = [(int(x + w / 2), int(y + h / 2), w, h) for x, y, w, h in merged]
         tracked = tracker.update(detected)
 
@@ -147,9 +154,16 @@ def main():
                 ):
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
                     break
-            if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
+
+            # ถ้า frame ว่างสนิท (ไม่มี tracked object เลย) → ของไม่ได้หล่นจริง
+            # reset กลับ IDLE ทันที ไม่ต้องรอ timeout เพื่อพร้อมรับของชิ้นใหม่
+            if not tracked:
+                print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+                do_reset()
+
+            elif sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
                 sm.trigger("timeout")
-                do_reset()  # ← ล้าง tracker + bg_frozen + bg_np ด้วย
+                do_reset()
 
         if sm.state == "EVIDENCE_CAPTURED":
             landed_obj = tracked.get(sm.land_obj_id)

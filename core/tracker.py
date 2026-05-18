@@ -8,6 +8,11 @@ EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 SHAPE_STABLE_FRAMES = 5
 SHAPE_SIZE_TOLERANCE = 0.20  # ขนาด w*h เปลี่ยนได้ไม่เกิน 20% จึงถือว่า stable
 
+# [BUG FIX 1] จำนวน frame ที่วัตถุหายไปแล้วยังคงรอก่อนลบ
+# ตั้งเป็น 0 = ลบทันทีที่หายออกจาก ROI (ไม่มีกรอบค้าง)
+# ตั้งเป็น 2-3 = tolerance เล็กน้อยเผื่อ noise กระพริบ 1-2 frame
+GHOST_FRAME_TOLERANCE = 2
+
 
 def group_close_boxes(boxes, max_dist=50):
     if not boxes:
@@ -81,10 +86,10 @@ class MemoryTracker:
 
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
+                # [BUG FIX 1] reset ghost counter เมื่อวัตถุกลับมาเจอแล้ว
+                obj["ghost_frames"] = 0
 
-                # ── [CHANGE 1] Shape stability check ────────────────────────────
-                # ไม่ใช้ STILL_DIST อีกต่อไปในการตัดสิน CONFIRMED_STOP
-                # ใช้การนับ frame ที่ขนาด bounding box เสถียรแทน
+                # Shape stability check
                 if obj["state"] != "CONFIRMED_STOP":
                     prev_area = old_w * old_h
                     curr_area = w * h
@@ -93,20 +98,15 @@ class MemoryTracker:
                         obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
                     else:
                         obj["shape_stable_count"] = 0
-                        if (
-                            obj.get("shape_confirmed_time") is None
-                        ):  # ยังไม่เคย confirm → reset ได้
+                        if obj.get("shape_confirmed_time") is None:
                             obj["state"] = "DETECTING"
-                        # ถ้า confirm แล้ว ไม่ถอยกลับเป็น DETECTING แม้ noise จะทำให้ shape เปลี่ยนชั่วคราว
 
                     if obj["shape_stable_count"] >= SHAPE_STABLE_FRAMES:
                         if obj.get("shape_confirmed_time") is None:
                             obj["shape_confirmed_time"] = current_time
-                        # ไม่ reset shape_confirmed_time ถ้า confirm แล้ว
                         obj["state"] = "SHAPE_CONFIRMED"
                     else:
                         obj["state"] = "DETECTING"
-                # ────────────────────────────────────────────────────────────────
 
                 new_objects[best_id] = obj
             else:
@@ -118,37 +118,38 @@ class MemoryTracker:
                     "first_seen": current_time,
                     "shape_stable_count": 0,
                     "shape_confirmed_time": None,
+                    "ghost_frames": 0,
                 }
                 self.next_id += 1
 
+        # [BUG FIX 1] จัดการวัตถุที่หายไปจาก detection frame นี้
         for obj_id in available:
             if obj_id in matched_ids:
-                continue
+                continue  # วัตถุยังอยู่ใน frame → จัดการแล้วข้างบน
+
             obj = self.objects[obj_id]
+
+            # วัตถุที่เพิ่งเกิดใหม่ไม่กี่ frame → ลบทิ้งทันที ไม่ต้องรอ
             if obj["state"] == "MOVING" and (current_time - obj["first_seen"]) < 0.5:
+                continue  # ลบออก (ไม่ใส่ใน new_objects)
+
+            # CONFIRMED_STOP: วัตถุที่ confirm แล้ว → อนุญาตให้ค้างไว้
+            # เพราะ state_machine กำลังจัดการอยู่ (จะถูกลบโดย do_reset())
+            if obj["state"] == "CONFIRMED_STOP":
+                new_objects[obj_id] = obj
                 continue
 
-            # Edge kill
-            cx, cy = obj["centroid"]
-            w, h = obj["shape"]
-            at_edge = (
-                cx - w // 2 <= EDGE_MARGIN
-                or cx + w // 2 >= FRAME_W - EDGE_MARGIN
-                or cy - h // 2 <= EDGE_MARGIN
-                or cy + h // 2 >= FRAME_H - EDGE_MARGIN
-            )
-            if at_edge and obj["state"] != "CONFIRMED_STOP":
+            # [BUG FIX 1 - หัวใจหลัก]
+            # วัตถุทั่วไปที่หายออกจาก ROI: นับ ghost frame
+            # ถ้าเกิน GHOST_FRAME_TOLERANCE → ลบทิ้งเลย ไม่มีกรอบค้าง
+            ghost_count = obj.get("ghost_frames", 0) + 1
+            if ghost_count > GHOST_FRAME_TOLERANCE:
+                # ลบออก — กรอบจะหายไปพร้อมของ
                 continue
 
-            # วัตถุหายออกจาก frame ชั่วคราว (noise) → เข้า WAITING countdown
-            if obj["state"] != "CONFIRMED_STOP":
-                if obj["still_start"] is None:
-                    obj["still_start"] = current_time
-                elapsed = current_time - obj["still_start"]
-                if elapsed >= CONFIRM_TIME:
-                    obj["state"] = "CONFIRMED_STOP"
-                else:
-                    obj["state"] = f"WAITING ({int(CONFIRM_TIME-elapsed)}s)"
+            # ยังอยู่ในช่วง tolerance → เก็บไว้ชั่วคราวแต่ไม่สร้าง WAITING state
+            obj["ghost_frames"] = ghost_count
+            obj["state"] = "DETECTING"  # ลดความสำคัญลง ไม่ใช่ WAITING อีกต่อไป
             new_objects[obj_id] = obj
 
         self.objects = new_objects
