@@ -13,6 +13,11 @@ def _headers():
 
 
 def post_event(payload, image_path=None):
+    """
+    ส่ง event ไปยัง server
+    return True  → ส่งสำเร็จ (status 200-299)
+    return False → ส่งไม่สำเร็จ (network error หรือ status อื่น)
+    """
     try:
         if image_path and os.path.exists(image_path):
             with open(image_path, "rb") as img_file:
@@ -31,9 +36,19 @@ def post_event(payload, image_path=None):
                 headers=_headers(),
                 timeout=10,
             )
+
         print(f"☁️ Cloud Response: {resp.status_code} - {resp.text}")
+
+        # ถือว่าสำเร็จเมื่อ status 2xx
+        if 200 <= resp.status_code < 300:
+            return True
+        else:
+            print(f"⚠️ Server ตอบกลับ status ผิดปกติ: {resp.status_code}")
+            return False
+
     except Exception as e:
-        print(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Golang ปิดอยู่): {e}")
+        print(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Server ปิดอยู่): {e}")
+        return False
 
 
 def register_machine(machine_id: str):

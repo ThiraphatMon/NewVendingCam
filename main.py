@@ -16,6 +16,7 @@ from config import (
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
+from api.retry_queue import start_retry_thread  # ← เพิ่ม import
 from core.tracker import MemoryTracker, group_close_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
@@ -34,6 +35,7 @@ def main():
     print(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
 
     start_cleanup_thread()
+    start_retry_thread()  # ← เพิ่มบรรทัดนี้
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
@@ -55,7 +57,6 @@ def main():
         daemon=True,
     ).start()
 
-    # ✅ ลบ PyTorch ออกทั้งหมด — ใช้ NumPy แทน เร็วกว่าบน Pi CPU มาก
     tracker = MemoryTracker()
     sm = VendingStateMachine()
     sm.machine_id = args.machine
@@ -70,7 +71,7 @@ def main():
 
     threading.Thread(target=roi_polling_task, daemon=True).start()
 
-    bg_np = None  # ✅ background เป็น NumPy array แทน Tensor
+    bg_np = None
     LR = 0.1
     MOT_THRESH = 25
     bg_frozen = False
@@ -93,7 +94,6 @@ def main():
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
-        # ✅ Background subtraction ด้วย NumPy/OpenCV ล้วนๆ — ไม่ต้องใช้ PyTorch
         if bg_np is None:
             bg_np = frame_gray.copy()
             continue
@@ -102,14 +102,13 @@ def main():
         fgmask = np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
 
         if not bg_frozen:
-            # weighted update: bg = (1-LR)*bg + LR*frame
             cv2.addWeighted(bg_np, 1 - LR, frame_gray, LR, 0, dst=bg_np)
 
         k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k5)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_DILATE, k5, iterations=2)
 
-        roi_manager.reload_if_changed()  # ✅ throttled — เช็คจริงแค่ทุก 5 วินาที
+        roi_manager.reload_if_changed()
         roi_mask = roi_manager.build_mask(fgmask.shape)
         fgmask = cv2.bitwise_and(fgmask, roi_mask)
 
@@ -122,8 +121,6 @@ def main():
 
         merged = group_close_boxes(raw_boxes, max_dist=GROUP_DIST)
 
-        # [BUG FIX 2] เลือกเฉพาะชิ้นใหญ่ที่สุดชิ้นเดียว
-        # ของจากตู้หล่นมาทีละชิ้น noise เล็กๆ ที่มาพร้อมกันให้มองข้าม
         if merged:
             biggest = max(merged, key=lambda b: b[2] * b[3])
             merged = [biggest]
@@ -160,8 +157,6 @@ def main():
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
                     break
 
-            # ถ้า frame ว่างสนิท (ไม่มี tracked object เลย) → ของไม่ได้หล่นจริง
-            # reset กลับ IDLE ทันที ไม่ต้องรอ timeout เพื่อพร้อมรับของชิ้นใหม่
             if not tracked:
                 print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
                 do_reset()
@@ -263,7 +258,6 @@ def main():
                 1,
             )
 
-        # ✅ imshow และ waitKey จะทำงานเฉพาะตอน HEADLESS=0 (ทดสอบบน PC)
         if not HEADLESS:
             cv2.imshow("Vending System", frame)
             cv2.imshow("Motion Mask", fgmask)
@@ -276,8 +270,6 @@ def main():
                 bg_np = None
                 bg_frozen = False
         else:
-            # Headless: ไม่มี waitKey → ต้องมีทางออกจาก loop บ้าง
-            # รองรับ SIGTERM จาก systemd หรือ kill ได้ตามปกติ
             pass
 
     cap.release()

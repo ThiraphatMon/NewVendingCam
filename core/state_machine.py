@@ -1,7 +1,8 @@
 import threading
 import time
+import os
 from datetime import datetime
-from api.client import post_event
+from api.retry_queue import send_or_queue  # ← เปลี่ยนจาก post_event
 from utils.image_saver import save_evidence_image
 
 
@@ -38,12 +39,9 @@ class VendingStateMachine:
                     )
                 self.state = "EVIDENCE_CAPTURED"
                 self.capture_time = now
-                print(
-                    f"[{self.machine_id}] 📸 ถ่ายรูปสำเร็จ! กำลังส่งไป Golang Server..."
-                )
+                print(f"[{self.machine_id}] 📸 ถ่ายรูปสำเร็จ! กำลังส่งไป Server...")
                 self._emit("ITEM_LANDED")
             elif event == "timeout":
-                # #3 emit ก่อน แล้วค่อย reset เพื่อให้ _emit ยังมี transaction_id ใช้งานได้
                 self.state = "NO_DROP"
                 self._emit("NO_DROP")
                 self.reset()
@@ -61,6 +59,14 @@ class VendingStateMachine:
             "transaction_id": self.transaction_id,
             "land_time": self._ts(self.land_time) if self.land_time else None,
         }
+
+        # ส่ง image_path ไปด้วยเฉพาะ ITEM_LANDED เพราะ NO_DROP ไม่มีรูป
+        image_path = self.land_img_path if event_type == "ITEM_LANDED" else None
+
+        # ใช้ thread เพื่อไม่บล็อก main loop
+        # send_or_queue จะจัดการลบรูป / เก็บ queue ให้เองอัตโนมัติ
         threading.Thread(
-            target=post_event, args=(payload, self.land_img_path), daemon=True
+            target=send_or_queue,
+            args=(payload, image_path),
+            daemon=True,
         ).start()
