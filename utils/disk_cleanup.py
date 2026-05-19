@@ -14,8 +14,8 @@ from utils.logger import get_logger
 logger = get_logger("disk_cleanup")
 
 IMAGE_DIR = "evidence_images"
-KEEP_DAYS = int(os.getenv("CLEANUP_KEEP_DAYS", "30"))
-CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "6"))
+KEEP_DAYS = int(os.getenv("CLEANUP_KEEP_DAYS", "3"))
+CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "1"))
 
 
 def _cleanup_once():
