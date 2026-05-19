@@ -45,7 +45,7 @@ def register_machine(machine_id: str):
     from datetime import datetime
 
     try:
-        transaction_id = datetime.now().strftime(f"BOOT-{machine_id}-%Y%m%d-%H%M%S")
+        transaction_id = datetime.now().strftime(f"TXN-%Y%m%d-%H%M%S-{machine_id}")
         payload = {
             "machine_id": machine_id,
             "event": "SYSTEM_ONLINE",
