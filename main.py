@@ -13,6 +13,7 @@ from config import (
     CONFIRMED_HOLD_TIMEOUT,
     MACHINE_ID,
     HEADLESS,
+    SEND_INTERVAL,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
@@ -22,6 +23,7 @@ from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.logger import get_logger
 from utils.disk_cleanup import start_cleanup_thread
+from api.sent_frame import send_frame
 
 logger = get_logger("main")
 
@@ -77,6 +79,8 @@ def main():
     bg_frozen = False
     RECONNECT_DELAY = 2
 
+    last_send_time = 0
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -91,6 +95,10 @@ def main():
             continue
 
         now = time.time()
+
+        if now - last_send_time >= SEND_INTERVAL:
+            send_frame(frame)
+            last_send_time = now
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
