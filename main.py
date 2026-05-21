@@ -96,9 +96,9 @@ def main():
 
         now = time.time()
 
-        if now - last_send_time >= SEND_INTERVAL:
-            send_frame(frame)
-            last_send_time = now
+        # if now - last_send_time >= SEND_INTERVAL:
+        #     send_frame(frame)
+        #     last_send_time = now
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
