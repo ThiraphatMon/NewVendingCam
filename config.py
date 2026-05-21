@@ -8,12 +8,12 @@ FRAME_W = 640
 FRAME_H = 480
 MIN_AREA = 150
 GROUP_DIST = 100
-CONFIRM_TIME = 1.0
-DROP_TIMEOUT = 10.0
+CONFIRM_TIME = 1.5
+DROP_TIMEOUT = 60.0
 
 # ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED
 # ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป
-CONFIRMED_HOLD_TIMEOUT = 1  # วินาที (ปรับได้)
+CONFIRMED_HOLD_TIMEOUT = 20  # วินาที (ปรับได้)
 
 MACHINE_ID = os.getenv("MACHINE_ID_DEFAULT", "VENDING_01")
 CLOUD_API_URL = os.getenv("CLOUD_API_URL")

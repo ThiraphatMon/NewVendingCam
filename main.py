@@ -16,7 +16,7 @@ from config import (
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
-from api.retry_queue import start_retry_thread  # ← เพิ่ม import
+from api.retry_queue import start_retry_thread
 from core.tracker import MemoryTracker, group_close_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
@@ -35,7 +35,7 @@ def main():
     print(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
 
     start_cleanup_thread()
-    start_retry_thread()  # ← เพิ่มบรรทัดนี้
+    start_retry_thread()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
@@ -119,11 +119,12 @@ def main():
             cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > MIN_AREA
         ]
 
+        # ── MULTI-ITEM: ไม่ตัดเหลือแค่ชิ้นเดียวอีกต่อไป ──────────────────────
+        # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)
+        # แต่ถ้ามีหลายกลุ่มที่ห่างกัน → เก็บทุกกลุ่มไว้เป็น candidate แยกกัน
         merged = group_close_boxes(raw_boxes, max_dist=GROUP_DIST)
-
-        if merged:
-            biggest = max(merged, key=lambda b: b[2] * b[3])
-            merged = [biggest]
+        # ลบ biggest-only filter ออก → รักษาทุก merged box
+        # ─────────────────────────────────────────────────────────────────────
 
         detected = [(int(x + w / 2), int(y + h / 2), w, h) for x, y, w, h in merged]
         tracked = tracker.update(detected)
@@ -142,60 +143,88 @@ def main():
             bg_np = None
             print("🌅 Background UNFROZEN — กลับสู่ IDLE")
 
+        # ── IDLE: ตรวจพบการเคลื่อนไหว ──────────────────────────────────────
         if motion_in_roi and sm.state == "IDLE":
             if not bg_frozen:
                 bg_frozen = True
                 print("🧊 Background FROZEN — พบวัตถุใน ROI")
             sm.trigger("motion_in_ROI")
 
-        if sm.state == "DROP_DETECTED":
+        # ── DROP_DETECTED / EVIDENCE_CAPTURED: จับของแต่ละชิ้น ─────────────
+        if sm.state in ("DROP_DETECTED", "EVIDENCE_CAPTURED"):
             for obj_id, obj in tracked.items():
+                # ข้ามของที่จับไปแล้ว
+                if sm.is_obj_captured(obj_id):
+                    continue
+
+                # ของที่ shape stable แล้วและค้างอยู่นานพอ → capture
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
                     and (now - obj.get("shape_confirmed_time", now)) >= CONFIRM_TIME
                 ):
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
-                    break
 
-            if not tracked:
-                print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
-                do_reset()
-
-            elif sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
+            # ── ตรวจ timeout ─────────────────────────────────────────────
+            if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
                 sm.trigger("timeout")
                 do_reset()
 
+            # ── ไม่มีของค้างใน ROI เลย → reset ──────────────────────────
+            elif not tracked:
+                print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+                do_reset()
+
+        # ── EVIDENCE_CAPTURED: แสดงผลและรอ reset อัตโนมัติ ─────────────────
         if sm.state == "EVIDENCE_CAPTURED":
-            landed_obj = tracked.get(sm.land_obj_id)
-            hold_elapsed = now - sm.capture_time
+            all_gone = True
+            for obj_id, item_info in sm.captured_items.items():
+                landed_obj = tracked.get(obj_id)
+                if landed_obj:
+                    all_gone = False
+                    # วาดกรอบสีเขียว (confirmed)
+                    cx, cy = landed_obj["centroid"]
+                    w, h = landed_obj["shape"]
+                    latest_land = max(
+                        sm.captured_items.values(), key=lambda i: i["land_time"]
+                    )["land_time"]
+                    hold_elapsed = now - latest_land
+                    time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
+                    cv2.rectangle(
+                        frame,
+                        (cx - w // 2, cy - h // 2),
+                        (cx + w // 2, cy + h // 2),
+                        (0, 255, 0),
+                        3,
+                    )
+                    cv2.putText(
+                        frame,
+                        f"#{item_info['item_no']} CONFIRMED ({time_left:.0f}s)",
+                        (cx - w // 2, cy - h // 2 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40,
+                        (0, 255, 0),
+                        1,
+                    )
 
-            if hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
-                print(f"⏰ Force reset หลังค้าง {CONFIRMED_HOLD_TIMEOUT}s")
-                do_reset()
-            elif landed_obj:
-                cx, cy = landed_obj["centroid"]
-                w, h = landed_obj["shape"]
-                time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
-                cv2.rectangle(
-                    frame,
-                    (cx - w // 2, cy - h // 2),
-                    (cx + w // 2, cy + h // 2),
-                    (0, 255, 0),
-                    3,
+            # force-reset: ทุก confirmed item หายจาก ROI ทั้งหมด
+            # หรือ hold timeout ของ item แรกเกินแล้ว
+            if sm.captured_items:
+                latest_item = max(
+                    sm.captured_items.values(), key=lambda i: i["land_time"]
                 )
-                cv2.putText(
-                    frame,
-                    f"CONFIRMED  (auto-reset {time_left:.0f}s)",
-                    (cx - w // 2, cy - h // 2 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.40,
-                    (0, 255, 0),
-                    1,
-                )
-            else:
-                print("✅ วัตถุออกจาก ROI → RESET")
+                hold_elapsed = now - latest_item["land_time"]
+                if hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
+                    n = sm.item_count()
+                    print(
+                        f"⏰ Force reset — จับของได้ {n} ชิ้น "
+                        f"(txn={sm.transaction_id})"
+                    )
+                    do_reset()
+            elif all_gone:
+                print("✅ ของออกจาก ROI ทั้งหมด → RESET")
                 do_reset()
 
+        # ── วาด ROI + state badge ───────────────────────────────────────────
         roi_manager.draw(frame)
         color = (
             (0, 255, 0)
@@ -214,6 +243,19 @@ def main():
                 1,
             )
 
+        # item count badge (แสดงเฉพาะตอนกำลังจับของ)
+        if sm.state != "IDLE" and sm.item_count() > 0:
+            badge = f"Items: {sm.item_count()}"
+            cv2.putText(
+                frame,
+                badge,
+                (10, actual_h - 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 200),
+                1,
+            )
+
         cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
         cv2.putText(
             frame,
@@ -225,6 +267,7 @@ def main():
             2,
         )
 
+        # ── วาดกรอบ tracked objects ที่ยังไม่ confirmed ─────────────────────
         sc = {
             "CONFIRMED_STOP": (0, 255, 0),
             "SHAPE_CONFIRMED": (0, 255, 0),
@@ -233,7 +276,8 @@ def main():
         }
 
         for obj_id, obj in tracked.items():
-            if sm.state == "EVIDENCE_CAPTURED" and obj_id == sm.land_obj_id:
+            # ข้ามของที่ confirmed แล้ว (วาดไปแล้วด้านบน)
+            if sm.is_obj_captured(obj_id):
                 continue
             cx, cy = obj["centroid"]
             w, h = obj["shape"]
