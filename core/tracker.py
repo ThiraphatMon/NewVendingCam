@@ -15,22 +15,38 @@ GHOST_FRAME_TOLERANCE = 2
 
 
 def group_close_boxes(boxes, max_dist=50):
+    """
+    Merge bounding boxes that actually OVERLAP each other (or touch within
+    OVERLAP_PAD pixels).  Boxes that are merely *near* each other but do
+    not intersect are kept separate — this prevents two distinct falling
+    items from being merged into one giant box when they fly close together.
+
+    max_dist parameter is kept for API compatibility but is no longer used
+    as the merge criterion; use OVERLAP_PAD below to control the tolerance.
+    """
     if not boxes:
         return []
+
+    # How many pixels of gap are still treated as "touching / same object".
+    # Set to 0 to merge only truly overlapping boxes.
+    # Increase slightly (e.g. 4-8) to handle 1-pixel noise between contours
+    # of the same physical item.
+    OVERLAP_PAD = 4
+
     rects = [[b[0], b[1], b[0] + b[2], b[1] + b[3]] for b in boxes]
 
-    def box_dist(r1, r2):
-        dx = max(0, max(r1[0], r2[0]) - min(r1[2], r2[2]))
-        dy = max(0, max(r1[1], r2[1]) - min(r1[3], r2[3]))
-        return math.hypot(dx, dy)
+    def overlaps(r1, r2):
+        """Return True if two rects overlap (or are within OVERLAP_PAD pixels)."""
+        return (
+            r1[0] - OVERLAP_PAD < r2[2]
+            and r1[2] + OVERLAP_PAD > r2[0]
+            and r1[1] - OVERLAP_PAD < r2[3]
+            and r1[3] + OVERLAP_PAD > r2[1]
+        )
 
     groups = []
     for r in rects:
-        matched = [
-            i
-            for i, g in enumerate(groups)
-            if any(box_dist(r, gr) < max_dist for gr in g)
-        ]
+        matched = [i for i, g in enumerate(groups) if any(overlaps(r, gr) for gr in g)]
         if not matched:
             groups.append([r])
         else:
@@ -38,6 +54,7 @@ def group_close_boxes(boxes, max_dist=50):
             for i in reversed(matched):
                 new_g.extend(groups.pop(i))
             groups.append(new_g)
+
     return [
         (
             min(r[0] for r in g),
