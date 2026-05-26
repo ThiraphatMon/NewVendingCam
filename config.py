@@ -13,6 +13,8 @@ DROP_TIMEOUT = 25.0
 
 # ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED
 # ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป
+# ปรับเป็น 0.1 วินาที เพื่อเป็นการ track ทุก event / motion ที่เกิดขึ้น
+# ปรับเป็น 15 วินาที เพื่อเป็น default ของ การตกค้างของสิ่งของ
 CONFIRMED_HOLD_TIMEOUT = 15  # วินาที (ปรับได้)
 
 MACHINE_ID = os.getenv("MACHINE_ID_DEFAULT", "VENDING_01")
