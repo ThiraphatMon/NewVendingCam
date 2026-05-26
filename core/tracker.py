@@ -13,10 +13,36 @@ SHAPE_SIZE_TOLERANCE = 0.20  # ขนาด w*h เปลี่ยนได้�
 # ตั้งเป็น 2-3 = tolerance เล็กน้อยเผื่อ noise กระพริบ 1-2 frame
 GHOST_FRAME_TOLERANCE = 2
 
+# [BUG FIX: กรอบ CONFIRMED ค้าง]
+# จำนวน frame ที่ object ซึ่ง confirmed แล้ว (CONFIRMED_STOP) หายจาก ROI
+# ก่อนจะถือว่า "ของออกไปจริง" และลบทิ้ง
+# ของ confirmed มักนิ่งอยู่กับที่ → motion mask อาจกระพริบหายเป็นบางจังหวะ
+# จึงให้ tolerance สูงกว่า object ทั่วไปเล็กน้อย แต่ต้องลบได้ในที่สุด
+# (ห้ามตั้งสูงเกินไป ไม่งั้นกรอบเขียวจะค้างนานหลังของออกจาก ROI)
+CONFIRMED_GHOST_FRAME_TOLERANCE = 5
+
 # [FIX: CONFIRMED BOX EXPANSION]
 # threshold การขยายของกรอบ confirmed object (เทียบกับ confirmed_shape)
 # ถ้ากรอบขยายเกินนี้ → สงสัยว่ามีของใหม่มาเกาะ
 CONFIRMED_EXPAND_RATIO = 1.35  # กรอบขยายเกิน 35% → สงสัย
+
+# [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
+# ของที่ confirmed แล้ว = วางนิ่งสนิท centroid แทบไม่ขยับ
+# ถ้ากล่องที่ detect ได้มี centroid ขยับจาก confirmed_centroid เกินค่านี้
+# → ถือว่าไม่ใช่ของชิ้นเดิม (เป็นมือที่เข้ามาหยิบ หรือของถูกดันออก)
+# → ไม่ match กลับเข้า id เดิม ปล่อยให้ของ confirmed กลายเป็น ghost ตามปกติ
+# หน่วย: pixel  (ตั้งต่ำ = ไวต่อการขยับ, ตั้งสูง = ทนต่อ noise centroid มากขึ้น)
+CONFIRMED_DRIFT_TOLERANCE = 60
+
+# [BUG FIX: ก้อนผีค้างใน motion mask]
+# หลังหยิบของ confirmed ออก artifact จากแสง/เงา/auto-exposure อาจทำให้เกิด
+# blob เล็กๆ ค้างตรงจุดที่ของเคยวาง — tracker จะ match blob นี้กลับเข้า
+# id เดิม ทำให้ ghost_frames ไม่ขึ้น กรอบเขียวค้าง
+# วิธีแยก: blob ผีมักเล็กกว่าตัวของจริงมาก เทียบกับ confirmed_shape
+# ถ้า detect blob จริง (ก่อนพยุงขนาด) เล็กกว่า ratio นี้ = สงสัยว่าเป็นผี
+CONFIRMED_SHRINK_RATIO = 0.45  # blob เหลือ < 45% ของขนาด confirmed → สงสัย
+# จำนวนเฟรมติดต่อกันที่ blob เล็กผิดปกติ ก่อนตัดสินว่าของออกไปแล้ว (เหลือแต่ผี)
+CONFIRMED_SHRINK_FRAMES = 4
 # ระยะเวลา (วินาที) ที่กรอบต้องขยายค้างอยู่ก่อนจะตัดสินว่าเป็นของใหม่
 # ใช้ค่าเดียวกับ CONFIRM_TIME เพื่อให้ consistent กับ logic ปกติ
 CONFIRMED_EXPAND_CONFIRM_TIME = CONFIRM_TIME
@@ -89,6 +115,9 @@ class MemoryTracker:
         if obj_id in self.objects:
             obj = self.objects[obj_id]
             obj["confirmed_shape"] = obj["shape"]  # snapshot ณ ตอน confirm
+            # [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
+            # snapshot centroid ไว้เป็น baseline ตรวจการขยับผิดปกติ
+            obj["confirmed_centroid"] = obj["centroid"]
             obj["expand_since"] = None  # เริ่มต้นยังไม่ขยาย
             obj["state"] = "CONFIRMED_STOP"
             self._confirmed_ids.add(obj_id)
@@ -118,6 +147,21 @@ class MemoryTracker:
                         ccw, cch = self.objects[obj_id]["confirmed_shape"]
                         if (w * h) > (ccw * cch * CONFIRMED_EXPAND_RATIO):
                             continue
+
+                    # [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
+                    # ของ confirmed วางนิ่งสนิท — ถ้ากล่องนี้มี centroid ขยับ
+                    # ห่างจาก confirmed_centroid เกิน tolerance แสดงว่าไม่ใช่
+                    # ของชิ้นเดิม (มือเข้ามาหยิบ / ของถูกดันออก)
+                    # → ไม่ match ปล่อยให้ของ confirmed นับ ghost แล้วหายไป
+                    if (
+                        obj_id in self._confirmed_ids
+                        and "confirmed_centroid" in self.objects[obj_id]
+                    ):
+                        ccx, ccy = self.objects[obj_id]["confirmed_centroid"]
+                        drift = math.hypot(cx - ccx, cy - ccy)
+                        if drift > CONFIRMED_DRIFT_TOLERANCE:
+                            continue
+
                     min_dist, best_id = d, obj_id
 
             if best_id is not None:
@@ -126,6 +170,19 @@ class MemoryTracker:
                 px, py = obj["centroid"]
                 old_w, old_h = obj["shape"]
                 dist = math.hypot(cx - px, cy - py)
+
+                # [BUG FIX: ก้อนผีค้างใน motion mask]
+                # ตรวจขนาด blob "จริง" ที่ detect ได้ (w,h ก่อนถูกพยุง) เทียบ
+                # confirmed_shape — ทำ "ก่อน" บรรทัดพยุงขนาดด้านล่าง เพราะ
+                # บรรทัดนั้นจะ override w,h กลับเป็นขนาดเดิมจนมองไม่เห็นการหด
+                if best_id in self._confirmed_ids and "confirmed_shape" in obj:
+                    cfw, cfh = obj["confirmed_shape"]
+                    raw_ratio = (w * h) / max(1, cfw * cfh)
+                    if raw_ratio < CONFIRMED_SHRINK_RATIO:
+                        # blob หดเล็กผิดปกติ — น่าจะเป็นเศษ artifact ไม่ใช่ของจริง
+                        obj["shrink_frames"] = obj.get("shrink_frames", 0) + 1
+                    else:
+                        obj["shrink_frames"] = 0
 
                 if (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
                     cx, cy, w, h, dist = px, py, old_w, old_h, 0
@@ -213,6 +270,20 @@ class MemoryTracker:
                     else:
                         obj["state"] = "DETECTING"
 
+                # [BUG FIX: ก้อนผีค้างใน motion mask]
+                # confirmed object ที่ blob หดเล็กผิดปกติติดต่อกันนานพอ
+                # = ของถูกหยิบออกไปแล้ว เหลือแต่เศษ artifact แสง/เงา
+                # → ไม่ใส่ใน new_objects (ลบทิ้ง) เพื่อให้ main.py reset ได้
+                if (
+                    best_id in self._confirmed_ids
+                    and obj.get("shrink_frames", 0) >= CONFIRMED_SHRINK_FRAMES
+                ):
+                    print(
+                        f"[Tracker] 👻 obj#{best_id} (CONFIRMED) blob หดเล็ก "
+                        f"{obj['shrink_frames']} เฟรมติด — ถือว่าของออกแล้ว ลบทิ้ง"
+                    )
+                    continue
+
                 new_objects[best_id] = obj
             else:
                 new_objects[self.next_id] = {
@@ -238,9 +309,25 @@ class MemoryTracker:
             if obj["state"] == "MOVING" and (current_time - obj["first_seen"]) < 0.5:
                 continue  # ลบออก (ไม่ใส่ใน new_objects)
 
-            # CONFIRMED_STOP: วัตถุที่ confirm แล้ว → อนุญาตให้ค้างไว้
-            # เพราะ state_machine กำลังจัดการอยู่ (จะถูกลบโดย do_reset())
+            # [BUG FIX: กรอบ CONFIRMED ค้าง]
+            # CONFIRMED_STOP: ของที่ confirm แล้วก็ต้องนับ ghost frame ด้วย
+            # เดิม: เก็บค้างไว้ตลอด → main.is_really_gone() เห็น ghost_frames=0
+            #       เสมอ → กรอบเขียวค้างจนกว่าจะ force-reset โดย hold timeout
+            # ใหม่: นับ ghost frame เหมือน object ทั่วไป (แต่ tolerance สูงกว่า)
+            #       - ยังอยู่ใน tolerance → เก็บไว้ + ตั้ง ghost_frames > 0
+            #         เพื่อให้ main.py รู้ว่า "ของกำลังหาย" (กรอบหยุดวาด/นับ gone)
+            #       - เกิน tolerance → ลบทิ้ง ของออกจาก ROI จริง
             if obj["state"] == "CONFIRMED_STOP":
+                ghost_count = obj.get("ghost_frames", 0) + 1
+                if ghost_count > CONFIRMED_GHOST_FRAME_TOLERANCE:
+                    # ของ confirmed หายจาก ROI นานพอ → ลบทิ้ง
+                    # (ไม่ใส่ใน new_objects → main.py จะ reset กลับ IDLE)
+                    print(
+                        f"[Tracker] 👋 obj#{obj_id} (CONFIRMED) "
+                        f"หายจาก ROI ครบ {ghost_count} frame → ลบทิ้ง"
+                    )
+                    continue
+                obj["ghost_frames"] = ghost_count
                 new_objects[obj_id] = obj
                 continue
 
