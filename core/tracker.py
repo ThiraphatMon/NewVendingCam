@@ -13,6 +13,14 @@ SHAPE_SIZE_TOLERANCE = 0.20  # ขนาด w*h เปลี่ยนได้�
 # ตั้งเป็น 2-3 = tolerance เล็กน้อยเผื่อ noise กระพริบ 1-2 frame
 GHOST_FRAME_TOLERANCE = 2
 
+# [FIX: CONFIRMED BOX EXPANSION]
+# threshold การขยายของกรอบ confirmed object (เทียบกับ confirmed_shape)
+# ถ้ากรอบขยายเกินนี้ → สงสัยว่ามีของใหม่มาเกาะ
+CONFIRMED_EXPAND_RATIO = 1.35  # กรอบขยายเกิน 35% → สงสัย
+# ระยะเวลา (วินาที) ที่กรอบต้องขยายค้างอยู่ก่อนจะตัดสินว่าเป็นของใหม่
+# ใช้ค่าเดียวกับ CONFIRM_TIME เพื่อให้ consistent กับ logic ปกติ
+CONFIRMED_EXPAND_CONFIRM_TIME = CONFIRM_TIME
+
 
 def group_close_boxes(boxes, max_dist=50):
     """
@@ -70,6 +78,20 @@ class MemoryTracker:
     def __init__(self):
         self.next_id = 1
         self.objects = {}
+        # set ของ obj_id ที่ confirmed แล้ว → ใช้ตรวจการขยายกรอบ
+        self._confirmed_ids: set = set()
+
+    def mark_confirmed(self, obj_id: int):
+        """
+        เรียกจาก main loop ทันทีหลัง state_machine capture ของชิ้นนั้น
+        บันทึก confirmed_shape ไว้เป็น baseline สำหรับตรวจการขยาย
+        """
+        if obj_id in self.objects:
+            obj = self.objects[obj_id]
+            obj["confirmed_shape"] = obj["shape"]  # snapshot ณ ตอน confirm
+            obj["expand_since"] = None  # เริ่มต้นยังไม่ขยาย
+            obj["state"] = "CONFIRMED_STOP"
+            self._confirmed_ids.add(obj_id)
 
     def update(self, detected_boxes):
         new_objects = {}
@@ -105,6 +127,57 @@ class MemoryTracker:
                 obj["shape"] = (w, h)
                 # [BUG FIX 1] reset ghost counter เมื่อวัตถุกลับมาเจอแล้ว
                 obj["ghost_frames"] = 0
+
+                # [FIX: CONFIRMED BOX EXPANSION]
+                # ถ้า object นี้ confirmed แล้ว → ตรวจดูว่ากรอบขยายผิดปกติหรือไม่
+                if best_id in self._confirmed_ids and "confirmed_shape" in obj:
+                    cw, ch = obj["confirmed_shape"]
+                    confirmed_area = cw * ch
+                    current_area = w * h
+                    expand_ratio = current_area / max(1, confirmed_area)
+
+                    if expand_ratio >= CONFIRMED_EXPAND_RATIO:
+                        # กรอบขยายผิดปกติ — เริ่มจับเวลา
+                        if obj["expand_since"] is None:
+                            obj["expand_since"] = current_time
+                            print(
+                                f"[Tracker] ⚠️ obj#{best_id} กรอบขยาย "
+                                f"{expand_ratio:.2f}x → เริ่มจับเวลา"
+                            )
+                        else:
+                            expand_duration = current_time - obj["expand_since"]
+                            if expand_duration >= CONFIRMED_EXPAND_CONFIRM_TIME:
+                                # ขยายค้างนานพอ → ถือว่ามีของใหม่ฝังอยู่ในกรอบ
+                                # สร้าง object ใหม่ตรงตำแหน่ง centroid ปัจจุบัน
+                                new_id = self.next_id
+                                self.next_id += 1
+                                # ประมาณขนาดของใหม่ = ส่วนที่เกินจาก confirmed_shape
+                                # ใช้ขนาด confirmed เดิมเป็น fallback
+                                new_w = max(cw, w - cw)
+                                new_h = max(ch, h - ch)
+                                new_objects[new_id] = {
+                                    "centroid": (cx, cy),
+                                    "shape": (new_w, new_h),
+                                    "state": "SHAPE_CONFIRMED",
+                                    "still_start": None,
+                                    "first_seen": current_time,
+                                    "shape_stable_count": SHAPE_STABLE_FRAMES,
+                                    "shape_confirmed_time": current_time
+                                    - CONFIRMED_EXPAND_CONFIRM_TIME,
+                                    "ghost_frames": 0,
+                                }
+                                print(
+                                    f"[Tracker] 🆕 obj#{new_id} เกิดใหม่จากการขยายกรอบ "
+                                    f"ของ obj#{best_id} (expand={expand_ratio:.2f}x "
+                                    f"นาน {expand_duration:.1f}s)"
+                                )
+                                # reset expand timer ของชิ้นเดิมเพื่อไม่ trigger ซ้ำ
+                                obj["expand_since"] = None
+                                obj["confirmed_shape"] = obj["shape"]
+                    else:
+                        # กรอบหดกลับมาปกติแล้ว → reset timer
+                        if obj["expand_since"] is not None:
+                            obj["expand_since"] = None
 
                 # Shape stability check
                 if obj["state"] != "CONFIRMED_STOP":
@@ -174,6 +247,7 @@ class MemoryTracker:
 
     def clear_all(self):
         self.objects.clear()
+        self._confirmed_ids.clear()
         # ✅ ไม่ reset next_id กลับเป็น 1
         # เพราะถ้า reset แล้ว object ใหม่จะได้ id ซ้ำกับที่ sm.land_obj_id จำอยู่
         # ทำให้ของชิ้นใหม่ถูก skip โดยไม่ตั้งใจ

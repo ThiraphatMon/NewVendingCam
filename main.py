@@ -171,6 +171,10 @@ def main():
                     and (now - obj.get("shape_confirmed_time", now)) >= CONFIRM_TIME
                 ):
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
+                    # [FIX: CONFIRMED BOX EXPANSION]
+                    # แจ้ง tracker ว่า obj นี้ confirmed แล้ว
+                    # เพื่อเริ่มตรวจการขยายกรอบผิดปกติ
+                    tracker.mark_confirmed(obj_id)
 
             # ── ตรวจ timeout ─────────────────────────────────────────────
             if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
