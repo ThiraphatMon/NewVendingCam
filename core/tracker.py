@@ -33,16 +33,6 @@ CONFIRMED_EXPAND_RATIO = 1.35  # กรอบขยายเกิน 35% → �
 # → ไม่ match กลับเข้า id เดิม ปล่อยให้ของ confirmed กลายเป็น ghost ตามปกติ
 # หน่วย: pixel  (ตั้งต่ำ = ไวต่อการขยับ, ตั้งสูง = ทนต่อ noise centroid มากขึ้น)
 CONFIRMED_DRIFT_TOLERANCE = 60
-
-# [BUG FIX: ก้อนผีค้างใน motion mask]
-# หลังหยิบของ confirmed ออก artifact จากแสง/เงา/auto-exposure อาจทำให้เกิด
-# blob เล็กๆ ค้างตรงจุดที่ของเคยวาง — tracker จะ match blob นี้กลับเข้า
-# id เดิม ทำให้ ghost_frames ไม่ขึ้น กรอบเขียวค้าง
-# วิธีแยก: blob ผีมักเล็กกว่าตัวของจริงมาก เทียบกับ confirmed_shape
-# ถ้า detect blob จริง (ก่อนพยุงขนาด) เล็กกว่า ratio นี้ = สงสัยว่าเป็นผี
-CONFIRMED_SHRINK_RATIO = 0.45  # blob เหลือ < 45% ของขนาด confirmed → สงสัย
-# จำนวนเฟรมติดต่อกันที่ blob เล็กผิดปกติ ก่อนตัดสินว่าของออกไปแล้ว (เหลือแต่ผี)
-CONFIRMED_SHRINK_FRAMES = 4
 # ระยะเวลา (วินาที) ที่กรอบต้องขยายค้างอยู่ก่อนจะตัดสินว่าเป็นของใหม่
 # ใช้ค่าเดียวกับ CONFIRM_TIME เพื่อให้ consistent กับ logic ปกติ
 CONFIRMED_EXPAND_CONFIRM_TIME = CONFIRM_TIME
@@ -171,19 +161,6 @@ class MemoryTracker:
                 old_w, old_h = obj["shape"]
                 dist = math.hypot(cx - px, cy - py)
 
-                # [BUG FIX: ก้อนผีค้างใน motion mask]
-                # ตรวจขนาด blob "จริง" ที่ detect ได้ (w,h ก่อนถูกพยุง) เทียบ
-                # confirmed_shape — ทำ "ก่อน" บรรทัดพยุงขนาดด้านล่าง เพราะ
-                # บรรทัดนั้นจะ override w,h กลับเป็นขนาดเดิมจนมองไม่เห็นการหด
-                if best_id in self._confirmed_ids and "confirmed_shape" in obj:
-                    cfw, cfh = obj["confirmed_shape"]
-                    raw_ratio = (w * h) / max(1, cfw * cfh)
-                    if raw_ratio < CONFIRMED_SHRINK_RATIO:
-                        # blob หดเล็กผิดปกติ — น่าจะเป็นเศษ artifact ไม่ใช่ของจริง
-                        obj["shrink_frames"] = obj.get("shrink_frames", 0) + 1
-                    else:
-                        obj["shrink_frames"] = 0
-
                 if (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
                     cx, cy, w, h, dist = px, py, old_w, old_h, 0
                 else:
@@ -269,20 +246,6 @@ class MemoryTracker:
                         obj["state"] = "SHAPE_CONFIRMED"
                     else:
                         obj["state"] = "DETECTING"
-
-                # [BUG FIX: ก้อนผีค้างใน motion mask]
-                # confirmed object ที่ blob หดเล็กผิดปกติติดต่อกันนานพอ
-                # = ของถูกหยิบออกไปแล้ว เหลือแต่เศษ artifact แสง/เงา
-                # → ไม่ใส่ใน new_objects (ลบทิ้ง) เพื่อให้ main.py reset ได้
-                if (
-                    best_id in self._confirmed_ids
-                    and obj.get("shrink_frames", 0) >= CONFIRMED_SHRINK_FRAMES
-                ):
-                    print(
-                        f"[Tracker] 👻 obj#{best_id} (CONFIRMED) blob หดเล็ก "
-                        f"{obj['shrink_frames']} เฟรมติด — ถือว่าของออกแล้ว ลบทิ้ง"
-                    )
-                    continue
 
                 new_objects[best_id] = obj
             else:

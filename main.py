@@ -79,6 +79,16 @@ def main():
     bg_frozen = False
     RECONNECT_DELAY = 2
 
+    # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
+    # หลัง do_reset() มือผู้ใช้อาจยังอยู่ในเฟรม ถ้า bg_np = None ทันที
+    # เฟรมถัดไปจะ snapshot มือเป็น background ใหม่ → พอมือถอยออกกลายเป็น blob
+    # แก้: ไม่ล้าง bg_np แต่ unfreeze ให้ re-learn ช้าๆ + ล็อก grace period
+    # ระหว่าง grace period ห้าม trigger DROP_DETECTED ใหม่
+    # เพื่อให้ background ดูดมือเข้าไปก่อน แล้วค่อยรับ motion ใหม่
+    RESET_GRACE_PERIOD = 1.5  # วินาที (ปรับได้ถ้าต้องการ)
+    LR_RELEARN = 0.3  # learning rate เร็วขึ้นระหว่าง grace เพื่อดูดมือเข้า bg
+    reset_grace_until = 0.0  # timestamp สิ้นสุด grace period
+
     last_send_time = 0
 
     while True:
@@ -92,6 +102,7 @@ def main():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
             bg_np = None
             bg_frozen = False
+            reset_grace_until = 0.0
             continue
 
         now = time.time()
@@ -110,7 +121,10 @@ def main():
         fgmask = np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
 
         if not bg_frozen:
-            cv2.addWeighted(bg_np, 1 - LR, frame_gray, LR, 0, dst=bg_np)
+            # [BUG FIX] ระหว่าง grace period re-learn เร็วขึ้นเพื่อดูดมือเข้า background
+            # ก่อนที่ระบบจะเปิดรับ motion ใหม่
+            lr = LR_RELEARN if now < reset_grace_until else LR
+            cv2.addWeighted(bg_np, 1 - lr, frame_gray, lr, 0, dst=bg_np)
 
         k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k5)
@@ -146,17 +160,30 @@ def main():
         def do_reset():
             sm.reset()
             tracker.clear_all()
-            nonlocal bg_frozen, bg_np
+            nonlocal bg_frozen, bg_np, reset_grace_until
             bg_frozen = False
-            bg_np = None
-            print("🌅 Background UNFROZEN — กลับสู่ IDLE")
+            # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
+            # เดิม: bg_np = None → เฟรมถัดไป snapshot มือเป็น background ใหม่ทันที
+            # ใหม่: ไม่ล้าง bg_np แต่ unfreeze + ตั้ง grace period
+            #       ระหว่าง grace: re-learn เร็ว (LR_RELEARN) เพื่อดูดมือเข้า bg
+            #       ระหว่าง grace: ห้าม trigger DROP_DETECTED ใหม่
+            #       หลัง grace: กลับใช้ LR ปกติ พร้อมรับของชิ้นใหม่
+            reset_grace_until = now + RESET_GRACE_PERIOD
+            print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_PERIOD}s")
 
         # ── IDLE: ตรวจพบการเคลื่อนไหว ──────────────────────────────────────
         if motion_in_roi and sm.state == "IDLE":
-            if not bg_frozen:
-                bg_frozen = True
-                print("🧊 Background FROZEN — พบวัตถุใน ROI")
-            sm.trigger("motion_in_ROI")
+            # [BUG FIX] ระหว่าง grace period ห้าม trigger ใหม่
+            # มือที่กำลังถอยออกหลัง reset อาจทำให้ motion_in_roi = True
+            # ต้องรอให้ background ดูดมือเข้าไปก่อน
+            if now < reset_grace_until:
+                remaining = reset_grace_until - now
+                pass  # เงียบ (ไม่ print ทุกเฟรม)
+            else:
+                if not bg_frozen:
+                    bg_frozen = True
+                    print("🧊 Background FROZEN — พบวัตถุใน ROI")
+                sm.trigger("motion_in_ROI")
 
         # ── DROP_DETECTED / EVIDENCE_CAPTURED: จับของแต่ละชิ้น ─────────────
         if sm.state in ("DROP_DETECTED", "EVIDENCE_CAPTURED"):
@@ -165,15 +192,25 @@ def main():
                 if sm.is_obj_captured(obj_id):
                     continue
 
+                # [BUG FIX: มือถูก capture เป็นของ]
+                # ของที่ตกจากตู้: ตกลงมาเร็ว แล้วหยุดนิ่ง → อยู่ใน ROI นาน
+                # มือ: เข้ามา → หยิบ → ออก ไม่เคยอยู่นาน
+                # เงื่อนไข: object ต้องอยู่ใน ROI มาแล้วอย่างน้อย MIN_PRESENCE
+                # นับจาก first_seen ถึงปัจจุบัน ก่อนจึงจะ capture ได้
+                # ค่านี้ต้องมากกว่า CONFIRM_TIME เพื่อให้ครอบคลุม
+                # เวลา MOVING → DETECTING → SHAPE_CONFIRMED + รอ CONFIRM_TIME
+                # มือที่นิ่งสั้น ๆ แล้วออกจะไม่ผ่าน เพราะ presence รวมสั้นกว่า
+                MIN_PRESENCE = CONFIRM_TIME + 1.5  # วินาที (ปรับได้)
+                presence = now - obj.get("first_seen", now)
+                if presence < MIN_PRESENCE:
+                    continue
+
                 # ของที่ shape stable แล้วและค้างอยู่นานพอ → capture
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
                     and (now - obj.get("shape_confirmed_time", now)) >= CONFIRM_TIME
                 ):
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
-                    # [FIX: CONFIRMED BOX EXPANSION]
-                    # แจ้ง tracker ว่า obj นี้ confirmed แล้ว
-                    # เพื่อเริ่มตรวจการขยายกรอบผิดปกติ
                     tracker.mark_confirmed(obj_id)
 
             # ── ตรวจ timeout ─────────────────────────────────────────────
@@ -337,6 +374,7 @@ def main():
                 tracker.clear_all()
                 bg_np = None
                 bg_frozen = False
+                reset_grace_until = 0.0
         else:
             pass
 
