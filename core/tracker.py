@@ -1,6 +1,6 @@
 import math
 import time
-from config import CONFIRM_TIME, FRAME_W, FRAME_H
+from config import CONFIRM_TIME, FRAME_W, FRAME_H, SLAT_EXPAND_RATIO
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 
@@ -127,15 +127,23 @@ class MemoryTracker:
                 px, py = self.objects[obj_id]["centroid"]
                 d = math.hypot(cx - px, cy - py)
                 if d < 150 and d < min_dist:
-                    # [FIX: EXPANSION SPLIT] ถ้า box ที่ detect ได้ใหญ่กว่า
-                    # confirmed_shape เกิน threshold → ไม่ match กับ confirmed obj
-                    # เพื่อให้กลายเป็น object ใหม่แทน ไม่ถูกดูดกลับเข้า id เดิม
                     if (
                         obj_id in self._confirmed_ids
                         and "confirmed_shape" in self.objects[obj_id]
                     ):
                         ccw, cch = self.objects[obj_id]["confirmed_shape"]
-                        if (w * h) > (ccw * cch * CONFIRMED_EXPAND_RATIO):
+                        confirmed_area = ccw * cch
+
+                        # [FIX: SLAT] ถ้า box ใหญ่กว่า confirmed_shape เกิน SLAT_EXPAND_RATIO
+                        # → ถือว่าเป็น slat หรือสิ่งบังขนาดใหญ่ ไม่ใช่ของชิ้นใหม่
+                        # → ไม่ match เลย ให้ confirmed item เข้า gone_since timer แทน
+                        if (w * h) > (confirmed_area * SLAT_EXPAND_RATIO):
+                            continue
+
+                        # [FIX: EXPANSION SPLIT] ถ้า box ที่ detect ได้ใหญ่กว่า
+                        # confirmed_shape เกิน threshold → ไม่ match กับ confirmed obj
+                        # เพื่อให้กลายเป็น object ใหม่แทน ไม่ถูกดูดกลับเข้า id เดิม
+                        if (w * h) > (confirmed_area * CONFIRMED_EXPAND_RATIO):
                             continue
 
                     # [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]

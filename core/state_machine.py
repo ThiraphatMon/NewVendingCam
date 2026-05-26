@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from api.retry_queue import send_or_queue
 from utils.image_saver import save_evidence_image
+from config import CONFIRMED_ITEM_GONE_TIMEOUT
 
 
 class VendingStateMachine:
@@ -70,6 +71,7 @@ class VendingStateMachine:
             "land_time": now,
             "land_img_path": img_path,
             "item_no": item_no,
+            "gone_since": None,  # timestamp ที่ของหายจาก tracked (None = ยังอยู่)
         }
 
         # อัปเดต backward-compat fields (ชี้ไปที่ชิ้นล่าสุดเสมอ)
@@ -122,8 +124,62 @@ class VendingStateMachine:
         ).start()
 
     # ─────────────────────────────────────────────
+    # gone_since timer — ติดตามของที่หายจาก tracked
+    # ─────────────────────────────────────────────
+
+    def mark_gone(self, obj_id, now):
+        """
+        เรียกเมื่อ confirmed item หายจาก tracked (ถูกบัง/slat)
+        เริ่มนับ gone_since ถ้ายังไม่ได้นับ
+        """
+        if obj_id in self.captured_items:
+            item = self.captured_items[obj_id]
+            if item["gone_since"] is None:
+                item["gone_since"] = now
+                print(
+                    f"[{self.machine_id}] ⏳ item#{item['item_no']} (obj#{obj_id}) "
+                    f"หายจาก ROI — เริ่มนับ gone_timer"
+                )
+
+    def mark_seen(self, obj_id, now):
+        """
+        เรียกเมื่อ confirmed item กลับมาปรากฏใน tracked อีกครั้ง
+        - reset gone_since → ยังอยู่
+        - reset land_time → hold_timeout เริ่มนับใหม่ (รอลูกค้าหยิบรอบใหม่)
+        """
+        if obj_id in self.captured_items:
+            item = self.captured_items[obj_id]
+            if item["gone_since"] is not None:
+                gone_duration = now - item["gone_since"]
+                print(
+                    f"[{self.machine_id}] ✅ item#{item['item_no']} (obj#{obj_id}) "
+                    f"กลับมาปรากฏ (หายไป {gone_duration:.1f}s) — reset hold_timeout"
+                )
+                item["gone_since"] = None
+                # reset land_time → CONFIRMED_HOLD_TIMEOUT เริ่มนับใหม่
+                item["land_time"] = now
+
+    def check_all_gone(self, now):
+        """
+        คืน True ถ้าทุก confirmed item หายนานเกิน CONFIRMED_ITEM_GONE_TIMEOUT
+        → ถือว่าของถูกหยิบออกจริง → ควร reset
+        คืน False ถ้ายังมี item ที่ gone_since = None (ยังอยู่)
+        หรือ item ที่หายไปยังไม่ครบ timeout
+        """
+        if not self.captured_items:
+            return False
+        for obj_id, item in self.captured_items.items():
+            if item["gone_since"] is None:
+                return False  # ยังมีของที่เห็นอยู่
+            elapsed = now - item["gone_since"]
+            if elapsed < CONFIRMED_ITEM_GONE_TIMEOUT:
+                return False  # หายไปแต่ยังไม่ครบ timeout
+        return True  # ทุกชิ้นหายนานพอ → หายจริง
+
+    # ─────────────────────────────────────────────
     # helpers
     # ─────────────────────────────────────────────
+
     def reset(self):
         self._reset_fields()
 

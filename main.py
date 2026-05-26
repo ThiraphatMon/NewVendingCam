@@ -218,18 +218,32 @@ def main():
                 sm.trigger("timeout")
                 do_reset()
 
-            # ── ไม่มีของค้างใน ROI เลย → reset ──────────────────────────
+            # ── ไม่มีของค้างใน ROI เลย → ถ้ามี confirmed items ให้ gone_timer ทำงาน
             elif not tracked:
-                print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
-                do_reset()
+                if sm.state == "EVIDENCE_CAPTURED" and sm.captured_items:
+                    # slat อาจบัง ROI ทั้งหมดจนไม่มี detection
+                    # → mark ทุก confirmed item ว่าหายไป แล้วรอ gone_timer ตัดสิน
+                    for oid in sm.captured_items:
+                        sm.mark_gone(oid, now)
+                    if sm.check_all_gone(now):
+                        print("✅ ของออกจาก ROI ทั้งหมด (gone_timer) → RESET")
+                        do_reset()
+                else:
+                    print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+                    do_reset()
 
         # ── EVIDENCE_CAPTURED: แสดงผลและรอ reset อัตโนมัติ ─────────────────
         if sm.state == "EVIDENCE_CAPTURED":
             all_gone = True
             for obj_id, item_info in sm.captured_items.items():
                 landed_obj = tracked.get(obj_id)
-                # [FIX: กรอบค้าง] ไม่วาดกรอบถ้า obj อยู่ใน ghost period แล้ว
-                if landed_obj and landed_obj.get("ghost_frames", 0) == 0:
+                # วาดกรอบเฉพาะของที่ยังเห็นอยู่จริง (ไม่ใช่ ghost และ gone_since = None)
+                item_visible = (
+                    landed_obj is not None
+                    and landed_obj.get("ghost_frames", 0) == 0
+                    and item_info.get("gone_since") is None
+                )
+                if item_visible:
                     all_gone = False
                     # วาดกรอบสีเขียว (confirmed)
                     cx, cy = landed_obj["centroid"]
@@ -263,16 +277,19 @@ def main():
                 )
                 hold_elapsed = now - latest_item["land_time"]
 
-                # [FIX: กรอบค้าง] all_gone ต้องเช็ค ghost_frames ด้วย
-                # obj ที่อยู่ใน ghost period ยัง track อยู่ แต่ของออกจริงแล้ว
-                # ถือว่า "gone" ถ้า tracker ไม่เห็น หรือเห็นแต่เป็น ghost
-                def is_really_gone(obj_id):
-                    o = tracked.get(obj_id)
-                    if o is None:
-                        return True
-                    return o.get("ghost_frames", 0) > 0
+                # [FIX: gone_timer] อัปเดต gone_since ของแต่ละ confirmed item
+                # ตามสถานะที่ tracker เห็นในเฟรมนี้
+                # - item_visible → mark_seen → reset gone_since + reset land_time
+                # - ไม่เห็น → mark_gone → เริ่มนับ / ต่อ timer
+                for oid in list(sm.captured_items.keys()):
+                    o = tracked.get(oid)
+                    item_visible = o is not None and o.get("ghost_frames", 0) == 0
+                    if item_visible:
+                        sm.mark_seen(oid, now)
+                    else:
+                        sm.mark_gone(oid, now)
 
-                all_really_gone = all(is_really_gone(oid) for oid in sm.captured_items)
+                all_really_gone = sm.check_all_gone(now)
                 if all_really_gone:
                     n = sm.item_count()
                     print(f"✅ ของออกจาก ROI ทั้งหมด → RESET ({n} ชิ้น)")

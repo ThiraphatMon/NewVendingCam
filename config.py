@@ -17,6 +17,17 @@ DROP_TIMEOUT = 25.0
 # ปรับเป็น 15 วินาที เพื่อเป็น default ของ การตกค้างของสิ่งของ
 CONFIRMED_HOLD_TIMEOUT = 15  # วินาที (ปรับได้)
 
+# ระยะเวลาที่ confirmed item หายจาก ROI (ถูกบัง/slat) ก่อนจะถือว่าหายจริง
+# ถ้ากลับมาปรากฏก่อน timeout → ยังอยู่, reset hold timeout ใหม่
+# ตั้ง 5.0 วินาที = รองรับ slat เปิดนานสูงสุด ~5 วินาที
+CONFIRMED_ITEM_GONE_TIMEOUT = 5.0  # วินาที (ปรับได้)
+
+# อัตราส่วนขยายของกล่องที่ detect เทียบกับ confirmed_shape
+# ถ้าใหญ่กว่านี้ → ถือว่าเป็น slat หรือสิ่งบังขนาดใหญ่ ไม่ใช่ของชิ้นใหม่
+# ไม่ match กลับเข้า confirmed item → เริ่ม gone_since timer แทน
+# (แยกจาก CONFIRMED_EXPAND_RATIO ที่ใช้ตรวจของชิ้นใหม่มาทับ ~1.35x)
+SLAT_EXPAND_RATIO = 3.0  # เท่า (ปรับได้)
+
 MACHINE_ID = os.getenv("MACHINE_ID_DEFAULT", "VENDING_01")
 CLOUD_API_URL = os.getenv("CLOUD_API_URL")
 API_KEY = os.getenv("API_KEY", "")
