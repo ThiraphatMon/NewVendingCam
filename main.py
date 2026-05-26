@@ -191,7 +191,8 @@ def main():
             all_gone = True
             for obj_id, item_info in sm.captured_items.items():
                 landed_obj = tracked.get(obj_id)
-                if landed_obj:
+                # [FIX: กรอบค้าง] ไม่วาดกรอบถ้า obj อยู่ใน ghost period แล้ว
+                if landed_obj and landed_obj.get("ghost_frames", 0) == 0:
                     all_gone = False
                     # วาดกรอบสีเขียว (confirmed)
                     cx, cy = landed_obj["centroid"]
@@ -218,23 +219,34 @@ def main():
                         1,
                     )
 
-            # force-reset: ทุก confirmed item หายจาก ROI ทั้งหมด
-            # หรือ hold timeout ของ item แรกเกินแล้ว
+            # force-reset: ทุก confirmed item หายจาก ROI หรือ hold timeout เกิน
             if sm.captured_items:
                 latest_item = max(
                     sm.captured_items.values(), key=lambda i: i["land_time"]
                 )
                 hold_elapsed = now - latest_item["land_time"]
-                if hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
+
+                # [FIX: กรอบค้าง] all_gone ต้องเช็ค ghost_frames ด้วย
+                # obj ที่อยู่ใน ghost period ยัง track อยู่ แต่ของออกจริงแล้ว
+                # ถือว่า "gone" ถ้า tracker ไม่เห็น หรือเห็นแต่เป็น ghost
+                def is_really_gone(obj_id):
+                    o = tracked.get(obj_id)
+                    if o is None:
+                        return True
+                    return o.get("ghost_frames", 0) > 0
+
+                all_really_gone = all(is_really_gone(oid) for oid in sm.captured_items)
+                if all_really_gone:
+                    n = sm.item_count()
+                    print(f"✅ ของออกจาก ROI ทั้งหมด → RESET ({n} ชิ้น)")
+                    do_reset()
+                elif hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
                     n = sm.item_count()
                     print(
                         f"⏰ Force reset — จับของได้ {n} ชิ้น "
                         f"(txn={sm.transaction_id})"
                     )
                     do_reset()
-            elif all_gone:
-                print("✅ ของออกจาก ROI ทั้งหมด → RESET")
-                do_reset()
 
         # ── วาด ROI + state badge ───────────────────────────────────────────
         roi_manager.draw(frame)

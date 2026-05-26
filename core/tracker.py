@@ -108,6 +108,16 @@ class MemoryTracker:
                 px, py = self.objects[obj_id]["centroid"]
                 d = math.hypot(cx - px, cy - py)
                 if d < 150 and d < min_dist:
+                    # [FIX: EXPANSION SPLIT] ถ้า box ที่ detect ได้ใหญ่กว่า
+                    # confirmed_shape เกิน threshold → ไม่ match กับ confirmed obj
+                    # เพื่อให้กลายเป็น object ใหม่แทน ไม่ถูกดูดกลับเข้า id เดิม
+                    if (
+                        obj_id in self._confirmed_ids
+                        and "confirmed_shape" in self.objects[obj_id]
+                    ):
+                        ccw, cch = self.objects[obj_id]["confirmed_shape"]
+                        if (w * h) > (ccw * cch * CONFIRMED_EXPAND_RATIO):
+                            continue
                     min_dist, best_id = d, obj_id
 
             if best_id is not None:
@@ -180,7 +190,14 @@ class MemoryTracker:
                             obj["expand_since"] = None
 
                 # Shape stability check
-                if obj["state"] != "CONFIRMED_STOP":
+                # [FIX] ถ้า shape_confirmed_time ถูกตั้งไว้แล้ว (เช่น object ใหม่จาก
+                # expansion ที่ pre-confirmed มาแล้ว) → lock state เป็น SHAPE_CONFIRMED
+                # ไม่ให้ update() override กลับเป็น DETECTING ทุก frame
+                if obj["state"] == "CONFIRMED_STOP":
+                    pass  # CONFIRMED_STOP ไม่แตะ state
+                elif obj.get("shape_confirmed_time") is not None:
+                    obj["state"] = "SHAPE_CONFIRMED"  # lock ไว้
+                else:
                     prev_area = old_w * old_h
                     curr_area = w * h
                     area_ratio = abs(curr_area - prev_area) / max(1, prev_area)
@@ -188,12 +205,10 @@ class MemoryTracker:
                         obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
                     else:
                         obj["shape_stable_count"] = 0
-                        if obj.get("shape_confirmed_time") is None:
-                            obj["state"] = "DETECTING"
+                        obj["state"] = "DETECTING"
 
                     if obj["shape_stable_count"] >= SHAPE_STABLE_FRAMES:
-                        if obj.get("shape_confirmed_time") is None:
-                            obj["shape_confirmed_time"] = current_time
+                        obj["shape_confirmed_time"] = current_time
                         obj["state"] = "SHAPE_CONFIRMED"
                     else:
                         obj["state"] = "DETECTING"

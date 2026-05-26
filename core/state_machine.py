@@ -90,10 +90,14 @@ class VendingStateMachine:
     # emit helpers
     # ─────────────────────────────────────────────
     def _emit_item_landed(self, obj_id, land_time, image_path, item_no):
+        # [FIX: DUPLICATE] Server ใช้ transaction_id เป็น unique key
+        # item หลายชิ้นใน transaction เดียวกันจึงต้องได้ transaction_id ต่างกัน
+        # ใช้รูปแบบ TXN-...-item1, TXN-...-item2 เพื่อให้ยังเชื่อมกับ transaction หลักได้
+        item_transaction_id = f"{self.transaction_id}-item{item_no}"
         payload = {
             "machine_id": self.machine_id,
             "event": "ITEM_LANDED",
-            "transaction_id": self.transaction_id,
+            "transaction_id": item_transaction_id,
             "item_no": item_no,
             "obj_id": obj_id,
             "land_time": self._ts(land_time),
@@ -122,6 +126,21 @@ class VendingStateMachine:
     # ─────────────────────────────────────────────
     def reset(self):
         self._reset_fields()
+
+    def release_item(self, obj_id):
+        """
+        เอา item ที่ confirm แล้วออกจาก captured_items หลังของออก ROI
+        ไม่ reset transaction — ระบบยังพร้อมรับของชิ้นใหม่ใน EVIDENCE_CAPTURED
+        คืนค่า True ถ้า captured_items ว่างแล้ว (ของออกหมดแล้ว)
+        """
+        if obj_id in self.captured_items:
+            item_no = self.captured_items[obj_id]["item_no"]
+            del self.captured_items[obj_id]
+            print(
+                f"[{self.machine_id}] 👋 item#{item_no} (obj#{obj_id}) "
+                f"ออกจาก ROI แล้ว — released"
+            )
+        return len(self.captured_items) == 0
 
     def item_count(self):
         """จำนวนชิ้นที่จับได้ใน transaction นี้"""
