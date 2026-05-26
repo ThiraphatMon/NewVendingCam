@@ -8,8 +8,8 @@ FRAME_W = 640
 FRAME_H = 480
 MIN_AREA = 150
 GROUP_DIST = 100
-CONFIRM_TIME = 2
-DROP_TIMEOUT = 60.0
+CONFIRM_TIME = 1
+DROP_TIMEOUT = 25.0
 
 # ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED
 # ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป
