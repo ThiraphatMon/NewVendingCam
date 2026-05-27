@@ -13,7 +13,7 @@ from config import (
     CONFIRMED_HOLD_TIMEOUT,
     MACHINE_ID,
     HEADLESS,
-    SEND_INTERVAL,
+    # SEND_INTERVAL,
     MAX_BLOB_ROI_RATIO,
 )
 import threading
