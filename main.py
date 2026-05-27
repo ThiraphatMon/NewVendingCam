@@ -24,7 +24,8 @@ from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.logger import get_logger
 from utils.disk_cleanup import start_cleanup_thread
-from api.sent_frame import send_frame
+
+# from api.sent_frame import send_frame
 
 logger = get_logger("main")
 
