@@ -14,6 +14,7 @@ from config import (
     MACHINE_ID,
     HEADLESS,
     SEND_INTERVAL,
+    MAX_BLOB_ROI_RATIO,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
@@ -77,6 +78,7 @@ def main():
     LR = 0.1
     MOT_THRESH = 25
     bg_frozen = False
+    bg_frozen_snapshot = None  # snapshot ของ bg ตอนที่ freeze (ตอนเจอของชิ้นแรก)
     RECONNECT_DELAY = 2
 
     # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
@@ -102,6 +104,7 @@ def main():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
             bg_np = None
             bg_frozen = False
+            bg_frozen_snapshot = None
             reset_grace_until = 0.0
             continue
 
@@ -134,12 +137,63 @@ def main():
         roi_mask = roi_manager.build_mask(fgmask.shape)
         fgmask = cv2.bitwise_and(fgmask, roi_mask)
 
-        contours, _ = cv2.findContours(
-            fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        raw_boxes = [
-            cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > MIN_AREA
-        ]
+        # ── LARGE MOTION CHECK per-area (env change / แสง / bg เปลี่ยน) ────────
+        # ตรวจแต่ละ ROI area ว่า motion blob รวมใหญ่เกิน MAX_BLOB_ROI_RATIO หรือไม่
+        # ถ้าใหญ่เกิน → ถือว่าเป็น env change ไม่ใช่ของจริงที่ตก
+        large_motion_detected = False
+        roi_areas = roi_manager.get_roi_areas(fgmask.shape)
+        for roi_area in roi_areas:
+            area_fgmask = cv2.bitwise_and(fgmask, roi_area["mask"])
+            blob_px = int(cv2.countNonZero(area_fgmask))
+            if blob_px > roi_area["area_px"] * MAX_BLOB_ROI_RATIO:
+                large_motion_detected = True
+                print(
+                    f"⚡ Large motion detected — "
+                    f"blob={blob_px}px / roi={roi_area['area_px']}px "
+                    f"({blob_px / roi_area['area_px'] * 100:.0f}%) "
+                    f"→ env change"
+                )
+                break
+
+        if large_motion_detected:
+            if sm.state != "IDLE" and bg_frozen_snapshot is not None:
+                # restore bg กลับไปที่ตอน freeze เพื่อให้ของเดิมกลับมาเห็น
+                bg_np = bg_frozen_snapshot.copy()
+                print("🔄 BG restored to frozen snapshot")
+
+                # อัปเดต mark_seen สำหรับ confirmed items
+                for oid in list(sm.captured_items.keys()):
+                    sm.mark_seen(oid, now)
+
+                # large motion blob นี้ไม่ส่งเข้า tracker ต่อ
+                # แต่ยังให้ tracker update ด้วย detected ที่กรอง large blob ออกแล้ว
+                # → ของเดิมที่ track อยู่จะยังคงอยู่ใน tracker (ghost tolerance)
+            # ทั้ง IDLE และ non-IDLE → กรอง blob ที่ใหญ่เกิน threshold ออกจาก raw_boxes
+            # per-area: blob จะถูกกรองออกถ้ามันใหญ่เกิน threshold ของ area ที่มันอยู่
+            all_contours, _ = cv2.findContours(
+                fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            raw_boxes = []
+            for c in all_contours:
+                if cv2.contourArea(c) <= MIN_AREA:
+                    continue
+                bx, by, bw, bh = cv2.boundingRect(c)
+                blob_area = bw * bh
+                # เช็คว่า blob นี้ใหญ่เกิน threshold ของ area ไหนบ้าง
+                is_large = False
+                for roi_area in roi_areas:
+                    if blob_area > roi_area["area_px"] * MAX_BLOB_ROI_RATIO:
+                        is_large = True
+                        break
+                if not is_large:
+                    raw_boxes.append((bx, by, bw, bh))
+        else:
+            contours, _ = cv2.findContours(
+                fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            raw_boxes = [
+                cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > MIN_AREA
+            ]
 
         # ── MULTI-ITEM: ไม่ตัดเหลือแค่ชิ้นเดียวอีกต่อไป ──────────────────────
         # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)
@@ -182,6 +236,7 @@ def main():
             else:
                 if not bg_frozen:
                     bg_frozen = True
+                    bg_frozen_snapshot = bg_np.copy()  # snapshot bg ณ ตอน freeze
                     print("🧊 Background FROZEN — พบวัตถุใน ROI")
                 sm.trigger("motion_in_ROI")
 

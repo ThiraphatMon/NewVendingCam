@@ -128,6 +128,56 @@ class ROIManager:
             mask[:, w // 2 : w] = 255
         return mask
 
+    def get_roi_areas(self, mask_shape):
+        """
+        คืน list ของแต่ละ ROI area เป็น dict:
+            {"mask": np.uint8 array (same shape as mask_shape), "area_px": int}
+
+        ใช้สำหรับ large motion check per-area
+        รองรับทุก roi_type: rect, polygon, quad, multi_polygon
+        """
+        h, w = mask_shape[:2]
+        areas = []
+
+        if self.roi_type == "multi_polygon":
+            for area in self.areas:
+                pts = self._valid_points(area.get("points", []))
+                if pts is None:
+                    continue
+                m = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(m, [pts], 255)
+                area_px = int(cv2.countNonZero(m))
+                if area_px > 0:
+                    areas.append({"mask": m, "area_px": area_px})
+
+        elif self.roi_type in ("polygon", "quad"):
+            pts = self._valid_points(self.points)
+            if pts is not None:
+                m = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(m, [pts], 255)
+                area_px = int(cv2.countNonZero(m))
+                if area_px > 0:
+                    areas.append({"mask": m, "area_px": area_px})
+
+        elif self.roi_type == "rect":
+            scale_x = self.frame_w / max(1, self.config_frame_w)
+            scale_y = self.frame_h / max(1, self.config_frame_h)
+            x = int(round(float(self.rect.get("x", 0)) * scale_x))
+            y = int(round(float(self.rect.get("y", 0)) * scale_y))
+            rw = int(round(float(self.rect.get("w", self.frame_w)) * scale_x))
+            rh = int(round(float(self.rect.get("h", self.frame_h)) * scale_y))
+            x1 = max(0, min(w, x))
+            y1 = max(0, min(h, y))
+            x2 = max(0, min(w, x + rw))
+            y2 = max(0, min(h, y + rh))
+            m = np.zeros((h, w), dtype=np.uint8)
+            m[y1:y2, x1:x2] = 255
+            area_px = int(cv2.countNonZero(m))
+            if area_px > 0:
+                areas.append({"mask": m, "area_px": area_px})
+
+        return areas
+
     def draw(self, frame):
         overlay = frame.copy()
         if self.roi_type == "multi_polygon":

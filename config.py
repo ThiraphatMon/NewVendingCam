@@ -28,6 +28,12 @@ CONFIRMED_ITEM_GONE_TIMEOUT = 5.0  # วินาที (ปรับได้)
 # (แยกจาก CONFIRMED_EXPAND_RATIO ที่ใช้ตรวจของชิ้นใหม่มาทับ ~1.35x)
 SLAT_EXPAND_RATIO = 3.0  # เท่า (ปรับได้)
 
+# สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
+# ถ้า motion blob ใน ROI area ใดใหญ่กว่านี้ → ไม่ส่งเข้า tracker
+# → restore bg_frozen_snapshot แทน (ไม่ trigger DROP_DETECTED)
+# วัตถุจริงที่ตกจากตู้จะไม่มีทางใหญ่เกิน 50% ของ ROI area
+MAX_BLOB_ROI_RATIO = 0.50  # สัดส่วน 0.0-1.0 (ปรับได้)
+
 MACHINE_ID = os.getenv("MACHINE_ID_DEFAULT", "VENDING_01")
 CLOUD_API_URL = os.getenv("CLOUD_API_URL")
 API_KEY = os.getenv("API_KEY", "")
