@@ -82,6 +82,13 @@ def main():
     bg_frozen_snapshot = None  # snapshot ของ bg ตอนที่ freeze (ตอนเจอของชิ้นแรก)
     RECONNECT_DELAY = 2
 
+    # [CLEAN BG] เก็บ snapshot ของ bg ที่ clean (ไม่มี motion) ไว้ล่วงหน้า
+    # เพื่อใช้ตอน freeze แทน bg_np ที่อาจถูกดูดมือเข้าไปบางส่วนแล้ว
+    # update ทุกๆ CLEAN_BG_INTERVAL วินาที เฉพาะตอน IDLE + ไม่มี motion
+    clean_bg = None
+    clean_bg_last_update = 0.0
+    CLEAN_BG_INTERVAL = 0.5  # วินาที (ปรับได้)
+
     # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
     # หลัง do_reset() มือผู้ใช้อาจยังอยู่ในเฟรม ถ้า bg_np = None ทันที
     # เฟรมถัดไปจะ snapshot มือเป็น background ใหม่ → พอมือถอยออกกลายเป็น blob
@@ -106,6 +113,8 @@ def main():
             bg_np = None
             bg_frozen = False
             bg_frozen_snapshot = None
+            clean_bg = None
+            clean_bg_last_update = 0.0
             reset_grace_until = 0.0
             continue
 
@@ -129,6 +138,23 @@ def main():
             # ก่อนที่ระบบจะเปิดรับ motion ใหม่
             lr = LR_RELEARN if now < reset_grace_until else LR
             cv2.addWeighted(bg_np, 1 - lr, frame_gray, lr, 0, dst=bg_np)
+
+            # [CLEAN BG] snapshot bg ที่สะอาด เฉพาะตอน IDLE + ไม่มี motion
+            # ใช้แทน bg_np ตอน freeze เพื่อให้ได้ bg ที่ไม่มีมืออยู่เลย
+            no_raw_motion = (
+                cv2.countNonZero(
+                    np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
+                )
+                == 0
+            )
+            if (
+                sm.state == "IDLE"
+                and no_raw_motion
+                and now >= reset_grace_until
+                and (now - clean_bg_last_update) >= CLEAN_BG_INTERVAL
+            ):
+                clean_bg = bg_np.copy()
+                clean_bg_last_update = now
 
         k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k5)
@@ -237,8 +263,12 @@ def main():
             else:
                 if not bg_frozen:
                     bg_frozen = True
-                    bg_frozen_snapshot = bg_np.copy()  # snapshot bg ณ ตอน freeze
-                    print("🧊 Background FROZEN — พบวัตถุใน ROI")
+                    # [CLEAN BG] ใช้ clean_bg (bg ก่อนมือเข้า) แทน bg_np ที่อาจถูกดูดมือไปแล้ว
+                    # ถ้ายังไม่มี clean_bg (เพิ่งเริ่มระบบ) → fallback ใช้ bg_np แทน
+                    freeze_src = clean_bg if clean_bg is not None else bg_np
+                    bg_frozen_snapshot = freeze_src.copy()
+                    bg_np = freeze_src.copy()  # ดึง bg กลับไปที่ clean version
+                    print("🧊 Background FROZEN — ใช้ clean_bg ก่อนมี motion")
                 sm.trigger("motion_in_ROI")
 
         # ── DROP_DETECTED / EVIDENCE_CAPTURED: จับของแต่ละชิ้น ─────────────

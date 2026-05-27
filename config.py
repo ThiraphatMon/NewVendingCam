@@ -15,7 +15,7 @@ DROP_TIMEOUT = 25.0
 # ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป
 # ปรับเป็น 0.1 วินาที เพื่อเป็นการ track ทุก event / motion ที่เกิดขึ้น
 # ปรับเป็น 15 วินาที เพื่อเป็น default ของ การตกค้างของสิ่งของ
-CONFIRMED_HOLD_TIMEOUT = 15  # วินาที (ปรับได้)
+CONFIRMED_HOLD_TIMEOUT = 20  # วินาที (ปรับได้)
 
 # ระยะเวลาที่ confirmed item หายจาก ROI (ถูกบัง/slat) ก่อนจะถือว่าหายจริง
 # ถ้ากลับมาปรากฏก่อน timeout → ยังอยู่, reset hold timeout ใหม่
@@ -31,8 +31,8 @@ SLAT_EXPAND_RATIO = 3.0  # เท่า (ปรับได้)
 # สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
 # ถ้า motion blob ใน ROI area ใดใหญ่กว่านี้ → ไม่ส่งเข้า tracker
 # → restore bg_frozen_snapshot แทน (ไม่ trigger DROP_DETECTED)
-# วัตถุจริงที่ตกจากตู้จะไม่มีทางใหญ่เกิน 50% ของ ROI area
-MAX_BLOB_ROI_RATIO = 0.50  # สัดส่วน 0.0-1.0 (ปรับได้)
+# วัตถุจริงที่ตกจากตู้จะไม่มีทางใหญ่เกิน 80% ของ ROI area
+MAX_BLOB_ROI_RATIO = 0.80  # สัดส่วน 0.0-1.0 (ปรับได้)
 
 MACHINE_ID = os.getenv("MACHINE_ID_DEFAULT", "VENDING_01")
 CLOUD_API_URL = os.getenv("CLOUD_API_URL")
