@@ -265,6 +265,19 @@ def main():
             if pending is not None:
                 sm.set_order(pending)
 
+        # ── IDLE: มี order แต่หมดเวลาโดยไม่มีของตกเลย → no_drop ─────────────
+        if sm.state == "IDLE" and sm.has_order() and sm.is_order_window_expired(now):
+            print(f"[{sm.machine_id}] ⏰ order window หมด — ไม่มีของตกเลย → no_drop")
+            if sm.transaction_id is None:
+                import datetime
+
+                sm.transaction_id = datetime.datetime.now().strftime(
+                    "TXN-%Y%m%d-%H%M%S"
+                )
+            sm.finalize_order(frame=frame)
+            clear_pending_order()
+            sm.reset()
+
         # ── IDLE: ตรวจพบการเคลื่อนไหว ──────────────────────────────────────
         if motion_in_roi and sm.state == "IDLE":
             # [BUG FIX] ระหว่าง grace period ห้าม trigger ใหม่
@@ -338,8 +351,13 @@ def main():
                         print("✅ ของออกจาก ROI ทั้งหมด (gone_timer) → RESET")
                         do_reset()
                 else:
-                    print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
-                    do_reset()
+                    # ── ถ้ามี order window ยังเปิดอยู่ → อย่า reset ────────────
+                    # ของอาจยังไม่ตกลงมา หรือกำลังตกอยู่ ให้รอจน window หมดเอง
+                    if sm.has_order() and not sm.is_order_window_expired(now):
+                        pass  # รอต่อ
+                    else:
+                        print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+                        do_reset()
 
         # ── EVIDENCE_CAPTURED: แสดงผลและรอ reset อัตโนมัติ ─────────────────
         if sm.state == "EVIDENCE_CAPTURED":
@@ -412,15 +430,21 @@ def main():
                     clear_pending_order()
                     do_reset()
                 elif hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
-                    n = sm.item_count()
-                    print(
-                        f"⏰ Force reset — จับของได้ {n} ชิ้น "
-                        f"(txn={sm.transaction_id})"
-                    )
-                    if sm.has_order():
-                        sm.finalize_order(frame=frame)
-                        clear_pending_order()
-                    do_reset()
+                    # ── ถ้ามี order window ยังเปิดอยู่ → ข้าม force reset ────
+                    # CONFIRMED_HOLD_TIMEOUT ไม่ควรตัดก่อน order window จบ
+                    # รอให้ is_order_window_expired() จัดการเองแทน
+                    if sm.has_order() and not sm.is_order_window_expired(now):
+                        pass  # รอต่อ
+                    else:
+                        n = sm.item_count()
+                        print(
+                            f"⏰ Force reset — จับของได้ {n} ชิ้น "
+                            f"(txn={sm.transaction_id})"
+                        )
+                        if sm.has_order():
+                            sm.finalize_order(frame=frame)
+                            clear_pending_order()
+                        do_reset()
 
         # ── วาด ROI + state badge ───────────────────────────────────────────
         roi_manager.draw(frame)
@@ -454,7 +478,7 @@ def main():
                 1,
             )
 
-        # ── order window countdown badge ──────────────────────────────────────
+        # ── order window countdown badge (ขวาล่าง) ──────────────────────────
         if sm.has_order() and sm.order_window_start is not None:
             elapsed = now - sm.order_window_start
             time_left = max(0, ORDER_WINDOW - elapsed)
@@ -463,10 +487,16 @@ def main():
                 f"{sm.item_count()}/{sm.order_qty()} "
                 f"({time_left:.0f}s)"
             )
+            # คำนวณ x ให้ชิดขวา
+            (badge_w, badge_h), _ = cv2.getTextSize(
+                order_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+            )
+            badge_x = actual_w - badge_w - 10
+            badge_y = actual_h - 15
             cv2.putText(
                 frame,
                 order_badge,
-                (10, 25),
+                (badge_x, badge_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
                 (0, 200, 255),
