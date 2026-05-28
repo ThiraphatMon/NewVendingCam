@@ -44,4 +44,4 @@ API_KEY = os.getenv("API_KEY", "")
 #   - ค่า default เป็น "1" เพื่อความปลอดภัย
 HEADLESS = os.getenv("HEADLESS", "1") == "1"
 
-SEND_INTERVAL = 0.1
+SEND_INTERVAL = 1

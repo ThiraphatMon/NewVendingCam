@@ -13,7 +13,7 @@ from config import (
     CONFIRMED_HOLD_TIMEOUT,
     MACHINE_ID,
     HEADLESS,
-    # SEND_INTERVAL,
+    SEND_INTERVAL,
     MAX_BLOB_ROI_RATIO,
 )
 import threading
@@ -25,7 +25,7 @@ from core.roi import ROIManager
 from utils.logger import get_logger
 from utils.disk_cleanup import start_cleanup_thread
 
-# from api.sent_frame import send_frame
+from api.sent_frame import send_frame
 
 logger = get_logger("main")
 
@@ -120,9 +120,9 @@ def main():
 
         now = time.time()
 
-        # if now - last_send_time >= SEND_INTERVAL:
-        #     send_frame(frame)
-        #     last_send_time = now
+        if now - last_send_time >= SEND_INTERVAL:
+            send_frame(frame)
+            last_send_time = now
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
