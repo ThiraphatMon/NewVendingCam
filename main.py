@@ -15,6 +15,7 @@ from config import (
     HEADLESS,
     SEND_INTERVAL,
     MAX_BLOB_ROI_RATIO,
+    ORDER_WINDOW,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
@@ -26,6 +27,11 @@ from utils.logger import get_logger
 from utils.disk_cleanup import start_cleanup_thread
 
 from api.sent_frame import send_frame
+from api.order_listener import (
+    start_order_listener,
+    get_pending_order,
+    clear_pending_order,
+)
 
 logger = get_logger("main")
 
@@ -40,6 +46,7 @@ def main():
 
     start_cleanup_thread()
     start_retry_thread()
+    start_order_listener()
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
@@ -252,13 +259,18 @@ def main():
             reset_grace_until = now + RESET_GRACE_PERIOD
             print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_PERIOD}s")
 
+        # ── IDLE: รับ order จาก server (ถ้ามี และยัง IDLE อยู่) ───────────────
+        if sm.state == "IDLE" and not sm.has_order():
+            pending = get_pending_order()
+            if pending is not None:
+                sm.set_order(pending)
+
         # ── IDLE: ตรวจพบการเคลื่อนไหว ──────────────────────────────────────
         if motion_in_roi and sm.state == "IDLE":
             # [BUG FIX] ระหว่าง grace period ห้าม trigger ใหม่
             # มือที่กำลังถอยออกหลัง reset อาจทำให้ motion_in_roi = True
             # ต้องรอให้ background ดูดมือเข้าไปก่อน
             if now < reset_grace_until:
-                remaining = reset_grace_until - now
                 pass  # เงียบ (ไม่ print ทุกเฟรม)
             else:
                 if not bg_frozen:
@@ -299,8 +311,19 @@ def main():
                     sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
                     tracker.mark_confirmed(obj_id)
 
-            # ── ตรวจ timeout ─────────────────────────────────────────────
-            if sm.drop_time and (now - sm.drop_time) > DROP_TIMEOUT:
+            # ── ตรวจ timeout / order_window ───────────────────────────────────
+            # ถ้ามี order → ใช้ order_window แทน DROP_TIMEOUT
+            # ถ้าไม่มี order → ใช้ DROP_TIMEOUT เดิม
+            if sm.has_order() and sm.is_order_window_expired(now):
+                # order_window หมดเวลา → สรุปผล order แล้ว reset
+                sm.finalize_order(frame=frame)
+                clear_pending_order()
+                do_reset()
+            elif (
+                not sm.has_order()
+                and sm.drop_time
+                and (now - sm.drop_time) > DROP_TIMEOUT
+            ):
                 sm.trigger("timeout")
                 do_reset()
 
@@ -379,6 +402,14 @@ def main():
                 if all_really_gone:
                     n = sm.item_count()
                     print(f"✅ ของออกจาก ROI ทั้งหมด → RESET ({n} ชิ้น)")
+                    if sm.has_order():
+                        sm.finalize_order(frame=frame)
+                        clear_pending_order()
+                    do_reset()
+                elif sm.has_order() and sm.is_order_window_expired(now):
+                    # order_window หมดเวลาใน EVIDENCE_CAPTURED → สรุปผลทันที
+                    sm.finalize_order(frame=frame)
+                    clear_pending_order()
                     do_reset()
                 elif hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
                     n = sm.item_count()
@@ -386,6 +417,9 @@ def main():
                         f"⏰ Force reset — จับของได้ {n} ชิ้น "
                         f"(txn={sm.transaction_id})"
                     )
+                    if sm.has_order():
+                        sm.finalize_order(frame=frame)
+                        clear_pending_order()
                     do_reset()
 
         # ── วาด ROI + state badge ───────────────────────────────────────────
@@ -418,6 +452,25 @@ def main():
                 0.5,
                 (0, 255, 200),
                 1,
+            )
+
+        # ── order window countdown badge ──────────────────────────────────────
+        if sm.has_order() and sm.order_window_start is not None:
+            elapsed = now - sm.order_window_start
+            time_left = max(0, ORDER_WINDOW - elapsed)
+            order_badge = (
+                f"ORDER #{sm.current_order['id']} "
+                f"{sm.item_count()}/{sm.order_qty()} "
+                f"({time_left:.0f}s)"
+            )
+            cv2.putText(
+                frame,
+                order_badge,
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 200, 255),
+                2,
             )
 
         cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
