@@ -37,9 +37,13 @@ class VendingStateMachine:
 
     def set_order(self, order: dict):
         self.current_order = order
+        # เริ่มนับ order_window ทันทีที่รับ order
+        # ไม่ต้องรอให้มี motion ก่อน เพื่อให้ badge countdown ขึ้นเลย
+        # และถ้าหมดเวลาโดยไม่มีของตกเลย → no_drop
+        self.order_window_start = time.time()
         print(
             f"[{self.machine_id}] 🛒 รับ order #{order['id']} "
-            f"qty={order['qty']} — รอของตกใน {ORDER_WINDOW}s"
+            f"qty={order['qty']} — เริ่มนับ {ORDER_WINDOW}s ทันที"
         )
 
     def has_order(self) -> bool:
@@ -114,12 +118,14 @@ class VendingStateMachine:
                 self.transaction_id = datetime.now().strftime("TXN-%Y%m%d-%H%M%S")
 
                 if self.has_order():
-                    self.order_window_start = now
+                    # order_window_start เริ่มนับตั้งแต่ set_order() แล้ว ไม่ reset ใหม่
+                    elapsed = now - self.order_window_start
+                    remaining = max(0, ORDER_WINDOW - elapsed)
                     print(
                         f"[{self.machine_id}] 📦 ของกำลังตก... "
                         f"(txn={self.transaction_id}) "
                         f"[order #{self.current_order['id']} "
-                        f"qty={self.order_qty()} window={ORDER_WINDOW}s]"
+                        f"qty={self.order_qty()} เหลือ {remaining:.0f}s]"
                     )
                 else:
                     print(
