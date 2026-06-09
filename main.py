@@ -402,28 +402,56 @@ def main():
                 latest_item = max(
                     sm.captured_items.values(), key=lambda i: i["land_time"]
                 )
-                hold_elapsed = now - latest_item["land_time"]
+
+                # ── [MOTION FREEZE] มือ/ของใหม่เข้ามาใน ROI → หยุดนับ timer ทั้งหมด ──
+                # ตรวจจาก tracker: มี object ที่ยังไม่ confirmed (MOVING/DETECTING/SHAPE_CONFIRMED)
+                # และไม่ใช่ confirmed item เดิม → ถือว่ามี "motion จริง" ที่ควร freeze
+                # noise เล็กๆ บน item เดิมจะถูก tracker match กลับ id เดิม (CONFIRMED_STOP)
+                # จึงไม่ถูกนับว่าเป็น motion → timer เดินปกติ
+                has_active_motion = any(
+                    obj_id not in sm.captured_items
+                    and obj["state"] in ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
+                    for obj_id, obj in tracked.items()
+                )
+
+                if has_active_motion:
+                    # หยุดนับ hold_elapsed โดย reset land_time ของทุก item ไปที่ now
+                    # และ reset gone_since เพื่อไม่ให้ check_all_gone() คืน True
+                    for oid, item_info in sm.captured_items.items():
+                        item_info["land_time"] = now      # freeze hold_elapsed
+                        item_info["gone_since"] = None    # freeze gone timer
+                    hold_elapsed = 0.0
+                    # (ไม่ print ทุก frame เพื่อไม่ spam log)
+                else:
+                    hold_elapsed = now - latest_item["land_time"]
 
                 # [FIX: gone_timer] อัปเดต gone_since ของแต่ละ confirmed item
                 # ตามสถานะที่ tracker เห็นในเฟรมนี้
                 # - item_visible → mark_seen → reset gone_since + reset land_time
                 # - ไม่เห็น → mark_gone → เริ่มนับ / ต่อ timer
+                # ถ้ายังมี has_active_motion → ข้าม mark_gone ทั้งหมด
+                # เพราะ gone_since ถูก reset ไปแล้วข้างบน และไม่ควรเริ่มนับใหม่
+                # ในเฟรมเดียวกันที่ยังมี motion อยู่
                 for oid in list(sm.captured_items.keys()):
                     o = tracked.get(oid)
                     item_visible = o is not None and o.get("ghost_frames", 0) == 0
                     if item_visible:
                         sm.mark_seen(oid, now)
-                    else:
+                    elif not has_active_motion:
                         sm.mark_gone(oid, now)
 
                 all_really_gone = sm.check_all_gone(now)
-                if all_really_gone:
+                if all_really_gone and not has_active_motion:
+                    # ของหายไปจริง และไม่มี motion แทรก (ไม่ใช่ถูกบัง/slat)
                     n = sm.item_count()
                     print(f"✅ ของออกจาก ROI ทั้งหมด → RESET ({n} ชิ้น)")
                     if sm.has_order():
                         sm.finalize_order(frame=frame)
                         clear_pending_order()
                     do_reset()
+                elif all_really_gone and has_active_motion:
+                    # ของหายแต่ยังมี motion → อาจถูกบัง รอจนนิ่งก่อน
+                    pass
                 elif sm.has_order() and sm.is_order_window_expired(now):
                     # order_window หมดเวลาใน EVIDENCE_CAPTURED → สรุปผลทันที
                     sm.finalize_order(frame=frame)

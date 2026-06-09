@@ -263,6 +263,7 @@ class VendingStateMachine:
                     f"[{self.machine_id}] ⏳ item#{item['item_no']} (obj#{obj_id}) "
                     f"หายจาก ROI — เริ่มนับ gone_timer"
                 )
+            # ไม่ print ซ้ำถ้า gone_since ถูกตั้งไปแล้ว (ป้องกัน log flood)
 
     def mark_seen(self, obj_id, now):
         if obj_id in self.captured_items:

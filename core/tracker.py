@@ -1,12 +1,15 @@
 import math
 import time
-from config import CONFIRM_TIME, FRAME_W, FRAME_H, SLAT_EXPAND_RATIO
+from config import CONFIRM_TIME, FRAME_W, FRAME_H
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 
-# จำนวน frame ติดต่อกันที่ shape ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง" ได้
+# จำนวน frame ติดต่อกันที่ centroid ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง" ได้
 SHAPE_STABLE_FRAMES = 5
-SHAPE_SIZE_TOLERANCE = 0.20  # ขนาด w*h เปลี่ยนได้ไม่เกิน 20% จึงถือว่า stable
+# ระยะ pixel ที่ centroid เคลื่อนที่ได้ต่อเฟรมแล้วยังถือว่า "นิ่ง"
+# ใช้ centroid แทน area เพราะ noise ข้างใน object ทำให้ box size ขยับ
+# แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
+CENTROID_STABLE_DIST = 10  # pixel
 
 # [BUG FIX 1] จำนวน frame ที่วัตถุหายไปแล้วยังคงรอก่อนลบ
 # ตั้งเป็น 0 = ลบทันทีที่หายออกจาก ROI (ไม่มีกรอบค้าง)
@@ -21,21 +24,7 @@ GHOST_FRAME_TOLERANCE = 2
 # (ห้ามตั้งสูงเกินไป ไม่งั้นกรอบเขียวจะค้างนานหลังของออกจาก ROI)
 CONFIRMED_GHOST_FRAME_TOLERANCE = 5
 
-# [FIX: CONFIRMED BOX EXPANSION]
-# threshold การขยายของกรอบ confirmed object (เทียบกับ confirmed_shape)
-# ถ้ากรอบขยายเกินนี้ → สงสัยว่ามีของใหม่มาเกาะ
-CONFIRMED_EXPAND_RATIO = 1.35  # กรอบขยายเกิน 35% → สงสัย
 
-# [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
-# ของที่ confirmed แล้ว = วางนิ่งสนิท centroid แทบไม่ขยับ
-# ถ้ากล่องที่ detect ได้มี centroid ขยับจาก confirmed_centroid เกินค่านี้
-# → ถือว่าไม่ใช่ของชิ้นเดิม (เป็นมือที่เข้ามาหยิบ หรือของถูกดันออก)
-# → ไม่ match กลับเข้า id เดิม ปล่อยให้ของ confirmed กลายเป็น ghost ตามปกติ
-# หน่วย: pixel  (ตั้งต่ำ = ไวต่อการขยับ, ตั้งสูง = ทนต่อ noise centroid มากขึ้น)
-CONFIRMED_DRIFT_TOLERANCE = 60
-# ระยะเวลา (วินาที) ที่กรอบต้องขยายค้างอยู่ก่อนจะตัดสินว่าเป็นของใหม่
-# ใช้ค่าเดียวกับ CONFIRM_TIME เพื่อให้ consistent กับ logic ปกติ
-CONFIRMED_EXPAND_CONFIRM_TIME = CONFIRM_TIME
 
 
 def group_close_boxes(boxes, max_dist=50):
@@ -100,15 +89,14 @@ class MemoryTracker:
     def mark_confirmed(self, obj_id: int):
         """
         เรียกจาก main loop ทันทีหลัง state_machine capture ของชิ้นนั้น
-        บันทึก confirmed_shape ไว้เป็น baseline สำหรับตรวจการขยาย
+        snapshot centroid เป็น baseline สำหรับตรวจ drift และตั้ง state เป็น CONFIRMED_STOP
         """
         if obj_id in self.objects:
             obj = self.objects[obj_id]
-            obj["confirmed_shape"] = obj["shape"]  # snapshot ณ ตอน confirm
-            # [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
-            # snapshot centroid ไว้เป็น baseline ตรวจการขยับผิดปกติ
+            # snapshot shape และ centroid ณ ตอน confirm เป็น baseline
+            # ใช้ clamp ไม่ให้กรอบขยายเกินขนาดของจริง
+            obj["confirmed_shape"] = obj["shape"]
             obj["confirmed_centroid"] = obj["centroid"]
-            obj["expand_since"] = None  # เริ่มต้นยังไม่ขยาย
             obj["state"] = "CONFIRMED_STOP"
             self._confirmed_ids.add(obj_id)
 
@@ -127,39 +115,6 @@ class MemoryTracker:
                 px, py = self.objects[obj_id]["centroid"]
                 d = math.hypot(cx - px, cy - py)
                 if d < 150 and d < min_dist:
-                    if (
-                        obj_id in self._confirmed_ids
-                        and "confirmed_shape" in self.objects[obj_id]
-                    ):
-                        ccw, cch = self.objects[obj_id]["confirmed_shape"]
-                        confirmed_area = ccw * cch
-
-                        # [FIX: SLAT] ถ้า box ใหญ่กว่า confirmed_shape เกิน SLAT_EXPAND_RATIO
-                        # → ถือว่าเป็น slat หรือสิ่งบังขนาดใหญ่ ไม่ใช่ของชิ้นใหม่
-                        # → ไม่ match เลย ให้ confirmed item เข้า gone_since timer แทน
-                        if (w * h) > (confirmed_area * SLAT_EXPAND_RATIO):
-                            continue
-
-                        # [FIX: EXPANSION SPLIT] ถ้า box ที่ detect ได้ใหญ่กว่า
-                        # confirmed_shape เกิน threshold → ไม่ match กับ confirmed obj
-                        # เพื่อให้กลายเป็น object ใหม่แทน ไม่ถูกดูดกลับเข้า id เดิม
-                        if (w * h) > (confirmed_area * CONFIRMED_EXPAND_RATIO):
-                            continue
-
-                    # [BUG FIX: มือ/ของถูกดูดเข้า id เดิม]
-                    # ของ confirmed วางนิ่งสนิท — ถ้ากล่องนี้มี centroid ขยับ
-                    # ห่างจาก confirmed_centroid เกิน tolerance แสดงว่าไม่ใช่
-                    # ของชิ้นเดิม (มือเข้ามาหยิบ / ของถูกดันออก)
-                    # → ไม่ match ปล่อยให้ของ confirmed นับ ghost แล้วหายไป
-                    if (
-                        obj_id in self._confirmed_ids
-                        and "confirmed_centroid" in self.objects[obj_id]
-                    ):
-                        ccx, ccy = self.objects[obj_id]["confirmed_centroid"]
-                        drift = math.hypot(cx - ccx, cy - ccy)
-                        if drift > CONFIRMED_DRIFT_TOLERANCE:
-                            continue
-
                     min_dist, best_id = d, obj_id
 
             if best_id is not None:
@@ -169,81 +124,45 @@ class MemoryTracker:
                 old_w, old_h = obj["shape"]
                 dist = math.hypot(cx - px, cy - py)
 
-                if (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
+                if obj["state"] == "CONFIRMED_STOP":
+                    # CONFIRMED_STOP: ใช้ขนาดจาก motion mask จริงเลย
+                    # ไม่ smoothing ทั้ง 2 ทิศทาง (ไม่บวม / ไม่ค้าง)
+                    # กรอบสะท้อนขนาดวัตถุจริงที่เห็นใน motion mask เสมอ
+                    pass
+                elif (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
+                    # object ที่ยังไม่ confirmed: ถ้า motion หดแปบเดียว → คืน shape เดิม
+                    # ป้องกัน noise ทำให้กรอบกระพริบ
                     cx, cy, w, h, dist = px, py, old_w, old_h, 0
                 else:
+                    # object ที่ยังไม่ confirmed: ไม่ให้หดเร็วเกิน (smoothing ปกติ)
                     w = max(w, int(old_w * 0.95))
                     h = max(h, int(old_h * 0.95))
 
                 obj["centroid"] = (cx, cy)
-                obj["shape"] = (w, h)
+                # CONFIRMED_STOP: ใช้ขนาด motion จริง แต่ไม่อนุญาตให้ใหญ่เกิน confirmed_shape
+                # ป้องกันมือ/วัตถุอื่นมา merge แล้วทำให้กรอบขยาย
+                if obj["state"] == "CONFIRMED_STOP" and "confirmed_shape" in obj:
+                    ccw, cch = obj["confirmed_shape"]
+                    obj["shape"] = (min(w, ccw), min(h, cch))
+                else:
+                    obj["shape"] = (w, h)
                 # [BUG FIX 1] reset ghost counter เมื่อวัตถุกลับมาเจอแล้ว
                 obj["ghost_frames"] = 0
 
-                # [FIX: CONFIRMED BOX EXPANSION]
-                # ถ้า object นี้ confirmed แล้ว → ตรวจดูว่ากรอบขยายผิดปกติหรือไม่
-                if best_id in self._confirmed_ids and "confirmed_shape" in obj:
-                    cw, ch = obj["confirmed_shape"]
-                    confirmed_area = cw * ch
-                    current_area = w * h
-                    expand_ratio = current_area / max(1, confirmed_area)
-
-                    if expand_ratio >= CONFIRMED_EXPAND_RATIO:
-                        # กรอบขยายผิดปกติ — เริ่มจับเวลา
-                        if obj["expand_since"] is None:
-                            obj["expand_since"] = current_time
-                            print(
-                                f"[Tracker] ⚠️ obj#{best_id} กรอบขยาย "
-                                f"{expand_ratio:.2f}x → เริ่มจับเวลา"
-                            )
-                        else:
-                            expand_duration = current_time - obj["expand_since"]
-                            if expand_duration >= CONFIRMED_EXPAND_CONFIRM_TIME:
-                                # ขยายค้างนานพอ → ถือว่ามีของใหม่ฝังอยู่ในกรอบ
-                                # สร้าง object ใหม่ตรงตำแหน่ง centroid ปัจจุบัน
-                                new_id = self.next_id
-                                self.next_id += 1
-                                # ประมาณขนาดของใหม่ = ส่วนที่เกินจาก confirmed_shape
-                                # ใช้ขนาด confirmed เดิมเป็น fallback
-                                new_w = max(cw, w - cw)
-                                new_h = max(ch, h - ch)
-                                new_objects[new_id] = {
-                                    "centroid": (cx, cy),
-                                    "shape": (new_w, new_h),
-                                    "state": "SHAPE_CONFIRMED",
-                                    "still_start": None,
-                                    "first_seen": current_time,
-                                    "shape_stable_count": SHAPE_STABLE_FRAMES,
-                                    "shape_confirmed_time": current_time
-                                    - CONFIRMED_EXPAND_CONFIRM_TIME,
-                                    "ghost_frames": 0,
-                                }
-                                print(
-                                    f"[Tracker] 🆕 obj#{new_id} เกิดใหม่จากการขยายกรอบ "
-                                    f"ของ obj#{best_id} (expand={expand_ratio:.2f}x "
-                                    f"นาน {expand_duration:.1f}s)"
-                                )
-                                # reset expand timer ของชิ้นเดิมเพื่อไม่ trigger ซ้ำ
-                                obj["expand_since"] = None
-                                obj["confirmed_shape"] = obj["shape"]
-                    else:
-                        # กรอบหดกลับมาปกติแล้ว → reset timer
-                        if obj["expand_since"] is not None:
-                            obj["expand_since"] = None
-
                 # Shape stability check
-                # [FIX] ถ้า shape_confirmed_time ถูกตั้งไว้แล้ว (เช่น object ใหม่จาก
-                # expansion ที่ pre-confirmed มาแล้ว) → lock state เป็น SHAPE_CONFIRMED
-                # ไม่ให้ update() override กลับเป็น DETECTING ทุก frame
+                # CONFIRMED_STOP: ไม่แตะ state เลย
+                # SHAPE_CONFIRMED: lock state ไว้ แต่ shape ยัง track ตาม motion จริง
+                #   (ไม่ lock shape เพื่อให้กรอบสะท้อนขนาดวัตถุจริงเสมอ)
+                # MOVING/DETECTING: วัด centroid stability แทน area
+                #   noise ข้างใน object ทำให้ box size ขยับแต่ centroid ยังนิ่ง
                 if obj["state"] == "CONFIRMED_STOP":
-                    pass  # CONFIRMED_STOP ไม่แตะ state
-                elif obj.get("shape_confirmed_time") is not None:
-                    obj["state"] = "SHAPE_CONFIRMED"  # lock ไว้
+                    pass
+                elif obj["state"] == "SHAPE_CONFIRMED":
+                    # lock state ไว้ — shape อัปเดตตาม motion จริงแล้วข้างบน
+                    pass
                 else:
-                    prev_area = old_w * old_h
-                    curr_area = w * h
-                    area_ratio = abs(curr_area - prev_area) / max(1, prev_area)
-                    if area_ratio <= SHAPE_SIZE_TOLERANCE:
+                    centroid_dist = math.hypot(cx - px, cy - py)
+                    if centroid_dist <= CENTROID_STABLE_DIST:
                         obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
                     else:
                         obj["shape_stable_count"] = 0
