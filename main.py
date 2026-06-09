@@ -426,18 +426,16 @@ def main():
                     hold_elapsed = now - latest_item["land_time"]
 
                 # [FIX: gone_timer] อัปเดต gone_since ของแต่ละ confirmed item
-                # ตามสถานะที่ tracker เห็นในเฟรมนี้
-                # - item_visible → mark_seen → reset gone_since + reset land_time
-                # - ไม่เห็น → mark_gone → เริ่มนับ / ต่อ timer
+                # mark_gone จะเริ่มนับเฉพาะเมื่อ hold_elapsed ครบแล้วเท่านั้น
+                # ป้องกัน gone_timer reset ก่อน hold_timeout ทั้งที่ timer ยังนับอยู่
                 # ถ้ายังมี has_active_motion → ข้าม mark_gone ทั้งหมด
-                # เพราะ gone_since ถูก reset ไปแล้วข้างบน และไม่ควรเริ่มนับใหม่
-                # ในเฟรมเดียวกันที่ยังมี motion อยู่
+                hold_timeout_reached = hold_elapsed >= CONFIRMED_HOLD_TIMEOUT
                 for oid in list(sm.captured_items.keys()):
                     o = tracked.get(oid)
                     item_visible = o is not None and o.get("ghost_frames", 0) == 0
                     if item_visible:
                         sm.mark_seen(oid, now)
-                    elif not has_active_motion:
+                    elif not has_active_motion and hold_timeout_reached:
                         sm.mark_gone(oid, now)
 
                 all_really_gone = sm.check_all_gone(now)

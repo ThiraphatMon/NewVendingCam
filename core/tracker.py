@@ -22,7 +22,9 @@ GHOST_FRAME_TOLERANCE = 2
 # ของ confirmed มักนิ่งอยู่กับที่ → motion mask อาจกระพริบหายเป็นบางจังหวะ
 # จึงให้ tolerance สูงกว่า object ทั่วไปเล็กน้อย แต่ต้องลบได้ในที่สุด
 # (ห้ามตั้งสูงเกินไป ไม่งั้นกรอบเขียวจะค้างนานหลังของออกจาก ROI)
-CONFIRMED_GHOST_FRAME_TOLERANCE = 5
+# เพิ่มเป็น 25 frames (~1 วินาที ที่ 25fps)
+# ให้ object CONFIRMED_STOP ทน ghost ได้นานพอที่มือปัดผ่านจะไม่ทำให้ถูกลบ
+CONFIRMED_GHOST_FRAME_TOLERANCE = 60
 
 
 
