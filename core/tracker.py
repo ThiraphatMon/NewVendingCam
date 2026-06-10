@@ -22,11 +22,57 @@ GHOST_FRAME_TOLERANCE = 2
 # ของ confirmed มักนิ่งอยู่กับที่ → motion mask อาจกระพริบหายเป็นบางจังหวะ
 # จึงให้ tolerance สูงกว่า object ทั่วไปเล็กน้อย แต่ต้องลบได้ในที่สุด
 # (ห้ามตั้งสูงเกินไป ไม่งั้นกรอบเขียวจะค้างนานหลังของออกจาก ROI)
-# เพิ่มเป็น 25 frames (~1 วินาที ที่ 25fps)
+# เพิ่มเป็น 60 frames (~2.4 วินาที ที่ 25fps)
 # ให้ object CONFIRMED_STOP ทน ghost ได้นานพอที่มือปัดผ่านจะไม่ทำให้ถูกลบ
 CONFIRMED_GHOST_FRAME_TOLERANCE = 60
 
+# ── [BUG FIX 2] Confirmed item ครองพื้นที่ของตัวเอง (anchored region) ──────────
+# detection ใดที่ overlap กับ "กรอบ confirmed เดิม" ถือว่าเป็น "ของชิ้นเดิมที่ถูกบัง"
+# (มือปัดผ่าน / มือเข้ามาบังชั่วคราว) → ไม่สร้าง object id ใหม่ และ confirmed item
+# ถูกตรึงไว้ที่ตำแหน่ง + ขนาดเดิม (ไม่ดริฟต์ตามมือ ไม่บวมขึ้น ไม่ถูก handoff ไป id ใหม่)
+# pad เผื่อขอบรอบกรอบ confirmed ให้ครอบ blob ที่คาบเกี่ยวเล็กน้อยได้
+CONFIRMED_CLAIM_PAD = 10  # pixel
 
+# exception (ของตกทับ): ถ้ามี "มวลส่วนเกิน" ทับกรอบ confirmed โดยมีพื้นที่ใหญ่กว่า
+# กรอบ confirmed เกิน OCC_EXCESS_RATIO เท่า และ "นิ่งอยู่บริเวณนั้น" ครบ CONFIRM_TIME
+# → ถือว่าเป็นของชิ้นใหม่ที่ตกมาทับ (ไม่ใช่แค่มือปัดผ่าน) → spawn object ใหม่ให้ capture ได้
+# ต้องให้บริเวณนั้น "ว่างจากมวลส่วนเกิน" สักเฟรมก่อน จึงจะ arm ให้ spawn รอบใหม่ได้
+# (กัน spawn ซ้ำรัว ๆ ระหว่างที่มือ/ของชิ้นใหม่ยังค้างอยู่)
+OCC_EXCESS_RATIO = 1.5
+
+
+def _box_rect(box):
+    """box = (cx, cy, w, h) → (x1, y1, x2, y2)"""
+    cx, cy, w, h = box
+    return (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+
+
+def _centroid_rect(centroid, shape, pad=0.0):
+    """centroid=(cx,cy), shape=(w,h) → (x1,y1,x2,y2) เผื่อ pad รอบด้าน"""
+    cx, cy = centroid
+    w, h = shape
+    return (
+        cx - w / 2.0 - pad,
+        cy - h / 2.0 - pad,
+        cx + w / 2.0 + pad,
+        cy + h / 2.0 + pad,
+    )
+
+
+def _rects_overlap(a, b):
+    """rect = (x1,y1,x2,y2)"""
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
+def _union_box(boxes, idxs):
+    """รวม bounding box ของ detected boxes (centroid form) ตาม index ที่ระบุ → (cx,cy,w,h)"""
+    x1 = min(boxes[i][0] - boxes[i][2] / 2.0 for i in idxs)
+    y1 = min(boxes[i][1] - boxes[i][3] / 2.0 for i in idxs)
+    x2 = max(boxes[i][0] + boxes[i][2] / 2.0 for i in idxs)
+    y2 = max(boxes[i][1] + boxes[i][3] / 2.0 for i in idxs)
+    w = x2 - x1
+    h = y2 - y1
+    return (int(x1 + w / 2.0), int(y1 + h / 2.0), int(w), int(h))
 
 
 def group_close_boxes(boxes, max_dist=50):
@@ -91,24 +137,128 @@ class MemoryTracker:
     def mark_confirmed(self, obj_id: int):
         """
         เรียกจาก main loop ทันทีหลัง state_machine capture ของชิ้นนั้น
-        snapshot centroid เป็น baseline สำหรับตรวจ drift และตั้ง state เป็น CONFIRMED_STOP
+        snapshot centroid + shape เป็น baseline สำหรับตรึงกรอบ (anchor)
+        และตั้ง state เป็น CONFIRMED_STOP
         """
         if obj_id in self.objects:
             obj = self.objects[obj_id]
             # snapshot shape และ centroid ณ ตอน confirm เป็น baseline
-            # ใช้ clamp ไม่ให้กรอบขยายเกินขนาดของจริง
+            # ใช้ตรึงกรอบไม่ให้ขยับ/ขยายเกินขนาดของจริง
             obj["confirmed_shape"] = obj["shape"]
             obj["confirmed_centroid"] = obj["centroid"]
             obj["state"] = "CONFIRMED_STOP"
+            # occlusion-spawn arming (สำหรับ exception ของตกทับ)
+            obj["occ_since"] = None
+            obj["occ_centroid"] = None
+            obj["occ_armed"] = True
             self._confirmed_ids.add(obj_id)
 
     def update(self, detected_boxes):
         new_objects = {}
         current_time = time.time()
         matched_ids = set()
-        available = list(self.objects.keys())
+        consumed = set()  # index ของ detected box ที่ถูก confirmed region เคลม
 
-        for box in detected_boxes:
+        # ── Phase 0 [BUG FIX 2]: confirmed item ครองพื้นที่ของตัวเอง ──────────
+        # detection ที่ overlap กรอบ confirmed เดิม = "ของเดิมที่ถูกบัง/ปัดผ่าน"
+        #   → confirmed item ถูกตรึงไว้ที่ตำแหน่ง/ขนาดเดิม (ไม่ดริฟต์ ไม่บวม ไม่ถูกลืม)
+        #   → box เหล่านั้นถูก consume ไม่ให้ไปสร้าง id ใหม่ใน Phase 1
+        # exception: ถ้ามวลส่วนเกินทับอยู่ "นิ่ง" ครบ CONFIRM_TIME → spawn ของชิ้นใหม่
+        for obj_id, obj in self.objects.items():
+            if obj.get("state") != "CONFIRMED_STOP":
+                continue
+            if "confirmed_centroid" not in obj or "confirmed_shape" not in obj:
+                continue
+
+            crect = _centroid_rect(
+                obj["confirmed_centroid"], obj["confirmed_shape"], CONFIRMED_CLAIM_PAD
+            )
+            overlapping = [
+                i
+                for i, b in enumerate(detected_boxes)
+                if _rects_overlap(_box_rect(b), crect)
+            ]
+
+            if not overlapping:
+                # ไม่มี detection ทับ region เลย → ของอาจถูกหยิบออก/ถูกบังหมด
+                # ไม่ mark seen ที่นี่ → ปล่อยให้ disappearance loop ด้านล่างนับ ghost
+                continue
+
+            # ── ของเดิมยังอยู่ (มี blob ทับ region) → ตรึงไว้ที่ค่าที่ confirm ไว้ ──
+            obj["centroid"] = obj["confirmed_centroid"]
+            obj["shape"] = obj["confirmed_shape"]
+            obj["ghost_frames"] = 0
+            matched_ids.add(obj_id)
+            consumed.update(overlapping)
+
+            # ── exception: ตรวจ "มวลส่วนเกิน" ที่ทับ confirmed item ───────────
+            union = _union_box(detected_boxes, overlapping)
+            ucx, ucy, uw, uh = union
+            confirmed_area = max(
+                1, obj["confirmed_shape"][0] * obj["confirmed_shape"][1]
+            )
+            excess_present = (uw * uh) > confirmed_area * OCC_EXCESS_RATIO
+
+            if not excess_present:
+                # ไม่มีมวลส่วนเกินมีนัยสำคัญ (แค่ noise บนของเดิม) → เคลียร์ + arm ใหม่
+                obj["occ_since"] = None
+                obj["occ_centroid"] = None
+                obj["occ_armed"] = True
+            else:
+                # มีมวลใหญ่กว่ากรอบ confirmed มากพอ (มือ/ของใหม่มาทับ)
+                prev = obj.get("occ_centroid")
+                stable = (
+                    prev is not None
+                    and math.hypot(ucx - prev[0], ucy - prev[1])
+                    <= CENTROID_STABLE_DIST
+                )
+                if stable:
+                    obj["occ_centroid"] = (ucx, ucy)
+                    if (
+                        obj.get("occ_armed", True)
+                        and obj.get("occ_since") is not None
+                        and (current_time - obj["occ_since"]) >= CONFIRM_TIME
+                    ):
+                        # มวลส่วนเกินนิ่งครบ CONFIRM_TIME → ของชิ้นใหม่ตกทับ (ไม่ใช่ปัดผ่าน)
+                        # spawn object ใหม่ + back-date เวลาให้ main capture ได้ทันทีเฟรมนี้
+                        # (เงื่อนไข persistence ถูกการันตีด้วย occ timer ไปแล้ว)
+                        new_objects[self.next_id] = {
+                            "centroid": (ucx, ucy),
+                            "shape": (uw, uh),
+                            "state": "SHAPE_CONFIRMED",
+                            "still_start": None,
+                            "first_seen": current_time - (CONFIRM_TIME + 2.0),
+                            "shape_stable_count": SHAPE_STABLE_FRAMES,
+                            "shape_confirmed_time": current_time - (CONFIRM_TIME + 1.0),
+                            "ghost_frames": 0,
+                        }
+                        print(
+                            f"[Tracker] ➕ มวลส่วนเกินทับ obj#{obj_id} นิ่งครบ "
+                            f"{CONFIRM_TIME}s → spawn ของชิ้นใหม่ id={self.next_id} "
+                            f"(ของตกทับ)"
+                        )
+                        self.next_id += 1
+                        # disarm จนกว่าบริเวณนั้นจะว่างจากมวลส่วนเกินสักเฟรม
+                        obj["occ_armed"] = False
+                        obj["occ_since"] = None
+                else:
+                    # เพิ่งโผล่ / ยังขยับอยู่ (ลักษณะมือปัดผ่าน) → (re)start ตัวจับเวลา
+                    obj["occ_since"] = current_time
+                    obj["occ_centroid"] = (ucx, ucy)
+
+            new_objects[obj_id] = obj
+
+        # ── Phase 1: matching ปกติ เฉพาะ object ที่ "ไม่ใช่ confirmed" ─────────
+        available = [
+            oid
+            for oid in self.objects.keys()
+            if oid not in matched_ids
+            and self.objects[oid].get("state") != "CONFIRMED_STOP"
+        ]
+
+        for idx, box in enumerate(detected_boxes):
+            if idx in consumed:
+                continue  # ถูก confirmed region เคลมไปแล้ว
             cx, cy, w, h = box
             best_id, min_dist = None, float("inf")
             for obj_id in available:
@@ -126,40 +276,20 @@ class MemoryTracker:
                 old_w, old_h = obj["shape"]
                 dist = math.hypot(cx - px, cy - py)
 
-                if obj["state"] == "CONFIRMED_STOP":
-                    # CONFIRMED_STOP: ใช้ขนาดจาก motion mask จริงเลย
-                    # ไม่ smoothing ทั้ง 2 ทิศทาง (ไม่บวม / ไม่ค้าง)
-                    # กรอบสะท้อนขนาดวัตถุจริงที่เห็นใน motion mask เสมอ
-                    pass
-                elif (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
-                    # object ที่ยังไม่ confirmed: ถ้า motion หดแปบเดียว → คืน shape เดิม
-                    # ป้องกัน noise ทำให้กรอบกระพริบ
+                if (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
+                    # motion หดแปบเดียว → คืน shape เดิม ป้องกัน noise กระพริบ
                     cx, cy, w, h, dist = px, py, old_w, old_h, 0
                 else:
-                    # object ที่ยังไม่ confirmed: ไม่ให้หดเร็วเกิน (smoothing ปกติ)
+                    # ไม่ให้หดเร็วเกิน (smoothing ปกติ)
                     w = max(w, int(old_w * 0.95))
                     h = max(h, int(old_h * 0.95))
 
                 obj["centroid"] = (cx, cy)
-                # CONFIRMED_STOP: ใช้ขนาด motion จริง แต่ไม่อนุญาตให้ใหญ่เกิน confirmed_shape
-                # ป้องกันมือ/วัตถุอื่นมา merge แล้วทำให้กรอบขยาย
-                if obj["state"] == "CONFIRMED_STOP" and "confirmed_shape" in obj:
-                    ccw, cch = obj["confirmed_shape"]
-                    obj["shape"] = (min(w, ccw), min(h, cch))
-                else:
-                    obj["shape"] = (w, h)
-                # [BUG FIX 1] reset ghost counter เมื่อวัตถุกลับมาเจอแล้ว
+                obj["shape"] = (w, h)
                 obj["ghost_frames"] = 0
 
                 # Shape stability check
-                # CONFIRMED_STOP: ไม่แตะ state เลย
-                # SHAPE_CONFIRMED: lock state ไว้ แต่ shape ยัง track ตาม motion จริง
-                #   (ไม่ lock shape เพื่อให้กรอบสะท้อนขนาดวัตถุจริงเสมอ)
-                # MOVING/DETECTING: วัด centroid stability แทน area
-                #   noise ข้างใน object ทำให้ box size ขยับแต่ centroid ยังนิ่ง
-                if obj["state"] == "CONFIRMED_STOP":
-                    pass
-                elif obj["state"] == "SHAPE_CONFIRMED":
+                if obj["state"] == "SHAPE_CONFIRMED":
                     # lock state ไว้ — shape อัปเดตตาม motion จริงแล้วข้างบน
                     pass
                 else:
@@ -190,10 +320,10 @@ class MemoryTracker:
                 }
                 self.next_id += 1
 
-        # [BUG FIX 1] จัดการวัตถุที่หายไปจาก detection frame นี้
-        for obj_id in available:
-            if obj_id in matched_ids:
-                continue  # วัตถุยังอยู่ใน frame → จัดการแล้วข้างบน
+        # ── disappearance: object เดิมที่ไม่ถูก match ในเฟรมนี้ ───────────────
+        for obj_id in self.objects.keys():
+            if obj_id in matched_ids or obj_id in new_objects:
+                continue
 
             obj = self.objects[obj_id]
 
@@ -202,18 +332,12 @@ class MemoryTracker:
                 continue  # ลบออก (ไม่ใส่ใน new_objects)
 
             # [BUG FIX: กรอบ CONFIRMED ค้าง]
-            # CONFIRMED_STOP: ของที่ confirm แล้วก็ต้องนับ ghost frame ด้วย
-            # เดิม: เก็บค้างไว้ตลอด → main.is_really_gone() เห็น ghost_frames=0
-            #       เสมอ → กรอบเขียวค้างจนกว่าจะ force-reset โดย hold timeout
-            # ใหม่: นับ ghost frame เหมือน object ทั่วไป (แต่ tolerance สูงกว่า)
-            #       - ยังอยู่ใน tolerance → เก็บไว้ + ตั้ง ghost_frames > 0
-            #         เพื่อให้ main.py รู้ว่า "ของกำลังหาย" (กรอบหยุดวาด/นับ gone)
-            #       - เกิน tolerance → ลบทิ้ง ของออกจาก ROI จริง
+            # CONFIRMED_STOP ที่ไม่มี blob ทับ region เลยเฟรมนี้ → นับ ghost frame
+            #   - ยังไม่เกิน tolerance → เก็บไว้ + ghost_frames > 0 (กรอบหยุดวาด/นับ gone)
+            #   - เกิน tolerance → ลบทิ้ง (ของออกจาก ROI จริง)
             if obj["state"] == "CONFIRMED_STOP":
                 ghost_count = obj.get("ghost_frames", 0) + 1
                 if ghost_count > CONFIRMED_GHOST_FRAME_TOLERANCE:
-                    # ของ confirmed หายจาก ROI นานพอ → ลบทิ้ง
-                    # (ไม่ใส่ใน new_objects → main.py จะ reset กลับ IDLE)
                     print(
                         f"[Tracker] 👋 obj#{obj_id} (CONFIRMED) "
                         f"หายจาก ROI ครบ {ghost_count} frame → ลบทิ้ง"
@@ -223,17 +347,13 @@ class MemoryTracker:
                 new_objects[obj_id] = obj
                 continue
 
-            # [BUG FIX 1 - หัวใจหลัก]
             # วัตถุทั่วไปที่หายออกจาก ROI: นับ ghost frame
-            # ถ้าเกิน GHOST_FRAME_TOLERANCE → ลบทิ้งเลย ไม่มีกรอบค้าง
             ghost_count = obj.get("ghost_frames", 0) + 1
             if ghost_count > GHOST_FRAME_TOLERANCE:
-                # ลบออก — กรอบจะหายไปพร้อมของ
-                continue
+                continue  # ลบออก — กรอบจะหายไปพร้อมของ
 
-            # ยังอยู่ในช่วง tolerance → เก็บไว้ชั่วคราวแต่ไม่สร้าง WAITING state
             obj["ghost_frames"] = ghost_count
-            obj["state"] = "DETECTING"  # ลดความสำคัญลง ไม่ใช่ WAITING อีกต่อไป
+            obj["state"] = "DETECTING"
             new_objects[obj_id] = obj
 
         self.objects = new_objects

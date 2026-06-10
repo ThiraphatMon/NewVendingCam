@@ -17,7 +17,7 @@ CONFIRMED_HOLD_TIMEOUT = 20  # วินาที (ปรับได้)
 
 # ระยะเวลาที่ confirmed item หายจาก ROI (ถูกบัง/slat) ก่อนจะถือว่าหายจริง
 # ถ้ากลับมาปรากฏก่อน timeout → ยังอยู่, reset hold timeout ใหม่
-CONFIRMED_ITEM_GONE_TIMEOUT = 15  # วินาที (ปรับได้)
+CONFIRMED_ITEM_GONE_TIMEOUT = 5  # วินาที (ปรับได้)
 
 # สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
 MAX_BLOB_ROI_RATIO = 0.80  # สัดส่วน 0.0-1.0 (ปรับได้)

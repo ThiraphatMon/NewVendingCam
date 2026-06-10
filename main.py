@@ -325,13 +325,24 @@ def main():
                     tracker.mark_confirmed(obj_id)
 
             # ── ตรวจ timeout / order_window ───────────────────────────────────
-            # ถ้ามี order → ใช้ order_window แทน DROP_TIMEOUT
-            # ถ้าไม่มี order → ใช้ DROP_TIMEOUT เดิม
+            # [BUG FIX 1] ลำดับความสำคัญ (priority) ของการ reset:
+            #   1) order window หมดเวลา (เฉพาะมี order)  → reset
+            #   2) มี confirmed item ค้างอยู่ → "ห้าม" reset ที่ block นี้เลย
+            #        ปล่อยให้ block EVIDENCE_CAPTURED ด้านล่างเป็นผู้ตัดสินด้วย
+            #        CONFIRMED_HOLD_TIMEOUT เป็นหลัก (priority สูงสุด)
+            #        → กัน DROP_TIMEOUT / frame-ว่าง / gone_timer มา reset เอง
+            #          ทั้งที่ hold countdown ยังนับอยู่และของยังค้างใน ROI
+            #        (gone_timer ยังทำงานปกติ แต่ถูก gate ด้วย hold_timeout ใน block ล่าง)
+            #   3) ไม่มี order + ไม่มี confirmed item + เกิน DROP_TIMEOUT → reset
+            #   4) ไม่มี confirmed item + frame ว่าง → reset
             if sm.has_order() and sm.is_order_window_expired(now):
                 # order_window หมดเวลา → สรุปผล order แล้ว reset
                 sm.finalize_order(frame=frame)
                 clear_pending_order()
                 do_reset()
+            elif sm.captured_items:
+                # มี confirmed item แล้ว → ให้ CONFIRMED_HOLD_TIMEOUT (block ล่าง) จัดการ
+                pass
             elif (
                 not sm.has_order()
                 and sm.drop_time
@@ -340,24 +351,15 @@ def main():
                 sm.trigger("timeout")
                 do_reset()
 
-            # ── ไม่มีของค้างใน ROI เลย → ถ้ามี confirmed items ให้ gone_timer ทำงาน
+            # ── ไม่มี confirmed item เลย และ frame ว่าง ──────────────────────────
             elif not tracked:
-                if sm.state == "EVIDENCE_CAPTURED" and sm.captured_items:
-                    # slat อาจบัง ROI ทั้งหมดจนไม่มี detection
-                    # → mark ทุก confirmed item ว่าหายไป แล้วรอ gone_timer ตัดสิน
-                    for oid in sm.captured_items:
-                        sm.mark_gone(oid, now)
-                    if sm.check_all_gone(now):
-                        print("✅ ของออกจาก ROI ทั้งหมด (gone_timer) → RESET")
-                        do_reset()
+                # ── ถ้ามี order window ยังเปิดอยู่ → อย่า reset ────────────
+                # ของอาจยังไม่ตกลงมา หรือกำลังตกอยู่ ให้รอจน window หมดเอง
+                if sm.has_order() and not sm.is_order_window_expired(now):
+                    pass  # รอต่อ
                 else:
-                    # ── ถ้ามี order window ยังเปิดอยู่ → อย่า reset ────────────
-                    # ของอาจยังไม่ตกลงมา หรือกำลังตกอยู่ ให้รอจน window หมดเอง
-                    if sm.has_order() and not sm.is_order_window_expired(now):
-                        pass  # รอต่อ
-                    else:
-                        print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
-                        do_reset()
+                    print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+                    do_reset()
 
         # ── EVIDENCE_CAPTURED: แสดงผลและรอ reset อัตโนมัติ ─────────────────
         if sm.state == "EVIDENCE_CAPTURED":
