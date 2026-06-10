@@ -31,7 +31,7 @@ CONFIRMED_GHOST_FRAME_TOLERANCE = 10
 # (มือปัดผ่าน / มือเข้ามาบังชั่วคราว) → ไม่สร้าง object id ใหม่ และ confirmed item
 # ถูกตรึงไว้ที่ตำแหน่ง + ขนาดเดิม (ไม่ดริฟต์ตามมือ ไม่บวมขึ้น ไม่ถูก handoff ไป id ใหม่)
 # pad เผื่อขอบรอบกรอบ confirmed ให้ครอบ blob ที่คาบเกี่ยวเล็กน้อยได้
-# default 10 pixel
+# default 10 (pixel)
 CONFIRMED_CLAIM_PAD = 10  # pixel
 
 # exception (ของตกทับ): ถ้ามี "มวลส่วนเกิน" ทับกรอบ confirmed โดยมีพื้นที่ใหญ่กว่า
@@ -39,7 +39,8 @@ CONFIRMED_CLAIM_PAD = 10  # pixel
 # → ถือว่าเป็นของชิ้นใหม่ที่ตกมาทับ (ไม่ใช่แค่มือปัดผ่าน) → spawn object ใหม่ให้ capture ได้
 # ต้องให้บริเวณนั้น "ว่างจากมวลส่วนเกิน" สักเฟรมก่อน จึงจะ arm ให้ spawn รอบใหม่ได้
 # (กัน spawn ซ้ำรัว ๆ ระหว่างที่มือ/ของชิ้นใหม่ยังค้างอยู่)
-OCC_EXCESS_RATIO = 1.5
+# default 1.5 (เท่า)
+OCC_EXCESS_RATIO = 1.2
 
 
 def _box_rect(box):
