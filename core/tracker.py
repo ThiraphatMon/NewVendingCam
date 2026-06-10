@@ -22,15 +22,16 @@ GHOST_FRAME_TOLERANCE = 2
 # ของ confirmed มักนิ่งอยู่กับที่ → motion mask อาจกระพริบหายเป็นบางจังหวะ
 # จึงให้ tolerance สูงกว่า object ทั่วไปเล็กน้อย แต่ต้องลบได้ในที่สุด
 # (ห้ามตั้งสูงเกินไป ไม่งั้นกรอบเขียวจะค้างนานหลังของออกจาก ROI)
-# เพิ่มเป็น 60 frames (~2.4 วินาที ที่ 25fps)
+# default 60 frames (~2.4 วินาที ที่ 25fps)
 # ให้ object CONFIRMED_STOP ทน ghost ได้นานพอที่มือปัดผ่านจะไม่ทำให้ถูกลบ
-CONFIRMED_GHOST_FRAME_TOLERANCE = 60
+CONFIRMED_GHOST_FRAME_TOLERANCE = 10
 
 # ── [BUG FIX 2] Confirmed item ครองพื้นที่ของตัวเอง (anchored region) ──────────
 # detection ใดที่ overlap กับ "กรอบ confirmed เดิม" ถือว่าเป็น "ของชิ้นเดิมที่ถูกบัง"
 # (มือปัดผ่าน / มือเข้ามาบังชั่วคราว) → ไม่สร้าง object id ใหม่ และ confirmed item
 # ถูกตรึงไว้ที่ตำแหน่ง + ขนาดเดิม (ไม่ดริฟต์ตามมือ ไม่บวมขึ้น ไม่ถูก handoff ไป id ใหม่)
 # pad เผื่อขอบรอบกรอบ confirmed ให้ครอบ blob ที่คาบเกี่ยวเล็กน้อยได้
+# default 10 pixel
 CONFIRMED_CLAIM_PAD = 10  # pixel
 
 # exception (ของตกทับ): ถ้ามี "มวลส่วนเกิน" ทับกรอบ confirmed โดยมีพื้นที่ใหญ่กว่า
