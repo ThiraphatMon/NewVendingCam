@@ -16,11 +16,26 @@ from config import (
     SEND_INTERVAL,
     MAX_BLOB_ROI_RATIO,
     ORDER_WINDOW,
+    MOT_THRESH,
+    MORPH_OPEN_KSIZE,
+    MORPH_CLOSE_KSIZE,
+    GROUP_OVERLAP_PAD,
+    ENABLE_BLOB_SPLIT,
+    SPLIT_DIST_RATIO,
+    SPLIT_MIN_SEED_AREA,
+    MIN_PRESENCE_SEC,
+    CAPTURE_HOLD_SEC,
+    REBASELINE_ON_CAPTURE,
+    REBASELINE_PAD,
+    DISPLACE_RADIUS,
+    VACATE_MEAN_DIFF,
+    STACK_OVERLAP_RATIO,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
 from api.retry_queue import start_retry_thread
 from core.tracker import MemoryTracker, group_close_boxes
+from core.detect import build_fgmask, split_boxes, classify_landing
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.logger import get_logger
@@ -94,7 +109,7 @@ def main():
 
     bg_np = None
     LR = 0.1
-    MOT_THRESH = 25
+    # MOT_THRESH ย้ายไปอยู่ใน config.py แล้ว (ปรับผ่าน .env ได้)
     bg_frozen = False
     bg_frozen_snapshot = None  # snapshot ของ bg ตอนที่ freeze (ตอนเจอของชิ้นแรก)
     RECONNECT_DELAY = 2
@@ -166,7 +181,6 @@ def main():
             continue
 
         diff = cv2.absdiff(frame_gray, bg_np)
-        fgmask = np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
 
         if not bg_frozen:
             # [BUG FIX] ระหว่าง grace period re-learn เร็วขึ้นเพื่อดูดมือเข้า background
@@ -191,9 +205,12 @@ def main():
                 clean_bg = bg_np.copy()
                 clean_bg_last_update = now
 
-        k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k5)
-        fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_DILATE, k5, iterations=2)
+        # [ACCURACY] เดิม: DILATE 5x5 x2 → กรอบบวม ~8px รอบด้าน + รวมของ 2 ชิ้นที่ใกล้กัน
+        # ใหม่: OPEN เล็ก (ลบ noise) + CLOSE เล็ก (อุดรูในชิ้นเดิมโดยไม่บวมออก)
+        # → กรอบแนบของจริง และของที่อยู่ใกล้กันยังแยกกันอยู่ (ดู core/detect.py)
+        fgmask = build_fgmask(
+            diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_CLOSE_KSIZE
+        )
 
         roi_manager.reload_if_changed()
         roi_mask = roi_manager.build_mask(fgmask.shape)
@@ -260,8 +277,21 @@ def main():
         # ── MULTI-ITEM: ไม่ตัดเหลือแค่ชิ้นเดียวอีกต่อไป ──────────────────────
         # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)
         # แต่ถ้ามีหลายกลุ่มที่ห่างกัน → เก็บทุกกลุ่มไว้เป็น candidate แยกกัน
-        merged = group_close_boxes(raw_boxes, max_dist=GROUP_DIST)
+        merged = group_close_boxes(
+            raw_boxes, max_dist=GROUP_DIST, overlap_pad=GROUP_OVERLAP_PAD
+        )
         # ลบ biggest-only filter ออก → รักษาทุก merged box
+
+        # [ACCURACY] แยกของหลายชิ้นที่ตกมาติดกัน: ถ้า blob ก้อนเดียวใหญ่พอจะมี >=2 ชิ้น
+        # ใช้ distance-transform + watershed แยกกลับเป็นหลายกล่องตามยอดของแต่ละชิ้น
+        if ENABLE_BLOB_SPLIT:
+            merged = split_boxes(
+                fgmask,
+                merged,
+                MIN_AREA,
+                min_seed_area=SPLIT_MIN_SEED_AREA,
+                dist_ratio=SPLIT_DIST_RATIO,
+            )
         # ─────────────────────────────────────────────────────────────────────
 
         detected = [(int(x + w / 2), int(y + h / 2), w, h) for x, y, w, h in merged]
@@ -286,6 +316,23 @@ def main():
             #       หลัง grace: กลับใช้ LR ปกติ พร้อมรับของชิ้นใหม่
             reset_grace_until = now + RESET_GRACE_PERIOD
             print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_PERIOD}s")
+
+        def absorb_region(cx, cy, w, h):
+            """[RE-BASELINE] เขียนภาพบริเวณของที่จับได้ทับเข้า background
+            → ของชิ้นนั้นหยุดเป็น motion, ROI ที่เหลือยังพร้อมจับของชิ้นใหม่ทันที"""
+            if cx is None or w is None:
+                return
+            H, W = bg_np.shape[:2]
+            x1 = max(0, int(cx - w / 2) - REBASELINE_PAD)
+            y1 = max(0, int(cy - h / 2) - REBASELINE_PAD)
+            x2 = min(W, int(cx + w / 2) + REBASELINE_PAD)
+            y2 = min(H, int(cy + h / 2) + REBASELINE_PAD)
+            if x2 <= x1 or y2 <= y1:
+                return
+            bg_np[y1:y2, x1:x2] = frame_gray[y1:y2, x1:x2]
+            # อัปเดต snapshot ด้วย เพื่อให้ตอน restore (large motion) ของที่นับแล้วยังถูกกลืน
+            if bg_frozen_snapshot is not None:
+                bg_frozen_snapshot[y1:y2, x1:x2] = frame_gray[y1:y2, x1:x2]
 
         # ── IDLE: รับ order จาก server (ถ้ามี และยัง IDLE อยู่) ───────────────
         if sm.state == "IDLE" and not sm.has_order():
@@ -331,26 +378,68 @@ def main():
                 if sm.is_obj_captured(obj_id):
                     continue
 
-                # [BUG FIX: มือถูก capture เป็นของ]
-                # ของที่ตกจากตู้: ตกลงมาเร็ว แล้วหยุดนิ่ง → อยู่ใน ROI นาน
-                # มือ: เข้ามา → หยิบ → ออก ไม่เคยอยู่นาน
-                # เงื่อนไข: object ต้องอยู่ใน ROI มาแล้วอย่างน้อย MIN_PRESENCE
-                # นับจาก first_seen ถึงปัจจุบัน ก่อนจึงจะ capture ได้
-                # ค่านี้ต้องมากกว่า CONFIRM_TIME เพื่อให้ครอบคลุม
-                # เวลา MOVING → DETECTING → SHAPE_CONFIRMED + รอ CONFIRM_TIME
-                # มือที่นิ่งสั้น ๆ แล้วออกจะไม่ผ่าน เพราะ presence รวมสั้นกว่า
-                MIN_PRESENCE = CONFIRM_TIME + 1.5  # วินาที (ปรับได้)
+                # ── [CAPTURE-ON-LANDING] จับทันทีที่ของ "นิ่ง" = ตกถึงที่แล้ว ──
+                # ของที่กำลังตกจะเคลื่อนที่ (state = MOVING/DETECTING) → ยังไม่ capture
+                # พอถึงที่แล้วจะนิ่งครบ LANDING_STABLE_FRAMES → state = SHAPE_CONFIRMED
+                # = จังหวะที่ควร capture ทันที แล้วพร้อมรับชิ้นถัดไปเลย
+                #
+                # เดิม: ต้องรอ presence >= CONFIRM_TIME+1.5 (~2.5s) + hold อีก CONFIRM_TIME
+                #       → ของชิ้นที่ 2 ที่ลูกค้าหยิบเร็ว ๆ จับไม่ทัน
+                # ใหม่: presence floor แค่กัน noise แวบเดียว (MIN_PRESENCE_SEC)
+                #       + hold หลังนิ่งสั้นมาก/เป็นศูนย์ (CAPTURE_HOLD_SEC)
+                #       slat บังมือแล้ว จึงไม่ต้องใช้ presence ยาว ๆ กันมืออีก
                 presence = now - obj.get("first_seen", now)
-                if presence < MIN_PRESENCE:
+                if presence < MIN_PRESENCE_SEC:
                     continue
 
-                # ของที่ shape stable แล้วและค้างอยู่นานพอ → capture
+                # ของที่ลงจอดแล้ว (นิ่ง) และนิ่งครบ hold สั้น ๆ → พิจารณา capture
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
-                    and (now - obj.get("shape_confirmed_time", now)) >= CONFIRM_TIME
+                    and (now - obj.get("shape_confirmed_time", now)) >= CAPTURE_HOLD_SEC
                 ):
-                    sm.trigger("still_in_ROI", obj_id=obj_id, frame=frame)
-                    tracker.mark_confirmed(obj_id)
+                    o_cx, o_cy = obj["centroid"]
+                    o_w, o_h = obj["shape"]
+
+                    # ── [DISPLACEMENT GUARD] ของที่นับไปแล้วถูกชนขยับ ไม่นับซ้ำ ──
+                    # เฉพาะโหมด re-baseline: ของที่นับแล้วถูกกลืนเข้า bg ไปแล้ว
+                    # ถ้ามันถูกชนขยับ จุดเดิมจะ "ว่างลง" (diff สูง) + โผล่ใกล้ ๆ
+                    verdict, old_id = ("new", None)
+                    if REBASELINE_ON_CAPTURE and sm.captured_items:
+                        anchors = sm.get_anchors()
+                        verdict, old_id = classify_landing(
+                            (o_cx, o_cy, o_w, o_h),
+                            anchors,
+                            diff,
+                            VACATE_MEAN_DIFF,
+                            DISPLACE_RADIUS,
+                            STACK_OVERLAP_RATIO,
+                        )
+
+                    if verdict == "displaced" and old_id is not None:
+                        # ของเดิมขยับมา → re-anchor ที่ตำแหน่งใหม่ (ไม่เพิ่มจำนวน)
+                        old_anchor = next(
+                            (a for a in anchors if a[0] == old_id), None
+                        )
+                        sm.reassign_item(
+                            old_id, obj_id, now,
+                            centroid=(o_cx, o_cy), shape=(o_w, o_h),
+                        )
+                        tracker.mark_confirmed(obj_id)
+                        # กลืนจุดเดิม (ตอนนี้เป็นถาดเปล่า) + จุดใหม่เข้า bg
+                        if old_anchor is not None:
+                            absorb_region(old_anchor[1], old_anchor[2],
+                                          old_anchor[3], old_anchor[4])
+                        absorb_region(o_cx, o_cy, o_w, o_h)
+                    else:
+                        # ของชิ้นใหม่จริง → capture + นับเพิ่ม
+                        sm.trigger(
+                            "still_in_ROI", obj_id=obj_id, frame=frame,
+                            centroid=(o_cx, o_cy), shape=(o_w, o_h),
+                        )
+                        tracker.mark_confirmed(obj_id)
+                        # [RE-BASELINE] กลืนของชิ้นนี้เข้า bg → พร้อมจับชิ้นถัดไปทันที
+                        if REBASELINE_ON_CAPTURE and sm.is_obj_captured(obj_id):
+                            absorb_region(o_cx, o_cy, o_w, o_h)
 
             # ── ตรวจ timeout / order_window ───────────────────────────────────
             # [BUG FIX 1] ลำดับความสำคัญ (priority) ของการ reset:
@@ -424,6 +513,31 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.40,
                         (0, 255, 0),
+                        1,
+                    )
+                elif (
+                    REBASELINE_ON_CAPTURE
+                    and item_info.get("cx") is not None
+                    and item_info.get("w")
+                ):
+                    # [RE-BASELINE] ของถูกกลืนเข้า bg แล้ว (ไม่อยู่ใน tracker)
+                    # → วาดกรอบจากพิกัดที่จำไว้ เพื่อให้เห็นว่านับชิ้นนี้แล้ว
+                    cx, cy = int(item_info["cx"]), int(item_info["cy"])
+                    w, h = int(item_info["w"]), int(item_info["h"])
+                    cv2.rectangle(
+                        frame,
+                        (cx - w // 2, cy - h // 2),
+                        (cx + w // 2, cy + h // 2),
+                        (0, 200, 0),
+                        2,
+                    )
+                    cv2.putText(
+                        frame,
+                        f"#{item_info['item_no']} COUNTED",
+                        (cx - w // 2, cy - h // 2 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40,
+                        (0, 200, 0),
                         1,
                     )
 

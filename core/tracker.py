@@ -1,15 +1,24 @@
 import math
 import time
-from config import CONFIRM_TIME, FRAME_W, FRAME_H
+from config import (
+    CONFIRM_TIME,
+    FRAME_W,
+    FRAME_H,
+    TRACK_MATCH_DIST,
+    LANDING_STABLE_FRAMES,
+    CENTROID_STABLE_DIST as CFG_CENTROID_STABLE_DIST,
+)
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
 
-# จำนวน frame ติดต่อกันที่ centroid ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง" ได้
-SHAPE_STABLE_FRAMES = 5
+# จำนวน frame ติดต่อกันที่ centroid ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง = ลงจอด" ได้
+# ปรับผ่าน config.LANDING_STABLE_FRAMES (ยิ่งน้อยยิ่งจับของไว)
+SHAPE_STABLE_FRAMES = LANDING_STABLE_FRAMES
 # ระยะ pixel ที่ centroid เคลื่อนที่ได้ต่อเฟรมแล้วยังถือว่า "นิ่ง"
 # ใช้ centroid แทน area เพราะ noise ข้างใน object ทำให้ box size ขยับ
 # แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
-CENTROID_STABLE_DIST = 10  # pixel
+# ปรับผ่าน config.CENTROID_STABLE_DIST
+CENTROID_STABLE_DIST = CFG_CENTROID_STABLE_DIST
 
 # [BUG FIX 1] จำนวน frame ที่วัตถุหายไปแล้วยังคงรอก่อนลบ
 # ตั้งเป็น 0 = ลบทันทีที่หายออกจาก ROI (ไม่มีกรอบค้าง)
@@ -77,7 +86,7 @@ def _union_box(boxes, idxs):
     return (int(x1 + w / 2.0), int(y1 + h / 2.0), int(w), int(h))
 
 
-def group_close_boxes(boxes, max_dist=50):
+def group_close_boxes(boxes, max_dist=50, overlap_pad=4):
     """
     Merge bounding boxes that actually OVERLAP each other (or touch within
     OVERLAP_PAD pixels).  Boxes that are merely *near* each other but do
@@ -93,8 +102,8 @@ def group_close_boxes(boxes, max_dist=50):
     # How many pixels of gap are still treated as "touching / same object".
     # Set to 0 to merge only truly overlapping boxes.
     # Increase slightly (e.g. 4-8) to handle 1-pixel noise between contours
-    # of the same physical item.
-    OVERLAP_PAD = 4
+    # of the same physical item. (ปรับผ่าน config.GROUP_OVERLAP_PAD)
+    OVERLAP_PAD = overlap_pad
 
     rects = [[b[0], b[1], b[0] + b[2], b[1] + b[3]] for b in boxes]
 
@@ -268,7 +277,7 @@ class MemoryTracker:
                     continue
                 px, py = self.objects[obj_id]["centroid"]
                 d = math.hypot(cx - px, cy - py)
-                if d < 150 and d < min_dist:
+                if d < TRACK_MATCH_DIST and d < min_dist:
                     min_dist, best_id = d, obj_id
 
             if best_id is not None:
