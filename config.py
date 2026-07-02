@@ -3,7 +3,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
+# CAMERA_INDEX รับได้ทั้งเลขกล้อง (0,1,...) และ path ไฟล์วิดีโอ
+#   - เป็นตัวเลขล้วน  → กล้องจริง
+#   - ไม่ใช่ตัวเลข     → path คลิป (เช่น C:\\...\\clip.mp4)
+_cam_src = os.getenv("CAMERA_INDEX", "0").strip().strip('"').strip("'")
+CAMERA_INDEX = int(_cam_src) if _cam_src.isdigit() else _cam_src
 FRAME_W = 640
 FRAME_H = 480
 MIN_AREA = 150
@@ -20,7 +24,7 @@ CONFIRMED_HOLD_TIMEOUT = 20  # วินาที (ปรับได้)
 CONFIRMED_ITEM_GONE_TIMEOUT = 5  # วินาที (ปรับได้)
 
 # สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
-MAX_BLOB_ROI_RATIO = 0.80  # สัดส่วน 0.0-1.0 (ปรับได้)
+MAX_BLOB_ROI_RATIO = 0.60  # สัดส่วน 0.0-1.0 (ปรับได้)
 
 # ── Order Window ──────────────────────────────────────────────────────────────
 # เวลารอของตกหลังได้รับ order (วินาที)
