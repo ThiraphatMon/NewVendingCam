@@ -51,10 +51,20 @@ def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
-    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # หมายเหตุ: สำหรับไฟล์วิดีโอ cap.set(WIDTH/HEIGHT) จะไม่มีผล (ใช้ได้เฉพาะกล้องจริง)
+    # จึงบังคับใช้ FRAME_W/FRAME_H เป็นขนาดมาตรฐานของ pipeline แล้ว resize ทุกเฟรมให้ตรง
+    # เพื่อให้พิกัด ROI (ตั้งไว้ที่ 640x480) และการวาดทุกอย่างสอดคล้องกัน
+    actual_w = FRAME_W
+    actual_h = FRAME_H
 
     roi_manager = ROIManager(actual_w, actual_h, config_path="data/roi_config.json")
+
+    # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
+    if not HEADLESS:
+        cv2.namedWindow("Vending System", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Vending System", actual_w, actual_h)
+        cv2.namedWindow("Motion Mask", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Motion Mask", actual_w, actual_h)
 
     threading.Thread(
         target=register_machine,
@@ -108,6 +118,19 @@ def main():
 
     last_send_time = 0
 
+    # ── Playback pacing (เฉพาะไฟล์วิดีโอ) ─────────────────────────────────────
+    # อ่านไฟล์วิดีโอด้วย OpenCV จะได้เฟรมเร็วสุดเท่าที่ลูปไหว (ไม่ผูกกับ FPS คลิป)
+    # ทำให้คลิปเล่นเร็วผิดปกติ และ timer ที่อิงเวลาจริงเพี้ยน จึงต้องหน่วงตาม FPS จริง
+    # กล้องจริง (CAMERA_INDEX เป็นตัวเลข) ไม่ต้องหน่วง เพราะมันส่งเฟรมตามอัตราของมันเอง
+    is_video_file = isinstance(CAMERA_INDEX, str)
+    src_fps = cap.get(cv2.CAP_PROP_FPS)
+    if not src_fps or src_fps <= 0 or src_fps != src_fps:  # 0 / ค่าผิด / NaN
+        src_fps = 30.0
+    FRAME_PERIOD = 1.0 / src_fps
+    if is_video_file:
+        print(f"🎞️ Video file @ {src_fps:.2f} FPS → pacing playback ตามเวลาจริง")
+    next_frame_deadline = time.time() + FRAME_PERIOD
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -124,6 +147,11 @@ def main():
             clean_bg_last_update = 0.0
             reset_grace_until = 0.0
             continue
+
+        # บังคับขนาดเฟรมให้เป็น FRAME_W x FRAME_H เสมอ (สำคัญมากสำหรับไฟล์วิดีโอ
+        # ที่ cap.set ไม่มีผล) เพื่อไม่ให้หน้าต่างใหญ่เกินและให้ตรงกับพิกัด ROI
+        if frame.shape[1] != actual_w or frame.shape[0] != actual_h:
+            frame = cv2.resize(frame, (actual_w, actual_h))
 
         now = time.time()
 
@@ -576,6 +604,16 @@ def main():
                 box_color,
                 1,
             )
+
+        # ── pacing: หน่วงให้ไฟล์วิดีโอเล่นตามเฟรมเรตจริง ไม่เร่งเร็ว ──────────
+        if is_video_file:
+            sleep_time = next_frame_deadline - time.time()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            next_frame_deadline += FRAME_PERIOD
+            # ถ้าประมวลผลช้ากว่าเฟรมเรต (deadline หลุดไปแล้ว) รีเซ็ตกันสะสมหน่วง
+            if next_frame_deadline < time.time():
+                next_frame_deadline = time.time() + FRAME_PERIOD
 
         if not HEADLESS:
             cv2.imshow("Vending System", frame)

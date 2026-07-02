@@ -40,7 +40,7 @@ CONFIRMED_CLAIM_PAD = 10  # pixel
 # ต้องให้บริเวณนั้น "ว่างจากมวลส่วนเกิน" สักเฟรมก่อน จึงจะ arm ให้ spawn รอบใหม่ได้
 # (กัน spawn ซ้ำรัว ๆ ระหว่างที่มือ/ของชิ้นใหม่ยังค้างอยู่)
 # default 1.5 (เท่า)
-OCC_EXCESS_RATIO = 1.2
+OCC_EXCESS_RATIO = 1.1
 
 
 def _box_rect(box):
