@@ -7,6 +7,7 @@ from config import (
     TRACK_MATCH_DIST,
     LANDING_STABLE_FRAMES,
     CENTROID_STABLE_DIST as CFG_CENTROID_STABLE_DIST,
+    TRACK_CONFIRMED_ITEMS,
 )
 
 EDGE_MARGIN = 5  # pixel margin สำหรับตัดสิน edge kill
@@ -195,9 +196,22 @@ class MemoryTracker:
                 # ไม่ mark seen ที่นี่ → ปล่อยให้ disappearance loop ด้านล่างนับ ghost
                 continue
 
-            # ── ของเดิมยังอยู่ (มี blob ทับ region) → ตรึงไว้ที่ค่าที่ confirm ไว้ ──
-            obj["centroid"] = obj["confirmed_centroid"]
-            obj["shape"] = obj["confirmed_shape"]
+            # ── ของเดิมยังอยู่ (มี blob ทับ region) ──────────────────────────
+            if TRACK_CONFIRMED_ITEMS:
+                # [FIX: กรอบค้าง] ตามของจริงที่ทับ region → กรอบไม่ค้างอยู่กับที่
+                # ใช้ union ของ blob ที่ทับ region นี้ (blob ไกลไม่เกี่ยวเพราะไม่ overlap)
+                # แล้วเลื่อน anchor ตาม (กันกรอบพองด้วยการ clamp ขนาด)
+                ucx, ucy, uw, uh = _union_box(detected_boxes, overlapping)
+                cw, ch = obj["confirmed_shape"]
+                uw = min(uw, int(cw * 1.5))
+                uh = min(uh, int(ch * 1.5))
+                obj["centroid"] = (ucx, ucy)
+                obj["shape"] = (uw, uh)
+                obj["confirmed_centroid"] = (ucx, ucy)  # เลื่อน claim region ตามของ
+            else:
+                # ดีไซน์เดิม: ตรึงไว้ที่ค่าที่ confirm (กันดริฟต์ตามมือ)
+                obj["centroid"] = obj["confirmed_centroid"]
+                obj["shape"] = obj["confirmed_shape"]
             obj["ghost_frames"] = 0
             matched_ids.add(obj_id)
             consumed.update(overlapping)

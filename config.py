@@ -43,7 +43,16 @@ CENTROID_STABLE_DIST = int(os.getenv("CENTROID_STABLE_DIST", "10"))
 # MOT_THRESH : ความไวการจับ motion (ค่า diff ของสีเทาที่ถือว่า "เปลี่ยน")
 #   - ต่ำลง (เช่น 18) → จับของชิ้นเล็ก/สีใกล้พื้นหลังได้ดีขึ้น แต่ noise/แสงสะท้อนมากขึ้น
 #   - สูงขึ้น (เช่น 30) → เงียบขึ้น แต่ของจาง ๆ อาจหลุด
-MOT_THRESH = int(os.getenv("MOT_THRESH", "8"))
+MOT_THRESH = int(os.getenv("MOT_THRESH", "5"))
+
+# MEDIAN_BLUR_KSIZE : ลบ speckle noise ก่อน threshold (เลขคี่ 3/5; 0=ปิด)
+#   สำคัญมากตอน MOT_THRESH ต่ำ ๆ — median ลบจุด noise กระจายได้ดีโดยแทบไม่กินของตัน
+#   → กัน "นับเกินเพราะ noise" ได้ตรงจุด โดยไม่ต้องดัน MOT_THRESH สูงจนของเล็กหลุด
+MEDIAN_BLUR_KSIZE = int(os.getenv("MEDIAN_BLUR_KSIZE", "5"))
+
+# MIN_SOLIDITY : สัดส่วน (พื้นที่จริงของ blob / พื้นที่กรอบ) ขั้นต่ำ (0.0-1.0; 0=ปิด)
+#   ของจริงเป็นก้อนตัน (solidity สูง) / noise กระจายเป็นเส้น-จุด (solidity ต่ำ) → ตัดทิ้ง
+MIN_SOLIDITY = float(os.getenv("MIN_SOLIDITY", "0.35"))
 
 # ขนาด kernel ของ morphology (เลขคี่). เดิมใช้ DILATE 5x5 x2 ซึ่งทำให้กรอบบวม
 # และรวมของ 2 ชิ้นที่อยู่ใกล้กันเป็นก้อนเดียว → ตอนนี้ใช้ OPEN+CLOSE เล็ก ๆ แทน
@@ -67,6 +76,13 @@ SPLIT_MIN_SEED_AREA = int(_seed) if _seed.isdigit() else MIN_AREA
 #   - สูงขึ้น → ทน motion เร็วได้ แต่เสี่ยงจับ 2 ชิ้นรวมเป็น id เดียว
 TRACK_MATCH_DIST = int(os.getenv("TRACK_MATCH_DIST", "150"))
 
+# TRACK_CONFIRMED_ITEMS : ให้กรอบของที่ confirm แล้ว "ตามของจริง" แทนการตรึงอยู่กับที่
+#   - 1 = กรอบ track ตามของที่ขยับ/กลิ้ง (แก้ปัญหากรอบค้าง) — เหมาะเมื่อ slat บังมือแล้ว
+#   - 0 = ตรึงกรอบไว้ที่จุด confirm (ดีไซน์เดิม กันกรอบดริฟต์ตามมือ)
+#   ⚠️ เห็นผลเฉพาะเมื่อของยัง "มองเห็น" อยู่ → ต้องตั้ง REBASELINE_ON_CAPTURE=0 ด้วย
+#      (ถ้า REBASELINE=1 ของถูกกลืนเข้า bg จนมองไม่เห็น กรอบจะ track ไม่ได้)
+TRACK_CONFIRMED_ITEMS = os.getenv("TRACK_CONFIRMED_ITEMS", "1") == "1"
+
 # ── Re-baseline on capture (จับชิ้นแล้ว "กลืน" เข้า bg เพื่อพร้อมจับชิ้นถัดไปทันที) ──
 # เมื่อ capture ของชิ้นหนึ่งได้ → เขียนภาพบริเวณนั้นทับเข้า background
 # ผล: ของชิ้นนั้นหยุดเป็น motion, ROI ที่เหลือยังไวต่อของชิ้นใหม่ที่ตกมา
@@ -83,7 +99,8 @@ STACK_OVERLAP_RATIO = float(os.getenv("STACK_OVERLAP_RATIO", "0.4"))
 
 # ── Count cap: ถ้ามี order → ห้ามนับเกินจำนวนที่สั่ง (กัน over-count 1→2→3) ─────
 # backstop ที่เชื่อถือได้สุดสำหรับกันการนับเกิน เพราะรู้ qty ที่สั่งอยู่แล้ว
-CAP_COUNT_TO_ORDER_QTY = os.getenv("CAP_COUNT_TO_ORDER_QTY", "0") == "0"
+# [แก้ bug] เดิม '== "0"' ทำให้ตรรกะกลับด้าน — แก้เป็น '== "1"' (1=เปิด, 0=ปิด)
+CAP_COUNT_TO_ORDER_QTY = os.getenv("CAP_COUNT_TO_ORDER_QTY", "1") == "1"
 
 # ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED
 # ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป

@@ -30,12 +30,14 @@ from config import (
     DISPLACE_RADIUS,
     VACATE_MEAN_DIFF,
     STACK_OVERLAP_RATIO,
+    MEDIAN_BLUR_KSIZE,
+    MIN_SOLIDITY,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
 from api.retry_queue import start_retry_thread
 from core.tracker import MemoryTracker, group_close_boxes
-from core.detect import build_fgmask, split_boxes, classify_landing
+from core.detect import build_fgmask, split_boxes, classify_landing, contour_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.logger import get_logger
@@ -209,7 +211,7 @@ def main():
         # ใหม่: OPEN เล็ก (ลบ noise) + CLOSE เล็ก (อุดรูในชิ้นเดิมโดยไม่บวมออก)
         # → กรอบแนบของจริง และของที่อยู่ใกล้กันยังแยกกันอยู่ (ดู core/detect.py)
         fgmask = build_fgmask(
-            diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_CLOSE_KSIZE
+            diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_CLOSE_KSIZE, MEDIAN_BLUR_KSIZE
         )
 
         roi_manager.reload_if_changed()
@@ -249,14 +251,9 @@ def main():
                 # → ของเดิมที่ track อยู่จะยังคงอยู่ใน tracker (ghost tolerance)
             # ทั้ง IDLE และ non-IDLE → กรอง blob ที่ใหญ่เกิน threshold ออกจาก raw_boxes
             # per-area: blob จะถูกกรองออกถ้ามันใหญ่เกิน threshold ของ area ที่มันอยู่
-            all_contours, _ = cv2.findContours(
-                fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
+            # [NOISE] contour_boxes กรองด้วย MIN_AREA + MIN_SOLIDITY (ตัด noise ไม่ตัน)
             raw_boxes = []
-            for c in all_contours:
-                if cv2.contourArea(c) <= MIN_AREA:
-                    continue
-                bx, by, bw, bh = cv2.boundingRect(c)
+            for bx, by, bw, bh in contour_boxes(fgmask, MIN_AREA, MIN_SOLIDITY):
                 blob_area = bw * bh
                 # เช็คว่า blob นี้ใหญ่เกิน threshold ของ area ไหนบ้าง
                 is_large = False
@@ -267,12 +264,8 @@ def main():
                 if not is_large:
                     raw_boxes.append((bx, by, bw, bh))
         else:
-            contours, _ = cv2.findContours(
-                fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            raw_boxes = [
-                cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > MIN_AREA
-            ]
+            # [NOISE] กรองด้วย MIN_AREA + MIN_SOLIDITY (ของจริงตัน / noise กระจาย → ตัดทิ้ง)
+            raw_boxes = contour_boxes(fgmask, MIN_AREA, MIN_SOLIDITY)
 
         # ── MULTI-ITEM: ไม่ตัดเหลือแค่ชิ้นเดียวอีกต่อไป ──────────────────────
         # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)

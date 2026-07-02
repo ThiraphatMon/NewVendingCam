@@ -19,17 +19,20 @@ import numpy as np
 import math
 
 
-def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3):
+def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3, median_ksize=0):
     """
     สร้าง binary motion mask จากภาพ diff (absdiff ระหว่างเฟรมกับ background)
 
-    open_ksize  : ขนาด kernel ของ MORPH_OPEN — ลบ noise จุดเล็ก ๆ
-                  (ยิ่งเล็กยิ่งเก็บของชิ้นเล็กได้ ตั้ง 0 เพื่อปิด)
-    close_ksize : ขนาด kernel ของ MORPH_CLOSE — อุดรูภายในชิ้นเดิม
-                  โดยไม่ทำให้กรอบบวมออกด้านนอกเหมือน DILATE (ตั้ง 0 เพื่อปิด)
+    median_ksize : ขนาด median blur (เลขคี่) ลบ speckle noise ก่อน morphology
+                   สำคัญตอน mot_thresh ต่ำ ๆ — ลบจุด noise กระจายโดยไม่กินของตัน
+    open_ksize   : ขนาด kernel ของ MORPH_OPEN — ลบ noise จุดเล็ก ๆ
+    close_ksize  : ขนาด kernel ของ MORPH_CLOSE — อุดรูภายในชิ้นเดิมโดยไม่บวมออก
     """
     fgmask = np.where(diff > mot_thresh, np.uint8(255), np.uint8(0))
 
+    if median_ksize and median_ksize >= 3:
+        k = median_ksize if median_ksize % 2 == 1 else median_ksize + 1
+        fgmask = cv2.medianBlur(fgmask, k)
     if open_ksize and open_ksize >= 1:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_ksize, open_ksize))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, k)
@@ -37,6 +40,33 @@ def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3):
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_CLOSE, k)
     return fgmask
+
+
+def contour_boxes(fgmask, min_area, min_solidity=0.0):
+    """
+    หา bounding boxes จาก contours โดยกรอง noise:
+      - พื้นที่ contour <= min_area  → เล็กเกิน = noise
+      - fill ratio (จำนวน pixel ขาวจริงในกรอบ / พื้นที่กรอบ) < min_solidity → กระจาย = noise
+        ของจริงตัน (fill สูง ~0.5+) / noise กระจายเป็นจุด-เส้น-วง (fill ต่ำ) → ตัดทิ้ง
+        * ใช้ fill ratio ไม่ใช่ contourArea เพราะ RETR_EXTERNAL คิดพื้นที่ทั้งวง
+          ทำให้ blob กลวง/โปร่งดู "ตัน" หลอก ๆ
+    คืน list ของ (x, y, w, h)
+    """
+    contours, _ = cv2.findContours(
+        fgmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    boxes = []
+    for c in contours:
+        if cv2.contourArea(c) <= min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(c)
+        if min_solidity > 0.0:
+            roi = fgmask[y:y + h, x:x + w]
+            fill = cv2.countNonZero(roi) / max(1, w * h)
+            if fill < min_solidity:
+                continue
+        boxes.append((x, y, w, h))
+    return boxes
 
 
 def _split_one(fgmask, box, min_seed_area, dist_ratio):
