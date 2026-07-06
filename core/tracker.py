@@ -87,39 +87,46 @@ def _union_box(boxes, idxs):
     return (int(x1 + w / 2.0), int(y1 + h / 2.0), int(w), int(h))
 
 
-def group_close_boxes(boxes, max_dist=50, overlap_pad=4):
+def group_close_boxes(boxes, max_dist=50, overlap_pad=4, mode="distance"):
     """
-    Merge bounding boxes that actually OVERLAP each other (or touch within
-    OVERLAP_PAD pixels).  Boxes that are merely *near* each other but do
-    not intersect are kept separate — this prevents two distinct falling
-    items from being merged into one giant box when they fly close together.
+    รวม bounding boxes ที่เป็นชิ้นส่วนของวัตถุเดียวกันกลับเป็นกล่องเดียว
 
-    max_dist parameter is kept for API compatibility but is no longer used
-    as the merge criterion; use OVERLAP_PAD below to control the tolerance.
+    mode="distance" (สไตล์ OLD ที่ detect รูปร่างแม่น):
+        รวมกล่องที่ขอบห่างกัน < max_dist (คำนวณระยะห่างจริงระหว่างขอบกล่อง)
+        → ชิ้นส่วนของวัตถุเดียวที่ mask ขาดถูกเชื่อมกลับเป็นก้อน
+        → ของ 2 ชิ้นที่ตกห่างกันเกิน max_dist ยังแยกกัน (นับได้หลายชิ้น)
+
+    mode="overlap":
+        รวมเฉพาะกล่องที่ซ้อนทับกันจริง (±overlap_pad px)
+        → แยกของที่บินใกล้กันได้ดี แต่วัตถุเดียวที่ mask ขาดจะไม่ถูกเชื่อม
+
+    เลือก mode ผ่าน config.GROUP_MODE
     """
     if not boxes:
         return []
 
-    # How many pixels of gap are still treated as "touching / same object".
-    # Set to 0 to merge only truly overlapping boxes.
-    # Increase slightly (e.g. 4-8) to handle 1-pixel noise between contours
-    # of the same physical item. (ปรับผ่าน config.GROUP_OVERLAP_PAD)
-    OVERLAP_PAD = overlap_pad
-
     rects = [[b[0], b[1], b[0] + b[2], b[1] + b[3]] for b in boxes]
 
-    def overlaps(r1, r2):
-        """Return True if two rects overlap (or are within OVERLAP_PAD pixels)."""
-        return (
-            r1[0] - OVERLAP_PAD < r2[2]
-            and r1[2] + OVERLAP_PAD > r2[0]
-            and r1[1] - OVERLAP_PAD < r2[3]
-            and r1[3] + OVERLAP_PAD > r2[1]
-        )
+    if mode == "overlap":
+        OVERLAP_PAD = overlap_pad
+
+        def connected(r1, r2):
+            return (
+                r1[0] - OVERLAP_PAD < r2[2]
+                and r1[2] + OVERLAP_PAD > r2[0]
+                and r1[1] - OVERLAP_PAD < r2[3]
+                and r1[3] + OVERLAP_PAD > r2[1]
+            )
+    else:
+        # distance mode (default): ระยะห่างระหว่างขอบกล่อง < max_dist
+        def connected(r1, r2):
+            dx = max(0, max(r1[0], r2[0]) - min(r1[2], r2[2]))
+            dy = max(0, max(r1[1], r2[1]) - min(r1[3], r2[3]))
+            return math.hypot(dx, dy) < max_dist
 
     groups = []
     for r in rects:
-        matched = [i for i, g in enumerate(groups) if any(overlaps(r, gr) for gr in g)]
+        matched = [i for i, g in enumerate(groups) if any(connected(r, gr) for gr in g)]
         if not matched:
             groups.append([r])
         else:
@@ -383,6 +390,19 @@ class MemoryTracker:
 
         self.objects = new_objects
         return self.objects
+
+    def clear_unconfirmed(self):
+        """ลบ object ที่ยังไม่ confirmed ออกทั้งหมด (เก็บ CONFIRMED_STOP ไว้)
+
+        เรียกหลัง reset_motion_baseline (ล้าง bg ทั้งเฟรม) — motion เก่าที่ยัง
+        track อยู่ถูกกลืนเข้า bg ไปแล้ว จึงไม่ควรค้างเป็น candidate ที่จะถูก
+        re-detect ซ้ำ. confirmed items ยังต้องเก็บไว้เพื่อคง anchor/กรอบเขียว
+        """
+        self.objects = {
+            oid: obj
+            for oid, obj in self.objects.items()
+            if obj.get("state") == "CONFIRMED_STOP"
+        }
 
     def clear_all(self):
         self.objects.clear()

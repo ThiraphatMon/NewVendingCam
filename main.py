@@ -18,14 +18,13 @@ from config import (
     MOT_THRESH,
     MORPH_OPEN_KSIZE,
     MORPH_CLOSE_KSIZE,
+    MORPH_DILATE_KSIZE,
+    MORPH_DILATE_ITER,
+    GROUP_MODE,
     GROUP_OVERLAP_PAD,
     MIN_PRESENCE_SEC,
     CAPTURE_HOLD_SEC,
     REBASELINE_ON_CAPTURE,
-    REBASELINE_PAD,
-    DISPLACE_RADIUS,
-    VACATE_MEAN_DIFF,
-    STACK_OVERLAP_RATIO,
     MEDIAN_BLUR_KSIZE,
     MIN_SOLIDITY,
 )
@@ -33,7 +32,7 @@ import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
 from api.retry_queue import start_retry_thread
 from core.tracker import MemoryTracker, group_close_boxes
-from core.detect import build_fgmask, classify_landing, contour_boxes
+from core.detect import build_fgmask, contour_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.disk_cleanup import start_cleanup_thread
@@ -52,11 +51,11 @@ def draw_captured_items(frame, sm, tracked, now):
     all_gone = True
     for obj_id, item_info in sm.captured_items.items():
         landed_obj = tracked.get(obj_id)
-        # วาดกรอบเฉพาะของที่ยังเห็นอยู่จริง (ไม่ใช่ ghost และ gone_since = None)
+        # วาดกรอบสด (เขียวสว่าง) เฉพาะของที่ยังเห็นอยู่จริงใน tracker (ไม่ใช่ ghost)
+        # ปกติในโหมด re-baseline ของถูกกลืนเข้า bg ทันที → ตกไป branch COUNTED ด้านล่าง
         item_visible = (
             landed_obj is not None
             and landed_obj.get("ghost_frames", 0) == 0
-            and item_info.get("gone_since") is None
         )
         if item_visible:
             all_gone = False
@@ -375,7 +374,13 @@ def main():
         # ใหม่: OPEN เล็ก (ลบ noise) + CLOSE เล็ก (อุดรูในชิ้นเดิมโดยไม่บวมออก)
         # → กรอบแนบของจริง และของที่อยู่ใกล้กันยังแยกกันอยู่ (ดู core/detect.py)
         fgmask = build_fgmask(
-            diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_CLOSE_KSIZE, MEDIAN_BLUR_KSIZE
+            diff,
+            MOT_THRESH,
+            MORPH_OPEN_KSIZE,
+            MORPH_CLOSE_KSIZE,
+            MEDIAN_BLUR_KSIZE,
+            MORPH_DILATE_KSIZE,
+            MORPH_DILATE_ITER,
         )
 
         roi_manager.reload_if_changed()
@@ -406,9 +411,9 @@ def main():
                 bg_np = bg_frozen_snapshot.copy()
                 print("🔄 BG restored to frozen snapshot")
 
-                # อัปเดต mark_seen สำหรับ confirmed items
-                for oid in list(sm.captured_items.keys()):
-                    sm.mark_seen(oid, now)
+                # รีเซ็ต hold timeout ของ confirmed items (กันตัดระหว่างจัดการ large motion)
+                for _oid, _item in sm.captured_items.items():
+                    _item["land_time"] = now
 
                 # large motion blob นี้ไม่ส่งเข้า tracker ต่อ
                 # แต่ยังให้ tracker update ด้วย detected ที่กรอง large blob ออกแล้ว
@@ -435,7 +440,10 @@ def main():
         # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)
         # แต่ถ้ามีหลายกลุ่มที่ห่างกัน → เก็บทุกกลุ่มไว้เป็น candidate แยกกัน
         merged = group_close_boxes(
-            raw_boxes, max_dist=GROUP_DIST, overlap_pad=GROUP_OVERLAP_PAD
+            raw_boxes,
+            max_dist=GROUP_DIST,
+            overlap_pad=GROUP_OVERLAP_PAD,
+            mode=GROUP_MODE,
         )
         # ลบ biggest-only filter ออก → รักษาทุก merged box
 
@@ -462,22 +470,19 @@ def main():
             reset_grace_until = now + RESET_GRACE_PERIOD
             print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_PERIOD}s")
 
-        def absorb_region(cx, cy, w, h):
-            """[RE-BASELINE] เขียนภาพบริเวณของที่จับได้ทับเข้า background
-            → ของชิ้นนั้นหยุดเป็น motion, ROI ที่เหลือยังพร้อมจับของชิ้นใหม่ทันที"""
-            if cx is None or w is None:
-                return
-            H, W = bg_np.shape[:2]
-            x1 = max(0, int(cx - w / 2) - REBASELINE_PAD)
-            y1 = max(0, int(cy - h / 2) - REBASELINE_PAD)
-            x2 = min(W, int(cx + w / 2) + REBASELINE_PAD)
-            y2 = min(H, int(cy + h / 2) + REBASELINE_PAD)
-            if x2 <= x1 or y2 <= y1:
-                return
-            bg_np[y1:y2, x1:x2] = frame_gray[y1:y2, x1:x2]
-            # อัปเดต snapshot ด้วย เพื่อให้ตอน restore (large motion) ของที่นับแล้วยังถูกกลืน
-            if bg_frozen_snapshot is not None:
-                bg_frozen_snapshot[y1:y2, x1:x2] = frame_gray[y1:y2, x1:x2]
+        def reset_motion_baseline():
+            """[RESET MOTION] เอาเฟรมปัจจุบัน "ทั้งภาพ" มาเป็น background ใหม่
+            → motion mask ว่างเปล่าทันที, ROI สะอาดเอี่ยม พร้อมจับ item ชิ้นถัดไป
+
+            เรียกทันทีหลัง capture item สำเร็จ. ต่างจากการกลืนเฉพาะจุด (เดิม) ตรงที่
+            ล้าง motion ทั้งเฟรม — env ที่เปลี่ยนจากการกระแทก (แม้ก้อนที่ไม่เชื่อมกับ
+            ตัววัตถุ) ก็ถูกกลืนหมด. กรอบเขียว confirm ค้างไว้ที่ตำแหน่งเดิมได้
+            เพราะมันเป็นแค่ overlay วาดจากพิกัดใน captured_items ไม่เกี่ยวกับ mask.
+            """
+            nonlocal bg_np, bg_frozen_snapshot
+            bg_np = frame_gray.copy()
+            # อัปเดต snapshot ด้วย (กันกรณี large_motion restore ดึง bg เก่ากลับมา)
+            bg_frozen_snapshot = frame_gray.copy()
 
         # ── IDLE: รับ order จาก server (ถ้ามี และยัง IDLE อยู่) ───────────────
         if sm.state == "IDLE" and not sm.has_order():
@@ -537,7 +542,7 @@ def main():
                 if presence < MIN_PRESENCE_SEC:
                     continue
 
-                # ของที่ลงจอดแล้ว (นิ่ง) และนิ่งครบ hold สั้น ๆ → พิจารณา capture
+                # ของที่ลงจอดแล้ว (นิ่ง) และนิ่งครบ hold สั้น ๆ → capture
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
                     and (now - obj.get("shape_confirmed_time", now)) >= CAPTURE_HOLD_SEC
@@ -545,56 +550,35 @@ def main():
                     o_cx, o_cy = obj["centroid"]
                     o_w, o_h = obj["shape"]
 
-                    # ── [DISPLACEMENT GUARD] ของที่นับไปแล้วถูกชนขยับ ไม่นับซ้ำ ──
-                    # เฉพาะโหมด re-baseline: ของที่นับแล้วถูกกลืนเข้า bg ไปแล้ว
-                    # ถ้ามันถูกชนขยับ จุดเดิมจะ "ว่างลง" (diff สูง) + โผล่ใกล้ ๆ
-                    verdict, old_id = ("new", None)
-                    if REBASELINE_ON_CAPTURE and sm.captured_items:
-                        anchors = sm.get_anchors()
-                        verdict, old_id = classify_landing(
-                            (o_cx, o_cy, o_w, o_h),
-                            anchors,
-                            diff,
-                            VACATE_MEAN_DIFF,
-                            DISPLACE_RADIUS,
-                            STACK_OVERLAP_RATIO,
-                        )
+                    # ── capture + นับเพิ่ม (ตกที่เดิม = ชิ้นใหม่ ไม่ต้องกันนับซ้ำ) ──
+                    sm.trigger(
+                        "still_in_ROI", obj_id=obj_id, frame=frame,
+                        centroid=(o_cx, o_cy), shape=(o_w, o_h),
+                    )
+                    tracker.mark_confirmed(obj_id)
 
-                    if verdict == "displaced" and old_id is not None:
-                        # ของเดิมขยับมา → re-anchor ที่ตำแหน่งใหม่ (ไม่เพิ่มจำนวน)
-                        old_anchor = next(
-                            (a for a in anchors if a[0] == old_id), None
-                        )
-                        sm.reassign_item(
-                            old_id, obj_id, now,
-                            centroid=(o_cx, o_cy), shape=(o_w, o_h),
-                        )
-                        tracker.mark_confirmed(obj_id)
-                        # กลืนจุดเดิม (ตอนนี้เป็นถาดเปล่า) + จุดใหม่เข้า bg
-                        if old_anchor is not None:
-                            absorb_region(old_anchor[1], old_anchor[2],
-                                          old_anchor[3], old_anchor[4])
-                        absorb_region(o_cx, o_cy, o_w, o_h)
-                    else:
-                        # ของชิ้นใหม่จริง → capture + นับเพิ่ม
-                        sm.trigger(
-                            "still_in_ROI", obj_id=obj_id, frame=frame,
-                            centroid=(o_cx, o_cy), shape=(o_w, o_h),
-                        )
-                        tracker.mark_confirmed(obj_id)
-                        # [RE-BASELINE] กลืนของชิ้นนี้เข้า bg → พร้อมจับชิ้นถัดไปทันที
-                        if REBASELINE_ON_CAPTURE and sm.is_obj_captured(obj_id):
-                            absorb_region(o_cx, o_cy, o_w, o_h)
+                    # ── [RESET MOTION] ล้าง motion mask ทั้งหมดหลัง capture สำเร็จ ──
+                    # เอาเฟรมปัจจุบัน "ทั้งภาพ" มาเป็น background ใหม่
+                    # → motion mask ว่างเปล่าทันที, ROI สะอาดเอี่ยม พร้อมจับชิ้นถัดไป
+                    # กรอบเขียว confirm ค้างไว้ที่ตำแหน่งเดิม (เป็นแค่ overlay ที่วาด
+                    # จากพิกัดใน captured_items — ไม่เกี่ยวกับ motion mask)
+                    # ของชิ้นถัดไปที่ตกลงมา (แม้ตกทับที่เดิม) จะเป็น motion ใหม่
+                    # เพียงชิ้นเดียวในเฟรมสะอาด → capture เป็นชิ้นใหม่ได้
+                    if REBASELINE_ON_CAPTURE and sm.is_obj_captured(obj_id):
+                        reset_motion_baseline()
+                        # ล้าง tracker object ที่ไม่ใช่ confirmed ออก (เป็น motion เก่า
+                        # ที่เพิ่งถูกกลืนเข้า bg แล้ว — ไม่ควรค้างเป็น candidate)
+                        tracker.clear_unconfirmed()
+                        break  # ออกจาก loop tracked เฟรมนี้ (mask เปลี่ยนแล้ว)
 
             # ── ตรวจ timeout / order_window ───────────────────────────────────
-            # [BUG FIX 1] ลำดับความสำคัญ (priority) ของการ reset:
+            # ลำดับความสำคัญ (priority) ของการ reset:
             #   1) order window หมดเวลา (เฉพาะมี order)  → reset
             #   2) มี confirmed item ค้างอยู่ → "ห้าม" reset ที่ block นี้เลย
             #        ปล่อยให้ block EVIDENCE_CAPTURED ด้านล่างเป็นผู้ตัดสินด้วย
-            #        CONFIRMED_HOLD_TIMEOUT เป็นหลัก (priority สูงสุด)
-            #        → กัน DROP_TIMEOUT / frame-ว่าง / gone_timer มา reset เอง
-            #          ทั้งที่ hold countdown ยังนับอยู่และของยังค้างใน ROI
-            #        (gone_timer ยังทำงานปกติ แต่ถูก gate ด้วย hold_timeout ใน block ล่าง)
+            #        CONFIRMED_HOLD_TIMEOUT (นับใหม่ทุกครั้งที่มี motion/ของใหม่)
+            #        → กัน DROP_TIMEOUT / frame-ว่าง มา reset เองทั้งที่ hold countdown
+            #          ยังนับอยู่ (รอว่าไม่มีของตกเพิ่มแล้วจริง)
             #   3) ไม่มี order + ไม่มี confirmed item + เกิน DROP_TIMEOUT → reset
             #   4) ไม่มี confirmed item + frame ว่าง → reset
             if sm.has_order() and sm.is_order_window_expired(now):
@@ -646,62 +630,36 @@ def main():
                 )
 
                 if has_active_motion:
-                    # หยุดนับ hold_elapsed โดย reset land_time ของทุก item ไปที่ now
-                    # และ reset gone_since เพื่อไม่ให้ check_all_gone() คืน True
+                    # มือ/ของใหม่เข้ามาใน ROI → หยุดนับ hold_elapsed
+                    # reset land_time ของทุก item ไปที่ now = เริ่มนับ hold timeout ใหม่
+                    # (รอว่าไม่มีของตกเพิ่มอีกแล้วจริง ก่อนจะ reset)
                     for oid, item_info in sm.captured_items.items():
-                        item_info["land_time"] = now      # freeze hold_elapsed
-                        item_info["gone_since"] = None    # freeze gone timer
+                        item_info["land_time"] = now
                     hold_elapsed = 0.0
                     # (ไม่ print ทุก frame เพื่อไม่ spam log)
                 else:
                     hold_elapsed = now - latest_item["land_time"]
 
-                # [FIX: gone_timer] อัปเดต gone_since ของแต่ละ confirmed item
-                # mark_gone จะเริ่มนับเฉพาะเมื่อ hold_elapsed ครบแล้วเท่านั้น
-                # ป้องกัน gone_timer reset ก่อน hold_timeout ทั้งที่ timer ยังนับอยู่
-                # ถ้ายังมี has_active_motion → ข้าม mark_gone ทั้งหมด
-                hold_timeout_reached = hold_elapsed >= CONFIRMED_HOLD_TIMEOUT
-                for oid in list(sm.captured_items.keys()):
-                    o = tracked.get(oid)
-                    item_visible = o is not None and o.get("ghost_frames", 0) == 0
-                    if item_visible:
-                        sm.mark_seen(oid, now)
-                    elif not has_active_motion and hold_timeout_reached:
-                        sm.mark_gone(oid, now)
-
-                all_really_gone = sm.check_all_gone(now)
-                if all_really_gone and not has_active_motion:
-                    # ของหายไปจริง และไม่มี motion แทรก (ไม่ใช่ถูกบัง/slat)
-                    n = sm.item_count()
-                    print(f"✅ ของออกจาก ROI ทั้งหมด → RESET ({n} ชิ้น)")
-                    if sm.has_order():
+                # ── ตัดสิน reset ──────────────────────────────────────────────
+                # ของถูกกลืนเข้า bg ทันทีหลัง capture (re-baseline) → มองไม่เห็นของที่
+                # นับแล้วอีก จึงไม่ตรวจ "ของหายจาก ROI จริง" (เป็นไปไม่ได้) แต่ใช้กติกา:
+                #   - มี order  → รอ order window หมด แล้ว finalize
+                #   - ไม่มี order → "ครบ hold timeout ไม่มี motion = ไม่มีของตกเพิ่ม → reset"
+                #       ทุกครั้งที่มี motion/ของใหม่ land_time ถูกรีเซ็ต = นับ hold ใหม่
+                if sm.has_order():
+                    if sm.is_order_window_expired(now):
+                        # order window หมด → สรุปผล order แล้ว reset
                         sm.finalize_order(frame=frame)
                         clear_pending_order()
-                    do_reset()
-                elif all_really_gone and has_active_motion:
-                    # ของหายแต่ยังมี motion → อาจถูกบัง รอจนนิ่งก่อน
-                    pass
-                elif sm.has_order() and sm.is_order_window_expired(now):
-                    # order_window หมดเวลาใน EVIDENCE_CAPTURED → สรุปผลทันที
-                    sm.finalize_order(frame=frame)
-                    clear_pending_order()
-                    do_reset()
-                elif hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
-                    # ── ถ้ามี order window ยังเปิดอยู่ → ข้าม force reset ────
-                    # CONFIRMED_HOLD_TIMEOUT ไม่ควรตัดก่อน order window จบ
-                    # รอให้ is_order_window_expired() จัดการเองแทน
-                    if sm.has_order() and not sm.is_order_window_expired(now):
-                        pass  # รอต่อ
-                    else:
-                        n = sm.item_count()
-                        print(
-                            f"⏰ Force reset — จับของได้ {n} ชิ้น "
-                            f"(txn={sm.transaction_id})"
-                        )
-                        if sm.has_order():
-                            sm.finalize_order(frame=frame)
-                            clear_pending_order()
                         do_reset()
+                    # order ยังไม่หมด → รอต่อ (hold timeout ไม่ตัดก่อน order window)
+                elif not has_active_motion and hold_elapsed >= CONFIRMED_HOLD_TIMEOUT:
+                    n = sm.item_count()
+                    print(
+                        f"⏰ ครบ {CONFIRMED_HOLD_TIMEOUT}s ไม่มีของตกเพิ่ม → "
+                        f"RESET (จับได้ {n} ชิ้น, txn={sm.transaction_id})"
+                    )
+                    do_reset()
 
         # ── วาด overlay ลงจอ (เฉพาะโหมด DISPLAY — ข้ามทั้งหมดบน Pi/HEADLESS) ──
         if not HEADLESS:

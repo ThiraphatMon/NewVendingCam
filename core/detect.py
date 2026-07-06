@@ -16,10 +16,17 @@ core/detect.py — foreground-mask building + blob separation
 
 import cv2
 import numpy as np
-import math
 
 
-def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3, median_ksize=0):
+def build_fgmask(
+    diff,
+    mot_thresh,
+    open_ksize=3,
+    close_ksize=3,
+    median_ksize=0,
+    dilate_ksize=0,
+    dilate_iter=0,
+):
     """
     สร้าง binary motion mask จากภาพ diff (absdiff ระหว่างเฟรมกับ background)
 
@@ -27,6 +34,14 @@ def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3, median_ksize=0):
                    สำคัญตอน mot_thresh ต่ำ ๆ — ลบจุด noise กระจายโดยไม่กินของตัน
     open_ksize   : ขนาด kernel ของ MORPH_OPEN — ลบ noise จุดเล็ก ๆ
     close_ksize  : ขนาด kernel ของ MORPH_CLOSE — อุดรูภายในชิ้นเดิมโดยไม่บวมออก
+    dilate_ksize : ขนาด kernel ของ MORPH_DILATE — ขยาย/เชื่อม mask ของชิ้นเดียว
+                   ที่ขาดเป็นหย่อม ๆ ให้ตันเป็นก้อนเดียว (สไตล์ OLD ที่ detect แม่น)
+                   0 = ปิด (ใช้เฉพาะ OPEN+CLOSE เล็กแบบเดิม)
+    dilate_iter  : จำนวนรอบที่ทำ DILATE (OLD ใช้ 2). 0 = ปิด
+
+    ลำดับ: threshold → median → OPEN (ลบ noise) → CLOSE (อุดรู) → DILATE (เชื่อมชิ้น)
+    เหตุที่ DILATE อยู่ท้ายสุด: ให้ลบ noise ออกก่อน (OPEN) แล้วค่อยขยายเฉพาะ
+    มวลของจริงที่เหลือ — ถ้า dilate ก่อน noise จะถูกขยายตามไปด้วย
     """
     fgmask = np.where(diff > mot_thresh, np.uint8(255), np.uint8(0))
 
@@ -39,6 +54,11 @@ def build_fgmask(diff, mot_thresh, open_ksize=3, close_ksize=3, median_ksize=0):
     if close_ksize and close_ksize >= 1:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_CLOSE, k)
+    if dilate_ksize and dilate_ksize >= 1 and dilate_iter and dilate_iter >= 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_ksize, dilate_ksize))
+        fgmask = cv2.morphologyEx(
+            fgmask, cv2.MORPH_DILATE, k, iterations=dilate_iter
+        )
     return fgmask
 
 
@@ -67,71 +87,3 @@ def contour_boxes(fgmask, min_area, min_solidity=0.0):
                 continue
         boxes.append((x, y, w, h))
     return boxes
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Displacement guard — กันการนับของที่ "นับไปแล้ว" ซ้ำ เมื่อมันถูกชนขยับ
-# ─────────────────────────────────────────────────────────────────────────────
-def region_activity(diff, cx, cy, w, h, pad=0):
-    """
-    ค่าเฉลี่ยความต่าง (motion) ในกรอบรอบจุด (cx, cy)
-    สูง = บริเวณนั้นมีการเปลี่ยนแปลง (ของเพิ่งออกจากจุดนี้ / มีของมาทับ)
-    ต่ำ (~0) = ตรงกับ background = ของยังอยู่ที่เดิม (หลังถูกกลืนเข้า bg แล้ว)
-    """
-    H, W = diff.shape[:2]
-    x1 = max(0, int(cx - w / 2) - pad)
-    y1 = max(0, int(cy - h / 2) - pad)
-    x2 = min(W, int(cx + w / 2) + pad)
-    y2 = min(H, int(cy + h / 2) + pad)
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-    return float(diff[y1:y2, x1:x2].mean())
-
-
-def _boxes_overlap_ratio(a, b):
-    """สัดส่วนพื้นที่ทับกันเทียบกับกล่องที่เล็กกว่า (a, b = (cx,cy,w,h))"""
-    ax1, ay1 = a[0] - a[2] / 2, a[1] - a[3] / 2
-    ax2, ay2 = a[0] + a[2] / 2, a[1] + a[3] / 2
-    bx1, by1 = b[0] - b[2] / 2, b[1] - b[3] / 2
-    bx2, by2 = b[0] + b[2] / 2, b[1] + b[3] / 2
-    ix = max(0, min(ax2, bx2) - max(ax1, bx1))
-    iy = max(0, min(ay2, by2) - max(ay1, by1))
-    inter = ix * iy
-    small = max(1.0, min(a[2] * a[3], b[2] * b[3]))
-    return inter / small
-
-
-def classify_landing(
-    landing, anchors, diff, vacate_mean_diff, displace_radius, stack_overlap=0.6
-):
-    """
-    ตัดสินว่า blob ที่เพิ่งลงจอด (landing = (cx,cy,w,h)) คือ:
-      - ('new', None)            → ของชิ้นใหม่จริง → นับเพิ่ม
-      - ('displaced', anchor_id) → ของที่นับไปแล้วถูกชนขยับมาที่นี่ → ไม่นับเพิ่ม
-
-    anchors : list ของ (anchor_id, ax, ay, aw, ah) = ตำแหน่งของที่จับ/นับไปแล้ว
-
-    หลัก conservation:
-      ของชิ้นเดิมที่ "ถูกชนขยับ" จะทำให้จุดเดิมของมัน "ว่างลง" (diff สูงเพราะ bg ยังจำ
-      ของไว้ที่จุดเดิม แต่ตอนนี้เป็นถาดเปล่า) และ blob ใหม่โผล่ใกล้ ๆ จุดเดิม
-      → ถือเป็นของเดิมที่ขยับ ไม่ใช่ชิ้นใหม่
-
-    ข้อยกเว้น (ของตกทับ = stacking):
-      ถ้า blob ใหม่ "ทับ" anchor เดิมเยอะ (overlap >= stack_overlap) → เป็นของชิ้นใหม่
-      ที่ตกลงมาทับของเดิม (ไม่ใช่ของเดิมขยับ) → นับเป็นชิ้นใหม่
-    """
-    lcx, lcy, lw, lh = landing
-    best, best_d = None, float("inf")
-    for aid, ax, ay, aw, ah in anchors:
-        d = math.hypot(lcx - ax, lcy - ay)
-        if d > displace_radius:
-            continue
-        # ตกทับของเดิม (overlap สูง) → ไม่ถือว่า displaced แต่เป็นชิ้นใหม่ซ้อน
-        if _boxes_overlap_ratio(landing, (ax, ay, aw, ah)) >= stack_overlap:
-            continue
-        vacated = region_activity(diff, ax, ay, aw, ah, pad=2) > vacate_mean_diff
-        if vacated and d < best_d:
-            best_d, best = d, aid
-    if best is not None:
-        return ("displaced", best)
-    return ("new", None)

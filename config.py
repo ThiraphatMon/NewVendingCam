@@ -11,8 +11,22 @@ CAMERA_INDEX = int(_cam_src) if _cam_src.isdigit() else _cam_src
 FRAME_W = 640
 FRAME_H = 480
 MIN_AREA = int(os.getenv("MIN_AREA", "150"))
-GROUP_DIST = 200
-CONFIRM_TIME = 0.5
+
+# GROUP_DIST : ระยะห่าง (px) ระหว่างขอบกล่องที่ยังรวมเป็นชิ้นเดียว (โหมด distance)
+#   - เล็ก (~40-60) → เชื่อมเฉพาะชิ้นส่วนของวัตถุเดียวที่ mask ขาด
+#     แต่ของ 2 ชิ้นที่ตกห่างกันจะไม่ถูกรวม → แยกนับเป็นหลายชิ้นได้ (ตรงตามที่ต้องการ)
+#   - ใหญ่ (~100+) → รวมของที่ห่างกันด้วย เสี่ยง 2 ชิ้นกลายเป็นก้อนเดียว
+#   [FIX] เดิม 200 กว้างเกินไป (และ MAIN ไม่ได้ใช้เป็นเกณฑ์รวมด้วย) → ตั้ง 60
+GROUP_DIST = int(os.getenv("GROUP_DIST", "60"))
+
+# GROUP_MODE : วิธีรวมกล่องที่แตกจาก contour
+#   - "distance" → รวมกล่องที่ขอบห่างกันน้อยกว่า GROUP_DIST (สไตล์ OLD ที่ detect แม่น)
+#                  เชื่อมชิ้นส่วนวัตถุเดียวกลับเป็นก้อน แต่ของที่ตกห่างยังแยกกัน
+#   - "overlap"  → รวมเฉพาะกล่องที่ซ้อนทับกันจริง (±GROUP_OVERLAP_PAD)
+#                  แยกของที่บินใกล้กันได้ดี แต่วัตถุเดียวที่ mask ขาดจะไม่ถูกเชื่อม
+GROUP_MODE = os.getenv("GROUP_MODE", "distance").strip().lower()
+
+CONFIRM_TIME = 1
 DROP_TIMEOUT = 25.0
 
 # ── Capture responsiveness (จับของให้ไว = "ของหยุดนิ่ง" คือ "ตกถึงที่แล้ว") ──────
@@ -41,23 +55,38 @@ CENTROID_STABLE_DIST = int(os.getenv("CENTROID_STABLE_DIST", "10"))
 # ทุกค่าปรับผ่าน .env ได้ ไม่ต้องแก้โค้ด
 #
 # MOT_THRESH : ความไวการจับ motion (ค่า diff ของสีเทาที่ถือว่า "เปลี่ยน")
-#   - ต่ำลง (เช่น 18) → จับของชิ้นเล็ก/สีใกล้พื้นหลังได้ดีขึ้น แต่ noise/แสงสะท้อนมากขึ้น
-#   - สูงขึ้น (เช่น 30) → เงียบขึ้น แต่ของจาง ๆ อาจหลุด
-MOT_THRESH = int(os.getenv("MOT_THRESH", "5"))
+#   - ต่ำลง (เช่น 5-18) → จับของชิ้นเล็ก/สีใกล้พื้นหลังได้ แต่ noise/แสงสะท้อนพุ่ง
+#   - สูงขึ้น (เช่น 25-30) → เงียบขึ้น กรอบแนบของจริง แต่ของจาง ๆ อาจหลุด
+#   [FIX] คืนค่ากลับเป็น 25 (เท่ากับเวอร์ชันที่ detect แม่น) — ค่า 5 ต่ำเกินไป
+#   ทำให้เงา/แสงสั่น/สัญญาณรบกวนกล้องถูกนับเป็น motion จนกรอบวัตถุเพี้ยน
+MOT_THRESH = int(os.getenv("MOT_THRESH", "25"))
 
 # MEDIAN_BLUR_KSIZE : ลบ speckle noise ก่อน threshold (เลขคี่ 3/5; 0=ปิด)
 #   สำคัญมากตอน MOT_THRESH ต่ำ ๆ — median ลบจุด noise กระจายได้ดีโดยแทบไม่กินของตัน
-#   → กัน "นับเกินเพราะ noise" ได้ตรงจุด โดยไม่ต้องดัน MOT_THRESH สูงจนของเล็กหลุด
-MEDIAN_BLUR_KSIZE = int(os.getenv("MEDIAN_BLUR_KSIZE", "5"))
+#   [FIX] เมื่อ MOT_THRESH กลับเป็น 25 แล้ว noise น้อยลงมาก จึงปิด median (0)
+#   ให้ pipeline ตรงกับเวอร์ชันที่ detect แม่น (median อาจกัดขอบของชิ้นเล็ก)
+MEDIAN_BLUR_KSIZE = int(os.getenv("MEDIAN_BLUR_KSIZE", "0"))
 
 # MIN_SOLIDITY : สัดส่วน (พื้นที่จริงของ blob / พื้นที่กรอบ) ขั้นต่ำ (0.0-1.0; 0=ปิด)
 #   ของจริงเป็นก้อนตัน (solidity สูง) / noise กระจายเป็นเส้น-จุด (solidity ต่ำ) → ตัดทิ้ง
-MIN_SOLIDITY = float(os.getenv("MIN_SOLIDITY", "0.35"))
+#   [FIX] ปิด (0) — จำเป็นเฉพาะตอน MOT_THRESH ต่ำที่มี noise เยอะ
+#   เมื่อ threshold=25 + DILATE เชื่อม mask แล้ว ของจริงจะตันอยู่แล้ว
+#   ถ้าเปิดไว้อาจตัดวัตถุจริงที่รูปร่างโปร่ง (เช่น ซองใส) ทิ้งโดยไม่ตั้งใจ
+MIN_SOLIDITY = float(os.getenv("MIN_SOLIDITY", "0.0"))
 
-# ขนาด kernel ของ morphology (เลขคี่). เดิมใช้ DILATE 5x5 x2 ซึ่งทำให้กรอบบวม
-# และรวมของ 2 ชิ้นที่อยู่ใกล้กันเป็นก้อนเดียว → ตอนนี้ใช้ OPEN+CLOSE เล็ก ๆ แทน
-MORPH_OPEN_KSIZE = int(os.getenv("MORPH_OPEN_KSIZE", "3"))   # ลบ noise จุดเล็ก (0=ปิด)
-MORPH_CLOSE_KSIZE = int(os.getenv("MORPH_CLOSE_KSIZE", "3"))  # อุดรูในชิ้นเดิม (0=ปิด)
+# ขนาด kernel ของ morphology (เลขคี่).
+# เวอร์ชันที่ detect แม่นใช้ OPEN 5x5 แล้ว DILATE 5x5 iterations=2
+#   OPEN → ลบ noise จุดเล็ก, DILATE → เชื่อม mask ของชิ้นเดียวที่ขาดให้ตัน
+MORPH_OPEN_KSIZE = int(os.getenv("MORPH_OPEN_KSIZE", "5"))   # ลบ noise จุดเล็ก (0=ปิด)
+MORPH_CLOSE_KSIZE = int(os.getenv("MORPH_CLOSE_KSIZE", "0"))  # อุดรูในชิ้นเดิม (0=ปิด)
+
+# [FIX] คืน DILATE กลับเข้า pipeline (สไตล์ OLD ที่ detect รูปร่างแม่น)
+#   ทำให้ mask ของวัตถุชิ้นเดียวที่ขาดเป็นหย่อม ๆ เชื่อมเป็นก้อนตัน
+#   → contour เดียว, กรอบครอบของเต็ม, รูปร่างไม่กระท่อนกระแท่น
+#   หมายเหตุ: DILATE ทำให้กรอบพองออกเล็กน้อย (~ksize/2 px รอบด้าน) ซึ่งเป็น
+#   trade-off ที่เวอร์ชันแม่นยอมรับเพื่อให้ได้รูปร่างที่ต่อเนื่อง
+MORPH_DILATE_KSIZE = int(os.getenv("MORPH_DILATE_KSIZE", "5"))  # 0=ปิด
+MORPH_DILATE_ITER = int(os.getenv("MORPH_DILATE_ITER", "2"))    # 0=ปิด
 
 # ระยะ (px) ที่ยอมให้กล่องซ้อน/ชิดกันแล้วรวมเป็นชิ้นเดียว (เผื่อชิ้นเดียวแตกเป็นหลาย contour)
 GROUP_OVERLAP_PAD = int(os.getenv("GROUP_OVERLAP_PAD", "4"))
@@ -74,32 +103,26 @@ TRACK_MATCH_DIST = int(os.getenv("TRACK_MATCH_DIST", "150"))
 #      (ถ้า REBASELINE=1 ของถูกกลืนเข้า bg จนมองไม่เห็น กรอบจะ track ไม่ได้)
 TRACK_CONFIRMED_ITEMS = os.getenv("TRACK_CONFIRMED_ITEMS", "1") == "1"
 
-# ── Re-baseline on capture (จับชิ้นแล้ว "กลืน" เข้า bg เพื่อพร้อมจับชิ้นถัดไปทันที) ──
-# เมื่อ capture ของชิ้นหนึ่งได้ → เขียนภาพบริเวณนั้นทับเข้า background
-# ผล: ของชิ้นนั้นหยุดเป็น motion, ROI ที่เหลือยังไวต่อของชิ้นใหม่ที่ตกมา
+# ── Re-baseline on capture (จับชิ้นแล้วล้าง motion ทั้งเฟรม เพื่อพร้อมจับชิ้นถัดไป) ──
+# เมื่อ capture item ได้ → เอาเฟรมปัจจุบัน "ทั้งภาพ" มาเป็น background ใหม่
+# ผล: motion mask ว่างเปล่าทันที, ROI สะอาดเอี่ยม, env ที่เปลี่ยนจากการกระแทกถูกล้างหมด
+#     ของชิ้นถัดไป (แม้ตกทับที่เดิม) จะเป็น motion ใหม่ → นับเป็นชิ้นใหม่ได้
+#     กรอบเขียว confirm ค้างไว้ที่ตำแหน่งเดิม (overlay จาก captured_items)
+# ตั้ง 0 = ปิด (ของที่นับแล้วจะยังเป็น motion ค้าง — ไม่แนะนำ)
 REBASELINE_ON_CAPTURE = os.getenv("REBASELINE_ON_CAPTURE", "1") == "1"
-REBASELINE_PAD = int(os.getenv("REBASELINE_PAD", "6"))  # px เผื่อรอบกรอบตอนกลืน
-
-# ── Displacement guard: ของที่นับแล้วถูกชนขยับ → ไม่นับซ้ำ (conservation) ──────
-# ระยะ (px) จากจุดเดิมที่ยังถือว่า blob ใหม่ = ของเดิมที่ขยับมา
-DISPLACE_RADIUS = int(os.getenv("DISPLACE_RADIUS", "130"))
-# ค่าเฉลี่ย diff ในกรอบเดิม ที่ถือว่า "ของออกจากจุดเดิมแล้ว (ว่างลง)"
-VACATE_MEAN_DIFF = float(os.getenv("VACATE_MEAN_DIFF", "12"))
-# blob ใหม่ที่ทับ anchor เดิม >= สัดส่วนนี้ = ของตกทับ (นับใหม่) ไม่ใช่ของเดิมขยับ
-STACK_OVERLAP_RATIO = float(os.getenv("STACK_OVERLAP_RATIO", "0.4"))
 
 # ── Count cap: ถ้ามี order → ห้ามนับเกินจำนวนที่สั่ง (กัน over-count 1→2→3) ─────
 # backstop ที่เชื่อถือได้สุดสำหรับกันการนับเกิน เพราะรู้ qty ที่สั่งอยู่แล้ว
 # [แก้ bug] เดิม '== "0"' ทำให้ตรรกะกลับด้าน — แก้เป็น '== "1"' (1=เปิด, 0=ปิด)
 CAP_COUNT_TO_ORDER_QTY = os.getenv("CAP_COUNT_TO_ORDER_QTY", "1") == "1"
 
-# ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED
-# ก่อน force reset — ป้องกันกรณีของค้างใน ROI นานเกินไป
-CONFIRMED_HOLD_TIMEOUT = 20  # วินาที (ปรับได้)
-
-# ระยะเวลาที่ confirmed item หายจาก ROI (ถูกบัง/slat) ก่อนจะถือว่าหายจริง
-# ถ้ากลับมาปรากฏก่อน timeout → ยังอยู่, reset hold timeout ใหม่
-CONFIRMED_ITEM_GONE_TIMEOUT = 5  # วินาที (ปรับได้)
+# ระยะเวลาสูงสุดที่ระบบจะค้างอยู่ใน EVIDENCE_CAPTURED ก่อน reset (กรณีไม่มี order)
+# ตีความ: "รอว่าไม่มีของตกเพิ่มอีกแล้วจริง" — ทุกครั้งที่มี motion/ของใหม่เข้ามา
+# ตัวนับนี้จะถูกรีเซ็ตกลับไปนับใหม่ (ดู has_active_motion ใน main.py)
+# → นับครบโดยไม่มี motion แทรก = ไม่มีของตกเพิ่มแล้ว → reset
+# หมายเหตุ: ในโหมด re-baseline ของถูกกลืนเข้า bg หลัง capture จึงมองไม่เห็นของที่นับ
+# แล้ว การตรวจ "ของออกจาก ROI จริง" เป็นไปไม่ได้ → ใช้ hold timeout นี้เป็นตัวตัดสิน
+CONFIRMED_HOLD_TIMEOUT = int(os.getenv("CONFIRMED_HOLD_TIMEOUT", "20"))  # วินาที
 
 # สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
 MAX_BLOB_ROI_RATIO = 0.60  # สัดส่วน 0.0-1.0 (ปรับได้)

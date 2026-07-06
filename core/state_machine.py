@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from api.retry_queue import send_or_queue
 from utils.image_saver import save_evidence_image
-from config import CONFIRMED_ITEM_GONE_TIMEOUT, ORDER_WINDOW, CAP_COUNT_TO_ORDER_QTY
+from config import ORDER_WINDOW, CAP_COUNT_TO_ORDER_QTY
 
 
 class VendingStateMachine:
@@ -178,7 +178,6 @@ class VendingStateMachine:
             "land_time": now,
             "land_img_path": img_path,
             "item_no": item_no,
-            "gone_since": None,
             # ── anchor geometry (สำหรับ re-baseline / displacement guard) ──
             "cx": cx,
             "cy": cy,
@@ -268,43 +267,6 @@ class VendingStateMachine:
         ).start()
 
     # ─────────────────────────────────────────────
-    # gone_since timer
-    # ─────────────────────────────────────────────
-
-    def mark_gone(self, obj_id, now):
-        if obj_id in self.captured_items:
-            item = self.captured_items[obj_id]
-            if item["gone_since"] is None:
-                item["gone_since"] = now
-                print(
-                    f"[{self.machine_id}] ⏳ item#{item['item_no']} (obj#{obj_id}) "
-                    f"หายจาก ROI — เริ่มนับ gone_timer"
-                )
-            # ไม่ print ซ้ำถ้า gone_since ถูกตั้งไปแล้ว (ป้องกัน log flood)
-
-    def mark_seen(self, obj_id, now):
-        if obj_id in self.captured_items:
-            item = self.captured_items[obj_id]
-            if item["gone_since"] is not None:
-                gone_duration = now - item["gone_since"]
-                print(
-                    f"[{self.machine_id}] ✅ item#{item['item_no']} (obj#{obj_id}) "
-                    f"กลับมาปรากฏ (หายไป {gone_duration:.1f}s) — reset hold_timeout"
-                )
-                item["gone_since"] = None
-                item["land_time"] = now
-
-    def check_all_gone(self, now):
-        if not self.captured_items:
-            return False
-        for obj_id, item in self.captured_items.items():
-            if item["gone_since"] is None:
-                return False
-            if (now - item["gone_since"]) < CONFIRMED_ITEM_GONE_TIMEOUT:
-                return False
-        return True
-
-    # ─────────────────────────────────────────────
     # helpers
     # ─────────────────────────────────────────────
 
@@ -316,37 +278,6 @@ class VendingStateMachine:
 
     def is_obj_captured(self, obj_id):
         return obj_id in self.captured_items
-
-    def get_anchors(self):
-        """
-        คืน list ของ (obj_id, cx, cy, w, h) สำหรับของที่จับ/นับไปแล้ว
-        (เฉพาะที่มีพิกัดครบ) — ใช้ทำ displacement guard + re-baseline
-        """
-        out = []
-        for oid, it in self.captured_items.items():
-            if it.get("cx") is not None and it.get("w"):
-                out.append((oid, it["cx"], it["cy"], it["w"], it["h"]))
-        return out
-
-    def reassign_item(self, old_obj_id, new_obj_id, now, centroid=None, shape=None):
-        """
-        ของที่นับไปแล้ว (old_obj_id) ถูกชนขยับ แล้วโผล่เป็น track ใหม่ (new_obj_id)
-        → ย้าย record เดิมมาที่ id ใหม่ (คง item_no เดิม, ไม่เพิ่มจำนวน) + อัปเดตพิกัด
-        """
-        if old_obj_id not in self.captured_items or old_obj_id == new_obj_id:
-            return
-        item = self.captured_items.pop(old_obj_id)
-        item["land_time"] = now
-        item["gone_since"] = None
-        if centroid:
-            item["cx"], item["cy"] = centroid
-        if shape:
-            item["w"], item["h"] = shape
-        self.captured_items[new_obj_id] = item
-        print(
-            f"[{self.machine_id}] 🔁 item#{item['item_no']} ถูกชนขยับ "
-            f"(obj#{old_obj_id}→#{new_obj_id}) — re-anchor ไม่นับซ้ำ"
-        )
 
     def _ts(self, t):
         return datetime.fromtimestamp(t).strftime("%H:%M:%S")
