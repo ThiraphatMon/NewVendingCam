@@ -9,7 +9,6 @@ from config import (
     MIN_AREA,
     GROUP_DIST,
     DROP_TIMEOUT,
-    CONFIRM_TIME,
     CONFIRMED_HOLD_TIMEOUT,
     MACHINE_ID,
     HEADLESS,
@@ -20,9 +19,6 @@ from config import (
     MORPH_OPEN_KSIZE,
     MORPH_CLOSE_KSIZE,
     GROUP_OVERLAP_PAD,
-    ENABLE_BLOB_SPLIT,
-    SPLIT_DIST_RATIO,
-    SPLIT_MIN_SEED_AREA,
     MIN_PRESENCE_SEC,
     CAPTURE_HOLD_SEC,
     REBASELINE_ON_CAPTURE,
@@ -37,10 +33,9 @@ import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
 from api.retry_queue import start_retry_thread
 from core.tracker import MemoryTracker, group_close_boxes
-from core.detect import build_fgmask, split_boxes, classify_landing, contour_boxes
+from core.detect import build_fgmask, classify_landing, contour_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
-from utils.logger import get_logger
 from utils.disk_cleanup import start_cleanup_thread
 
 from api.sent_frame import send_frame
@@ -50,7 +45,176 @@ from api.order_listener import (
     clear_pending_order,
 )
 
-logger = get_logger("main")
+
+
+def draw_captured_items(frame, sm, tracked, now):
+    """วาดกรอบของที่ confirmed แล้ว (ใช้เฉพาะโหมด DISPLAY)."""
+    all_gone = True
+    for obj_id, item_info in sm.captured_items.items():
+        landed_obj = tracked.get(obj_id)
+        # วาดกรอบเฉพาะของที่ยังเห็นอยู่จริง (ไม่ใช่ ghost และ gone_since = None)
+        item_visible = (
+            landed_obj is not None
+            and landed_obj.get("ghost_frames", 0) == 0
+            and item_info.get("gone_since") is None
+        )
+        if item_visible:
+            all_gone = False
+            # วาดกรอบสีเขียว (confirmed)
+            cx, cy = landed_obj["centroid"]
+            w, h = landed_obj["shape"]
+            latest_land = max(
+                sm.captured_items.values(), key=lambda i: i["land_time"]
+            )["land_time"]
+            hold_elapsed = now - latest_land
+            time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
+            cv2.rectangle(
+                frame,
+                (cx - w // 2, cy - h // 2),
+                (cx + w // 2, cy + h // 2),
+                (0, 255, 0),
+                3,
+            )
+            cv2.putText(
+                frame,
+                f"#{item_info['item_no']} CONFIRMED ({time_left:.0f}s)",
+                (cx - w // 2, cy - h // 2 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.40,
+                (0, 255, 0),
+                1,
+            )
+        elif (
+            REBASELINE_ON_CAPTURE
+            and item_info.get("cx") is not None
+            and item_info.get("w")
+        ):
+            # [RE-BASELINE] ของถูกกลืนเข้า bg แล้ว (ไม่อยู่ใน tracker)
+            # → วาดกรอบจากพิกัดที่จำไว้ เพื่อให้เห็นว่านับชิ้นนี้แล้ว
+            cx, cy = int(item_info["cx"]), int(item_info["cy"])
+            w, h = int(item_info["w"]), int(item_info["h"])
+            cv2.rectangle(
+                frame,
+                (cx - w // 2, cy - h // 2),
+                (cx + w // 2, cy + h // 2),
+                (0, 200, 0),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"#{item_info['item_no']} COUNTED",
+                (cx - w // 2, cy - h // 2 - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.40,
+                (0, 200, 0),
+                1,
+            )
+
+
+def render_overlay(frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, actual_h):
+    """วาด ROI + badges + กรอบ tracked objects ลงบน frame (ใช้เฉพาะโหมด DISPLAY)."""
+    # ── วาด ROI + state badge ───────────────────────────────────────────
+    roi_manager.draw(frame)
+    color = (
+        (0, 255, 0)
+        if sm.state == "EVIDENCE_CAPTURED"
+        else (0, 200, 255) if sm.state == "DROP_DETECTED" else (150, 150, 150)
+    )
+
+    if bg_frozen:
+        cv2.putText(
+            frame,
+            "BG FROZEN",
+            (10, actual_h - 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 200, 0),
+            1,
+        )
+
+    # item count badge (แสดงเฉพาะตอนกำลังจับของ)
+    if sm.state != "IDLE" and sm.item_count() > 0:
+        badge = f"Items: {sm.item_count()}"
+        cv2.putText(
+            frame,
+            badge,
+            (10, actual_h - 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 200),
+            1,
+        )
+
+    # ── order window countdown badge (ขวาล่าง) ──────────────────────────
+    if sm.has_order() and sm.order_window_start is not None:
+        elapsed = now - sm.order_window_start
+        time_left = max(0, ORDER_WINDOW - elapsed)
+        order_badge = (
+            f"ORDER #{sm.current_order['id']} "
+            f"{sm.item_count()}/{sm.order_qty()} "
+            f"({time_left:.0f}s)"
+        )
+        # คำนวณ x ให้ชิดขวา
+        (badge_w, badge_h), _ = cv2.getTextSize(
+            order_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
+        )
+        badge_x = actual_w - badge_w - 10
+        badge_y = actual_h - 15
+        cv2.putText(
+            frame,
+            order_badge,
+            (badge_x, badge_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 200, 255),
+            2,
+        )
+
+    cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
+    cv2.putText(
+        frame,
+        sm.state,
+        (actual_w - 245, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2,
+    )
+
+    # ── วาดกรอบ tracked objects ที่ยังไม่ confirmed ─────────────────────
+    sc = {
+        "CONFIRMED_STOP": (0, 255, 0),
+        "SHAPE_CONFIRMED": (0, 255, 0),
+        "MOVING": (0, 0, 255),
+        "DETECTING": (0, 140, 255),
+    }
+
+    for obj_id, obj in tracked.items():
+        # ข้ามของที่ confirmed แล้ว (วาดไปแล้วด้านบน)
+        if sm.is_obj_captured(obj_id):
+            continue
+        cx, cy = obj["centroid"]
+        w, h = obj["shape"]
+        state = obj["state"]
+        box_color = (
+            (0, 165, 255) if "WAITING" in state else sc.get(state, (0, 0, 255))
+        )
+        cv2.rectangle(
+            frame,
+            (cx - w // 2, cy - h // 2),
+            (cx + w // 2, cy + h // 2),
+            box_color,
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"ID:{obj_id} {state[:12]}",
+            (cx - w // 2, cy - h // 2 - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            box_color,
+            1,
+        )
 
 
 def main():
@@ -275,18 +439,6 @@ def main():
         )
         # ลบ biggest-only filter ออก → รักษาทุก merged box
 
-        # [ACCURACY] แยกของหลายชิ้นที่ตกมาติดกัน: ถ้า blob ก้อนเดียวใหญ่พอจะมี >=2 ชิ้น
-        # ใช้ distance-transform + watershed แยกกลับเป็นหลายกล่องตามยอดของแต่ละชิ้น
-        if ENABLE_BLOB_SPLIT:
-            merged = split_boxes(
-                fgmask,
-                merged,
-                MIN_AREA,
-                min_seed_area=SPLIT_MIN_SEED_AREA,
-                dist_ratio=SPLIT_DIST_RATIO,
-            )
-        # ─────────────────────────────────────────────────────────────────────
-
         detected = [(int(x + w / 2), int(y + h / 2), w, h) for x, y, w, h in merged]
         tracked = tracker.update(detected)
 
@@ -471,68 +623,10 @@ def main():
                     print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
                     do_reset()
 
-        # ── EVIDENCE_CAPTURED: แสดงผลและรอ reset อัตโนมัติ ─────────────────
+        # ── EVIDENCE_CAPTURED: จับ timeout + reset (ทำงานทั้ง HEADLESS/DISPLAY) ─
         if sm.state == "EVIDENCE_CAPTURED":
-            all_gone = True
-            for obj_id, item_info in sm.captured_items.items():
-                landed_obj = tracked.get(obj_id)
-                # วาดกรอบเฉพาะของที่ยังเห็นอยู่จริง (ไม่ใช่ ghost และ gone_since = None)
-                item_visible = (
-                    landed_obj is not None
-                    and landed_obj.get("ghost_frames", 0) == 0
-                    and item_info.get("gone_since") is None
-                )
-                if item_visible:
-                    all_gone = False
-                    # วาดกรอบสีเขียว (confirmed)
-                    cx, cy = landed_obj["centroid"]
-                    w, h = landed_obj["shape"]
-                    latest_land = max(
-                        sm.captured_items.values(), key=lambda i: i["land_time"]
-                    )["land_time"]
-                    hold_elapsed = now - latest_land
-                    time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
-                    cv2.rectangle(
-                        frame,
-                        (cx - w // 2, cy - h // 2),
-                        (cx + w // 2, cy + h // 2),
-                        (0, 255, 0),
-                        3,
-                    )
-                    cv2.putText(
-                        frame,
-                        f"#{item_info['item_no']} CONFIRMED ({time_left:.0f}s)",
-                        (cx - w // 2, cy - h // 2 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.40,
-                        (0, 255, 0),
-                        1,
-                    )
-                elif (
-                    REBASELINE_ON_CAPTURE
-                    and item_info.get("cx") is not None
-                    and item_info.get("w")
-                ):
-                    # [RE-BASELINE] ของถูกกลืนเข้า bg แล้ว (ไม่อยู่ใน tracker)
-                    # → วาดกรอบจากพิกัดที่จำไว้ เพื่อให้เห็นว่านับชิ้นนี้แล้ว
-                    cx, cy = int(item_info["cx"]), int(item_info["cy"])
-                    w, h = int(item_info["w"]), int(item_info["h"])
-                    cv2.rectangle(
-                        frame,
-                        (cx - w // 2, cy - h // 2),
-                        (cx + w // 2, cy + h // 2),
-                        (0, 200, 0),
-                        2,
-                    )
-                    cv2.putText(
-                        frame,
-                        f"#{item_info['item_no']} COUNTED",
-                        (cx - w // 2, cy - h // 2 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.40,
-                        (0, 200, 0),
-                        1,
-                    )
+            if not HEADLESS:
+                draw_captured_items(frame, sm, tracked, now)
 
             # force-reset: ทุก confirmed item หายจาก ROI หรือ hold timeout เกิน
             if sm.captured_items:
@@ -609,107 +703,10 @@ def main():
                             clear_pending_order()
                         do_reset()
 
-        # ── วาด ROI + state badge ───────────────────────────────────────────
-        roi_manager.draw(frame)
-        color = (
-            (0, 255, 0)
-            if sm.state == "EVIDENCE_CAPTURED"
-            else (0, 200, 255) if sm.state == "DROP_DETECTED" else (150, 150, 150)
-        )
-
-        if bg_frozen:
-            cv2.putText(
-                frame,
-                "BG FROZEN",
-                (10, actual_h - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 200, 0),
-                1,
-            )
-
-        # item count badge (แสดงเฉพาะตอนกำลังจับของ)
-        if sm.state != "IDLE" and sm.item_count() > 0:
-            badge = f"Items: {sm.item_count()}"
-            cv2.putText(
-                frame,
-                badge,
-                (10, actual_h - 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 200),
-                1,
-            )
-
-        # ── order window countdown badge (ขวาล่าง) ──────────────────────────
-        if sm.has_order() and sm.order_window_start is not None:
-            elapsed = now - sm.order_window_start
-            time_left = max(0, ORDER_WINDOW - elapsed)
-            order_badge = (
-                f"ORDER #{sm.current_order['id']} "
-                f"{sm.item_count()}/{sm.order_qty()} "
-                f"({time_left:.0f}s)"
-            )
-            # คำนวณ x ให้ชิดขวา
-            (badge_w, badge_h), _ = cv2.getTextSize(
-                order_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
-            )
-            badge_x = actual_w - badge_w - 10
-            badge_y = actual_h - 15
-            cv2.putText(
-                frame,
-                order_badge,
-                (badge_x, badge_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (0, 200, 255),
-                2,
-            )
-
-        cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
-        cv2.putText(
-            frame,
-            sm.state,
-            (actual_w - 245, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-        )
-
-        # ── วาดกรอบ tracked objects ที่ยังไม่ confirmed ─────────────────────
-        sc = {
-            "CONFIRMED_STOP": (0, 255, 0),
-            "SHAPE_CONFIRMED": (0, 255, 0),
-            "MOVING": (0, 0, 255),
-            "DETECTING": (0, 140, 255),
-        }
-
-        for obj_id, obj in tracked.items():
-            # ข้ามของที่ confirmed แล้ว (วาดไปแล้วด้านบน)
-            if sm.is_obj_captured(obj_id):
-                continue
-            cx, cy = obj["centroid"]
-            w, h = obj["shape"]
-            state = obj["state"]
-            box_color = (
-                (0, 165, 255) if "WAITING" in state else sc.get(state, (0, 0, 255))
-            )
-            cv2.rectangle(
-                frame,
-                (cx - w // 2, cy - h // 2),
-                (cx + w // 2, cy + h // 2),
-                box_color,
-                2,
-            )
-            cv2.putText(
-                frame,
-                f"ID:{obj_id} {state[:12]}",
-                (cx - w // 2, cy - h // 2 - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.38,
-                box_color,
-                1,
+        # ── วาด overlay ลงจอ (เฉพาะโหมด DISPLAY — ข้ามทั้งหมดบน Pi/HEADLESS) ──
+        if not HEADLESS:
+            render_overlay(
+                frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, actual_h
             )
 
         # ── pacing: หน่วงให้ไฟล์วิดีโอเล่นตามเฟรมเรตจริง ไม่เร่งเร็ว ──────────

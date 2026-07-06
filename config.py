@@ -62,15 +62,6 @@ MORPH_CLOSE_KSIZE = int(os.getenv("MORPH_CLOSE_KSIZE", "3"))  # อุดรู�
 # ระยะ (px) ที่ยอมให้กล่องซ้อน/ชิดกันแล้วรวมเป็นชิ้นเดียว (เผื่อชิ้นเดียวแตกเป็นหลาย contour)
 GROUP_OVERLAP_PAD = int(os.getenv("GROUP_OVERLAP_PAD", "4"))
 
-# ── Blob split (แยกของหลายชิ้นที่ตกมาติดกัน) ──────────────────────────────────
-# ถ้า blob ก้อนเดียวใหญ่พอจะมีของ >= 2 ชิ้น → ใช้ distance-transform + watershed แยก
-ENABLE_BLOB_SPLIT = os.getenv("ENABLE_BLOB_SPLIT", "1") == "1"
-# 0.0-1.0 : สูง = แยกแบบระวังตัว (split น้อย), ต่ำ = แยกง่ายขึ้น (เสี่ยง over-split)
-SPLIT_DIST_RATIO = float(os.getenv("SPLIT_DIST_RATIO", "0.5"))
-# พื้นที่ขั้นต่ำ (px) ของชิ้นที่แยกออกมา ต่ำกว่านี้ถือเป็น noise (ค่าว่าง = ใช้ MIN_AREA)
-_seed = os.getenv("SPLIT_MIN_SEED_AREA", "").strip()
-SPLIT_MIN_SEED_AREA = int(_seed) if _seed.isdigit() else MIN_AREA
-
 # ระยะสูงสุด (px) ที่ tracker ยอม match detection เข้ากับ object เดิม
 #   - ต่ำลง → ของ 2 ชิ้นที่อยู่ใกล้กันไม่สลับ id กัน แต่ของที่ตกเร็วอาจหลุด track
 #   - สูงขึ้น → ทน motion เร็วได้ แต่เสี่ยงจับ 2 ชิ้นรวมเป็น id เดียว

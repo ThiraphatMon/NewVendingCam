@@ -311,16 +311,6 @@ class VendingStateMachine:
     def reset(self):
         self._reset_fields()
 
-    def release_item(self, obj_id):
-        if obj_id in self.captured_items:
-            item_no = self.captured_items[obj_id]["item_no"]
-            del self.captured_items[obj_id]
-            print(
-                f"[{self.machine_id}] 👋 item#{item_no} (obj#{obj_id}) "
-                f"ออกจาก ROI แล้ว — released"
-            )
-        return len(self.captured_items) == 0
-
     def item_count(self):
         return len(self.captured_items)
 
