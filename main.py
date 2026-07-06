@@ -168,6 +168,33 @@ def render_overlay(frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, ac
             (0, 200, 255),
             2,
         )
+        
+        # ──  เพิ่มโค้ดส่วนนี้: แสดง Hold Timeout Countdown ที่ขวาล่าง (เฉพาะตอนไม่มีออเดอร์) ──
+    elif sm.state == "EVIDENCE_CAPTURED" and sm.captured_items:
+        latest_item = max(sm.captured_items.values(), key=lambda i: i["land_time"])
+        
+        # ตรวจสอบว่าในพื้นที่ ROI ตอนนี้มีมือหรือวัตถุใหม่กำลังขยับอยู่หรือไม่ (ถ้ามีให้ตรึงเวลาไว้เต็ม)
+        has_active_motion = any(
+            obj_id not in sm.captured_items
+            and obj["state"] in ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
+            for obj_id, obj in tracked.items()
+        )
+        
+        if has_active_motion:
+            hold_time_left = CONFIRMED_HOLD_TIMEOUT
+        else:
+            hold_elapsed = now - latest_item["land_time"]
+            hold_time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
+            
+        # สร้างข้อความแสดงเวลาถอยหลังก่อนรีเซ็ตระบบ
+        hold_badge = f"RESET IN: {hold_time_left:.0f}s"
+        (badge_w, badge_h), _ = cv2.getTextSize(hold_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        badge_x = actual_w - badge_w - 10
+        badge_y = actual_h - 15  # ใช้พิกัดความสูงเท่ากันกับป้ายออเดอร์เพราะมันไม่แสดงพร้อมกัน
+        
+        # วาดข้อความสีแดง (0, 0, 255) หรือปรับสีตามชอบเพื่อให้เห็นเด่นชัด
+        cv2.putText(frame, hold_badge, (badge_x, badge_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+        
 
     cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
     cv2.putText(
@@ -566,10 +593,8 @@ def main():
                     # เพียงชิ้นเดียวในเฟรมสะอาด → capture เป็นชิ้นใหม่ได้
                     if REBASELINE_ON_CAPTURE and sm.is_obj_captured(obj_id):
                         reset_motion_baseline()
-                        # ล้าง tracker object ที่ไม่ใช่ confirmed ออก (เป็น motion เก่า
-                        # ที่เพิ่งถูกกลืนเข้า bg แล้ว — ไม่ควรค้างเป็น candidate)
-                        tracker.clear_unconfirmed()
-                        break  # ออกจาก loop tracked เฟรมนี้ (mask เปลี่ยนแล้ว)
+                        tracker.clear_all()  # เปลี่ยนเป็นคำสั่งนี้ เพื่อให้ Tracker ลืม Item 1 ไปเลยทันที
+                        break
 
             # ── ตรวจ timeout / order_window ───────────────────────────────────
             # ลำดับความสำคัญ (priority) ของการ reset:

@@ -26,7 +26,7 @@ GROUP_DIST = int(os.getenv("GROUP_DIST", "60"))
 #                  แยกของที่บินใกล้กันได้ดี แต่วัตถุเดียวที่ mask ขาดจะไม่ถูกเชื่อม
 GROUP_MODE = os.getenv("GROUP_MODE", "distance").strip().lower()
 
-CONFIRM_TIME = 1
+CONFIRM_TIME = 2
 DROP_TIMEOUT = 25.0
 
 # ── Capture responsiveness (จับของให้ไว = "ของหยุดนิ่ง" คือ "ตกถึงที่แล้ว") ──────
@@ -40,7 +40,7 @@ LANDING_STABLE_FRAMES = int(os.getenv("LANDING_STABLE_FRAMES", "4"))
 
 # CAPTURE_HOLD_SEC : เวลาที่ต้องนิ่งเพิ่ม "หลัง" ลงจอดก่อน capture
 #   - 0 = จับทันทีที่นิ่ง (ไวสุด, ตรงกับที่ต้องการให้ชิ้นถัดไปตกมาก็จับทัน)
-CAPTURE_HOLD_SEC = float(os.getenv("CAPTURE_HOLD_SEC", "0"))
+CAPTURE_HOLD_SEC = float(os.getenv("CAPTURE_HOLD_SEC", "2"))
 
 # MIN_PRESENCE_SEC : เวลาขั้นต่ำที่ object ต้องอยู่ใน ROI ก่อน capture (กัน noise แวบเดียว)
 #   - เดิม logic นี้ไว้กันมือ แต่ตอนนี้ slat บังมือแล้ว จึงลดลงเหลือแค่กัน noise
