@@ -101,6 +101,20 @@ class ROIManager:
         except Exception:
             return None
 
+    def _scaled_rect(self):
+        """คืน (x1, y1, x2, y2) ของ rect ROI หลัง scale ตามขนาดเฟรมจริง (clamp ในขอบเฟรม)"""
+        scale_x = self.frame_w / max(1, self.config_frame_w)
+        scale_y = self.frame_h / max(1, self.config_frame_h)
+        x = int(round(float(self.rect.get("x", 0)) * scale_x))
+        y = int(round(float(self.rect.get("y", 0)) * scale_y))
+        rw = int(round(float(self.rect.get("w", self.frame_w)) * scale_x))
+        rh = int(round(float(self.rect.get("h", self.frame_h)) * scale_y))
+        x1 = max(0, min(self.frame_w, x))
+        y1 = max(0, min(self.frame_h, y))
+        x2 = max(0, min(self.frame_w, x + rw))
+        y2 = max(0, min(self.frame_h, y + rh))
+        return x1, y1, x2, y2
+
     def build_mask(self, mask_shape):
         h, w = mask_shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
@@ -114,14 +128,7 @@ class ROIManager:
             if pts is not None:
                 cv2.fillPoly(mask, [pts], 255)
         elif self.roi_type == "rect":
-            scale_x = self.frame_w / max(1, self.config_frame_w)
-            scale_y = self.frame_h / max(1, self.config_frame_h)
-            x = int(round(float(self.rect.get("x", 0)) * scale_x))
-            y = int(round(float(self.rect.get("y", 0)) * scale_y))
-            rw = int(round(float(self.rect.get("w", self.frame_w)) * scale_x))
-            rh = int(round(float(self.rect.get("h", self.frame_h)) * scale_y))
-            x1, y1 = max(0, min(w, x)), max(0, min(h, y))
-            x2, y2 = max(0, min(w, x + rw)), max(0, min(h, y + rh))
+            x1, y1, x2, y2 = self._scaled_rect()
             mask[y1:y2, x1:x2] = 255
 
         if cv2.countNonZero(mask) == 0:
@@ -160,16 +167,7 @@ class ROIManager:
                     areas.append({"mask": m, "area_px": area_px})
 
         elif self.roi_type == "rect":
-            scale_x = self.frame_w / max(1, self.config_frame_w)
-            scale_y = self.frame_h / max(1, self.config_frame_h)
-            x = int(round(float(self.rect.get("x", 0)) * scale_x))
-            y = int(round(float(self.rect.get("y", 0)) * scale_y))
-            rw = int(round(float(self.rect.get("w", self.frame_w)) * scale_x))
-            rh = int(round(float(self.rect.get("h", self.frame_h)) * scale_y))
-            x1 = max(0, min(w, x))
-            y1 = max(0, min(h, y))
-            x2 = max(0, min(w, x + rw))
-            y2 = max(0, min(h, y + rh))
+            x1, y1, x2, y2 = self._scaled_rect()
             m = np.zeros((h, w), dtype=np.uint8)
             m[y1:y2, x1:x2] = 255
             area_px = int(cv2.countNonZero(m))
@@ -204,13 +202,8 @@ class ROIManager:
                 cv2.polylines(frame, [pts], True, (255, 200, 0), 2)
                 cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
         elif self.roi_type == "rect":
-            scale_x = self.frame_w / max(1, self.config_frame_w)
-            scale_y = self.frame_h / max(1, self.config_frame_h)
-            x = int(round(float(self.rect.get("x", 0)) * scale_x))
-            y = int(round(float(self.rect.get("y", 0)) * scale_y))
-            rw = int(round(float(self.rect.get("w", self.frame_w)) * scale_x))
-            rh = int(round(float(self.rect.get("h", self.frame_h)) * scale_y))
-            cv2.rectangle(frame, (x, y), (x + rw, y + rh), (255, 200, 0), 2)
+            x1, y1, x2, y2 = self._scaled_rect()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 2)
 
         cv2.putText(
             frame,

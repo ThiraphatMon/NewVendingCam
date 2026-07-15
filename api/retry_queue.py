@@ -117,9 +117,3 @@ def start_retry_thread():
     t = threading.Thread(target=_retry_loop, daemon=True)
     t.start()
     return t
-
-
-def get_queue_size() -> int:
-    """ดูจำนวน event ที่ยังค้างอยู่ใน queue (ใช้ debug / logging)"""
-    with _queue_lock:
-        return len(_pending_queue)

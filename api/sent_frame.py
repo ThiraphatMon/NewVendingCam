@@ -1,13 +1,7 @@
 import cv2
 import requests
-from config import CLOUD_API_URL, API_KEY
-
-
-def _headers():
-    headers = {}
-    if API_KEY:
-        headers["X-API-Key"] = API_KEY
-    return headers
+from config import CLOUD_API_URL
+from api.client import _headers
 
 
 def send_frame(machine_id, frame):

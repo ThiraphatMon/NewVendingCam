@@ -17,7 +17,6 @@ from config import (
     ORDER_WINDOW,
     MOT_THRESH,
     MORPH_OPEN_KSIZE,
-    MORPH_CLOSE_KSIZE,
     MORPH_DILATE_KSIZE,
     MORPH_DILATE_ITER,
     GROUP_MODE,
@@ -25,8 +24,6 @@ from config import (
     MIN_PRESENCE_SEC,
     CAPTURE_HOLD_SEC,
     REBASELINE_ON_CAPTURE,
-    MEDIAN_BLUR_KSIZE,
-    MIN_SOLIDITY,
 )
 import threading
 from api.client import fetch_remote_roi, push_default_roi, register_machine
@@ -397,15 +394,12 @@ def main():
                 clean_bg = bg_np.copy()
                 clean_bg_last_update = now
 
-        # [ACCURACY] เดิม: DILATE 5x5 x2 → กรอบบวม ~8px รอบด้าน + รวมของ 2 ชิ้นที่ใกล้กัน
-        # ใหม่: OPEN เล็ก (ลบ noise) + CLOSE เล็ก (อุดรูในชิ้นเดิมโดยไม่บวมออก)
-        # → กรอบแนบของจริง และของที่อยู่ใกล้กันยังแยกกันอยู่ (ดู core/detect.py)
+        # สร้าง motion mask: OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียว
+        # ที่ขาดให้ตันเป็นก้อนเดียว) — ดูรายละเอียดใน core/detect.py
         fgmask = build_fgmask(
             diff,
             MOT_THRESH,
             MORPH_OPEN_KSIZE,
-            MORPH_CLOSE_KSIZE,
-            MEDIAN_BLUR_KSIZE,
             MORPH_DILATE_KSIZE,
             MORPH_DILATE_ITER,
         )
@@ -447,9 +441,9 @@ def main():
                 # → ของเดิมที่ track อยู่จะยังคงอยู่ใน tracker (ghost tolerance)
             # ทั้ง IDLE และ non-IDLE → กรอง blob ที่ใหญ่เกิน threshold ออกจาก raw_boxes
             # per-area: blob จะถูกกรองออกถ้ามันใหญ่เกิน threshold ของ area ที่มันอยู่
-            # [NOISE] contour_boxes กรองด้วย MIN_AREA + MIN_SOLIDITY (ตัด noise ไม่ตัน)
+            # [NOISE] contour_boxes กรอง contour ที่เล็กกว่า MIN_AREA
             raw_boxes = []
-            for bx, by, bw, bh in contour_boxes(fgmask, MIN_AREA, MIN_SOLIDITY):
+            for bx, by, bw, bh in contour_boxes(fgmask, MIN_AREA):
                 blob_area = bw * bh
                 # เช็คว่า blob นี้ใหญ่เกิน threshold ของ area ไหนบ้าง
                 is_large = False
@@ -460,8 +454,8 @@ def main():
                 if not is_large:
                     raw_boxes.append((bx, by, bw, bh))
         else:
-            # [NOISE] กรองด้วย MIN_AREA + MIN_SOLIDITY (ของจริงตัน / noise กระจาย → ตัดทิ้ง)
-            raw_boxes = contour_boxes(fgmask, MIN_AREA, MIN_SOLIDITY)
+            # [NOISE] กรองด้วย MIN_AREA (contour เล็กเกิน = noise → ตัดทิ้ง)
+            raw_boxes = contour_boxes(fgmask, MIN_AREA)
 
         # ── MULTI-ITEM: ไม่ตัดเหลือแค่ชิ้นเดียวอีกต่อไป ──────────────────────
         # group_close_boxes รวมกล่องที่ใกล้กัน (เผื่อของชิ้นเดียวแตกเป็นหลาย contour)
@@ -582,7 +576,6 @@ def main():
                         "still_in_ROI", obj_id=obj_id, frame=frame,
                         centroid=(o_cx, o_cy), shape=(o_w, o_h),
                     )
-                    tracker.mark_confirmed(obj_id)
 
                     # ── [RESET MOTION] ล้าง motion mask ทั้งหมดหลัง capture สำเร็จ ──
                     # เอาเฟรมปัจจุบัน "ทั้งภาพ" มาเป็น background ใหม่
