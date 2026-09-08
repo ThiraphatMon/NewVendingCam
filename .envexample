@@ -1,0 +1,16 @@
+# ========================================
+# สำหรับทดสอบบน PC → ตั้ง HEADLESS=0
+# สำหรับ Raspberry Pi  → ตั้ง HEADLESS=1
+# ========================================
+# HEADLESS=0
+
+# CLOUD_API_URL=
+# WS_URL=
+# MACHINE_ID_DEFAULT=VENDING_01
+# CAMERA_INDEX=
+
+# ORDER_WINDOW=30
+# CLEANUP_KEEP_DAYS=3
+# CLEANUP_INTERVAL_HOURS=1
+
+# API_KEY=your_key_here

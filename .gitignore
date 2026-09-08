@@ -1,6 +1,3 @@
-
-
-
 # ละเว้นไฟล์ขยะที่ Python สร้างขึ้นเองอัตโนมัติ
 __pycache__/
 *.pyc
@@ -14,3 +11,5 @@ evidence_images/
 logs/
 
 *.log
+
+.env
