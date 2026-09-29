@@ -68,10 +68,10 @@ CAP_COUNT_TO_ORDER_QTY = os.getenv("CAP_COUNT_TO_ORDER_QTY", "1") == "1"
 
 # ระยะเวลาสูงสุดใน EVIDENCE_CAPTURED ก่อน reset (กรณีไม่มี order)
 # "รอว่าไม่มีของตกเพิ่มอีกแล้วจริง" — ทุกครั้งที่มี motion/ของใหม่ ตัวนับถูกรีเซ็ต
-CONFIRMED_HOLD_TIMEOUT = int(os.getenv("CONFIRMED_HOLD_TIMEOUT", "20"))  # วินาที
+CONFIRMED_HOLD_TIMEOUT = int(os.getenv("CONFIRMED_HOLD_TIMEOUT", "30"))  # วินาที
 
 # สัดส่วนพื้นที่ blob ใน ROI area ที่ถือว่าเป็น env change (แสง/bg เปลี่ยน)
-MAX_BLOB_ROI_RATIO = 0.40
+MAX_BLOB_ROI_RATIO = 0.30
 
 # ── Order Window ──────────────────────────────────────────────────────────────
 # เวลารอของตกหลังได้รับ order (วินาที) — reset ทุกครั้งที่ confirm item
