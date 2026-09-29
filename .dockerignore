@@ -1,0 +1,30 @@
+# อัพเดทใหม่สำหรับลง Orange Pi:
+# ลด build context และป้องกันไฟล์จาก Windows/ข้อมูลลับถูกฝังใน Docker image
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# ค่าใช้งานจริงต้องส่งผ่าน docker-compose env_file เท่านั้น
+.env
+.env.*
+!.envexample
+
+# ข้อมูล runtime ถูก bind mount จาก Orange Pi ไม่ควรถูก bake เข้า image
+evidence_images
+logs
+*.log
+
+# ไฟล์ทดสอบขนาดใหญ่และไฟล์จาก editor/OS
+*.mp4
+*.avi
+*.mov
+*.mkv
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+

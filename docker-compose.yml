@@ -1,12 +1,24 @@
 services:
   vending-cam:
+    # อัพเดทใหม่สำหรับลง Orange Pi: build บนบอร์ดจะเลือก linux/arm64 อัตโนมัติ
     build: .
     container_name: vending-cam
+    init: true
     restart: unless-stopped
+    stop_grace_period: 10s
     env_file:
       - .env
     devices:
-      - /dev/video0:/dev/video0 # กล้อง
+      # ค่าเริ่มต้นสำหรับกล้อง USB/UVC; ตรวจด้วย v4l2-ctl --list-devices บนบอร์ด
+      - /dev/video0:/dev/video0
     volumes:
+      # เก็บข้อมูลไว้นอก container เพื่อไม่ให้หายตอน rebuild/recreate
       - ./evidence_images:/app/evidence_images
       - ./data:/app/data
+      - ./logs:/app/logs
+    logging:
+      # จำกัด Docker stdout log เพื่อป้องกัน eMMC เต็มระหว่างการทดสอบระยะยาว
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"

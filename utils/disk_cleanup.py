@@ -24,14 +24,18 @@ def _cleanup_once():
         return
     cutoff = time.time() - KEEP_DAYS * 86400
     removed = 0
-    for fname in os.listdir(IMAGE_DIR):
-        fpath = os.path.join(IMAGE_DIR, fname)
-        try:
-            if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
-                os.remove(fpath)
-                removed += 1
-        except Exception as e:
-            logger.warning(f"ลบไฟล์ไม่ได้ {fpath}: {e}")
+    # อัพเดทใหม่สำหรับลง Orange Pi:
+    # รูปจริงอยู่ใน with_order/ และ without_order/ จึงต้องเดินทุกโฟลเดอร์ย่อย
+    # เพื่อป้องกัน eMMC เต็มเมื่อเครื่องทำงานต่อเนื่อง
+    for root, _, files in os.walk(IMAGE_DIR):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    removed += 1
+            except Exception as e:
+                logger.warning(f"ลบไฟล์ไม่ได้ {fpath}: {e}")
     if removed:
         logger.info(f"🧹 Disk cleanup: ลบ {removed} ไฟล์ (เก่ากว่า {KEEP_DAYS} วัน)")
 

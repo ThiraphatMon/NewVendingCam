@@ -1,16 +1,19 @@
-# ========================================
-# สำหรับทดสอบบน PC → ตั้ง HEADLESS=0
-# สำหรับ Raspberry Pi  → ตั้ง HEADLESS=1
-# ========================================
-# HEADLESS=0
+# # อัพเดทใหม่สำหรับลง Orange Pi
+# # คัดลอกไฟล์นี้เป็น .env แล้วเปลี่ยน URL, MACHINE_ID และ API_KEY ให้เป็นค่าจริง
 
-# CLOUD_API_URL=
-# WS_URL=
+# # Orange Pi ทำงานแบบไม่มีหน้าต่างแสดงภาพ
+# HEADLESS=1
+
+# # กล้อง /dev/video0 ที่ถูก map มาจาก docker-compose.yml
+# CAMERA_INDEX=0
+
+# # ค่าตัวอย่าง: โปรแกรมยังเปิดกล้องได้ แต่การเชื่อม cloud จะไม่สำเร็จจนกว่าจะเปลี่ยน URL
+# CLOUD_API_URL=https://your-server.example/api/events
+# WS_URL=wss://your-server.example/ws
 # MACHINE_ID_DEFAULT=VENDING_01
-# CAMERA_INDEX=
+# API_KEY=
 
+# # เวลาและการดูแลพื้นที่ eMMC
 # ORDER_WINDOW=30
 # CLEANUP_KEEP_DAYS=3
 # CLEANUP_INTERVAL_HOURS=1
-
-# API_KEY=your_key_here
