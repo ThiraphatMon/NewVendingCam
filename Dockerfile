@@ -10,6 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 # 2. ลง library ที่ OpenCV ต้องการ (ระบบ) + tzdata ให้ TZ=Asia/Bangkok มีผล
 #    (เวลาใน log, ชื่อไฟล์ภาพ และ TXN ID เป็นเวลาไทย ไม่ใช่ UTC)
+#    DEBIAN_FRONTEND=noninteractive กัน tzdata ถามโซนเวลาระหว่าง build (ใช้ตอน build เท่านั้น)
+ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgl1 \
