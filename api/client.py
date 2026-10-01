@@ -5,6 +5,12 @@ import time
 import cv2
 from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH, ROI_POLL_INTERVAL
 import json
+from utils.logger import get_logger, LogThrottle
+
+logger = get_logger("client")
+
+# ส่งภาพสดทุก 1 วิ → ตอนเน็ตหลุดจะ error ทุกวิ จึงจำกัด log ไว้ 1 ครั้งต่อ 60 วินาที
+_frame_err_log = LogThrottle(60.0)
 
 
 def _headers():
@@ -40,17 +46,17 @@ def post_event(payload, image_path=None):
                 timeout=10,
             )
 
-        print(f"☁️ Cloud Response: {resp.status_code} - {resp.text}")
+        logger.info(f"☁️ Cloud Response: {resp.status_code} - {resp.text}")
 
         # ถือว่าสำเร็จเมื่อ status 2xx
         if 200 <= resp.status_code < 300:
             return True
         else:
-            print(f"⚠️ Server ตอบกลับ status ผิดปกติ: {resp.status_code}")
+            logger.warning(f"⚠️ Server ตอบกลับ status ผิดปกติ: {resp.status_code}")
             return False
 
     except Exception as e:
-        print(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Server ปิดอยู่): {e}")
+        logger.warning(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Server ปิดอยู่): {e}")
         return False
 
 
@@ -77,13 +83,13 @@ def register_machine(machine_id: str):
             timeout=5,
         )
         if resp.status_code == 200:
-            print(f"[{machine_id}] ✅ ลงทะเบียนตู้สำเร็จ (SYSTEM_ONLINE)")
+            logger.info(f"[{machine_id}] ✅ ลงทะเบียนตู้สำเร็จ (SYSTEM_ONLINE)")
         else:
-            print(
+            logger.warning(
                 f"[{machine_id}] ⚠️ register_machine ล้มเหลว: {resp.status_code} - {resp.text}"
             )
     except Exception as e:
-        print(f"[{machine_id}] ⚠️ register_machine error: {e}")
+        logger.warning(f"[{machine_id}] ⚠️ register_machine error: {e}")
 
 
 def fetch_remote_roi(machine_id):
@@ -115,11 +121,11 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
         if check.status_code == 200:
             data = check.json()
             if data.get("status") != "no_config":
-                print(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
+                logger.info(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
                 return
 
         if not os.path.exists(local_config_path):
-            print(
+            logger.warning(
                 f"[{machine_id}] ⚠️ ไม่พบ {local_config_path} ไม่สามารถ push default ROI ได้"
             )
             return
@@ -134,11 +140,11 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
             timeout=5,
         )
         if resp.status_code == 200:
-            print(f"[{machine_id}] ✅ Push default ROI ขึ้น Server สำเร็จ")
+            logger.info(f"[{machine_id}] ✅ Push default ROI ขึ้น Server สำเร็จ")
         else:
-            print(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
+            logger.warning(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
     except Exception as e:
-        print(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
+        logger.warning(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
 
 
 def start_roi_polling(machine_id):
@@ -149,7 +155,7 @@ def start_roi_polling(machine_id):
             try:
                 fetch_remote_roi(machine_id)
             except Exception as e:
-                print(f"⚠️ roi_polling_task error: {e}")
+                logger.warning(f"⚠️ roi_polling_task error: {e}")
             time.sleep(ROI_POLL_INTERVAL)
 
     threading.Thread(target=_loop, daemon=True).start()
@@ -162,7 +168,7 @@ def send_frame(machine_id, frame):
     success, buffer = cv2.imencode(".jpg", frame)
 
     if not success:
-        print("⚠️ Failed to encode realtime frame")
+        logger.warning("⚠️ Failed to encode realtime frame")
         return False
 
     try:
@@ -183,9 +189,9 @@ def send_frame(machine_id, frame):
         if 200 <= resp.status_code < 300:
             return True
 
-        print(f"⚠️ Send realtime frame failed: {resp.status_code} - {resp.text}")
+        _frame_err_log(logger.warning, f"⚠️ Send realtime frame failed: {resp.status_code} - {resp.text}")
         return False
 
     except Exception as e:
-        print(f"⚠️ Send realtime frame error: {e}")
+        _frame_err_log(logger.warning, f"⚠️ Send realtime frame error: {e}")
         return False

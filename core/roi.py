@@ -4,6 +4,9 @@ import time
 import cv2
 import numpy as np
 from config import ROI_CHECK_INTERVAL, ROI_CONFIG_PATH
+from utils.logger import get_logger
+
+logger = get_logger("roi")
 
 # ROI_CHECK_INTERVAL: เช็ค mtime ทุกกี่วินาที แทนที่จะเช็คทุก frame (ตั้งใน config)
 
@@ -58,15 +61,15 @@ class ROIManager:
 
         if self.roi_type == "multi_polygon":
             self.areas = config.get("areas", [])
-            print(f"✅ Loaded multi_polygon ROI: {len(self.areas)} area(s)")
+            logger.info(f"✅ Loaded multi_polygon ROI: {len(self.areas)} area(s)")
         elif self.roi_type in ("polygon", "quad"):
             self.points = config.get("points", [])
-            print(f"✅ Loaded {self.roi_type} ROI: {len(self.points)} point(s)")
+            logger.info(f"✅ Loaded {self.roi_type} ROI: {len(self.points)} point(s)")
         elif self.roi_type == "rect":
             self.rect = config.get("rect", self.rect)
-            print("✅ Loaded rect ROI")
+            logger.info("✅ Loaded rect ROI")
         else:
-            print(f"⚠️ Unknown roi_type: {self.roi_type}. Fallback to default rect.")
+            logger.warning(f"⚠️ Unknown roi_type: {self.roi_type}. Fallback to default rect.")
             self.roi_type = "rect"
             self.rect = self._default_config()["rect"]
 

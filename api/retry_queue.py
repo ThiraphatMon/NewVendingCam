@@ -16,6 +16,9 @@ import time
 import os
 from api.client import post_event
 from config import RETRY_INTERVAL
+from utils.logger import get_logger
+
+logger = get_logger("retry_queue")
 
 # ---- Queue และ Lock ----
 # pending_queue คือ list ของ dict แต่ละตัวมีรูปแบบดังนี้:
@@ -32,9 +35,9 @@ def _delete_image(image_path: str | None):
     if image_path and os.path.exists(image_path):
         try:
             os.remove(image_path)
-            print(f"🗑️ ลบรูปสำเร็จ: {image_path}")
+            logger.info(f"🗑️ ลบรูปสำเร็จ: {image_path}")
         except Exception as e:
-            print(f"⚠️ ลบรูปไม่ได้: {image_path} — {e}")
+            logger.warning(f"⚠️ ลบรูปไม่ได้: {image_path} — {e}")
 
 
 def send_or_queue(payload: dict, image_path: str | None = None):
@@ -49,7 +52,7 @@ def send_or_queue(payload: dict, image_path: str | None = None):
     if success:
         # ✅ ส่งสำเร็จ — ลบรูปทันที
         _delete_image(image_path)
-        print(
+        logger.info(
             f"✅ ส่ง event สำเร็จ: {payload.get('event')} / {payload.get('transaction_id')}"
         )
     else:
@@ -57,7 +60,7 @@ def send_or_queue(payload: dict, image_path: str | None = None):
         item = {"payload": payload, "image_path": image_path}
         with _queue_lock:
             _pending_queue.append(item)
-        print(
+        logger.info(
             f"📥 บันทึกลง queue รอ retry: {payload.get('event')} / {payload.get('transaction_id')}"
             f" (queue ตอนนี้มี {len(_pending_queue)} รายการ)"
         )
@@ -68,7 +71,7 @@ def _retry_loop():
     Background thread — วน retry ทุก RETRY_INTERVAL วินาที
     ทำงานตลอดอายุโปรแกรม (daemon=True)
     """
-    print(f"🔄 Retry loop เริ่มทำงาน (ทุก {RETRY_INTERVAL} วินาที)")
+    logger.info(f"🔄 Retry loop เริ่มทำงาน (ทุก {RETRY_INTERVAL} วินาที)")
     while True:
         time.sleep(RETRY_INTERVAL)
 
@@ -79,7 +82,7 @@ def _retry_loop():
                 continue  # queue ว่าง → รอรอบถัดไป
             items_to_retry = list(_pending_queue)
 
-        print(f"🔄 กำลัง retry {len(items_to_retry)} รายการ...")
+        logger.info(f"🔄 กำลัง retry {len(items_to_retry)} รายการ...")
 
         still_pending = []  # รายการที่ยังส่งไม่สำเร็จ
 
@@ -88,7 +91,7 @@ def _retry_loop():
             if success:
                 # ✅ retry สำเร็จ — ลบรูปทิ้ง
                 _delete_image(item["image_path"])
-                print(
+                logger.info(
                     f"✅ Retry สำเร็จ: {item['payload'].get('event')} / "
                     f"{item['payload'].get('transaction_id')}"
                 )
@@ -102,9 +105,9 @@ def _retry_loop():
             _pending_queue[:] = still_pending
 
         if still_pending:
-            print(f"⏳ ยังมี {len(still_pending)} รายการรอ retry รอบถัดไป")
+            logger.info(f"⏳ ยังมี {len(still_pending)} รายการรอ retry รอบถัดไป")
         else:
-            print("✅ Retry ครบทุกรายการแล้ว — queue ว่างแล้ว")
+            logger.info("✅ Retry ครบทุกรายการแล้ว — queue ว่างแล้ว")
 
 
 def start_retry_thread():

@@ -21,6 +21,13 @@ from config import (
     CLEAN_BG_INTERVAL,
     MAX_BLOB_ROI_RATIO,
 )
+from utils.logger import get_logger, LogThrottle
+
+logger = get_logger("background")
+
+# env change ที่ค้างอยู่จะเกิดทุกเฟรม → log ได้ไม่เกิน 1 ครั้งต่อ 5 วินาที
+_env_log = LogThrottle(5.0)
+_restore_log = LogThrottle(5.0)
 
 
 class BackgroundModel:
@@ -93,7 +100,7 @@ class BackgroundModel:
         src = self.clean_bg if self.clean_bg is not None else self.bg
         self.snapshot = src.copy()
         self.bg = src.copy()
-        print("🧊 Background FROZEN — ใช้ clean_bg ก่อนมี motion")
+        logger.info("🧊 Background FROZEN — ใช้ clean_bg ก่อนมี motion")
 
     def unfreeze(self, now):
         """reset กลับ IDLE → ไม่ล้าง bg แต่กลับมาเรียนรู้ + เข้า grace period
@@ -101,7 +108,7 @@ class BackgroundModel:
         หลัง grace: กลับใช้ BG_LEARNING_RATE ปกติ พร้อมรับของชิ้นใหม่"""
         self.frozen = False
         self.grace_until = now + RESET_GRACE_SEC
-        print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_SEC}s")
+        logger.info(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_SEC}s")
 
     def rebaseline(self, frame_gray):
         """[RESET MOTION] หลัง capture สำเร็จ: เอาเฟรมปัจจุบัน "ทั้งภาพ" เป็น bg ใหม่
@@ -116,7 +123,7 @@ class BackgroundModel:
         if self.snapshot is None:
             return False
         self.bg = self.snapshot.copy()
-        print("🔄 BG restored to frozen snapshot")
+        _restore_log(logger.info, "🔄 BG restored to frozen snapshot")
         return True
 
 
@@ -127,11 +134,12 @@ def find_env_change(fgmask, roi_areas):
         area_fgmask = cv2.bitwise_and(fgmask, roi_area["mask"])
         blob_px = int(cv2.countNonZero(area_fgmask))
         if blob_px > roi_area["area_px"] * MAX_BLOB_ROI_RATIO:
-            print(
+            _env_log(
+                logger.info,
                 f"⚡ Large motion detected — "
                 f"blob={blob_px}px / roi={roi_area['area_px']}px "
                 f"({blob_px / roi_area['area_px'] * 100:.0f}%) "
-                f"→ env change"
+                f"→ env change",
             )
             return True
     return False

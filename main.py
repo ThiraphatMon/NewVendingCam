@@ -30,6 +30,9 @@ from core.state_machine import VendingStateMachine
 from core.tracker import MemoryTracker, is_motion_in_roi
 from utils.disk_cleanup import start_cleanup_thread
 from ui.overlay import render_overlay
+from utils.logger import get_logger
+
+logger = get_logger("main")
 
 
 def start_services(machine_id):
@@ -114,9 +117,9 @@ def apply_reset(reason, sm, tracker, bg, frame, now):
     elif reason == "drop_timeout":
         sm.trigger("timeout")  # ส่ง NO_DROP
     elif reason == "empty_frame":
-        print("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
+        logger.info("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
     elif reason == "hold_timeout":
-        print(
+        logger.info(
             f"⏰ ครบ {CONFIRMED_HOLD_TIMEOUT}s ไม่มีของตกเพิ่ม → "
             f"RESET (จับได้ {sm.item_count()} ชิ้น, txn={sm.transaction_id})"
         )
@@ -128,9 +131,9 @@ def main():
     parser.add_argument("--machine", type=str, default=MACHINE_ID)
     args = parser.parse_args()
 
-    print(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
-    print(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
-    print(config.summary())
+    logger.info(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
+    logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
+    logger.info(config.summary())
 
     source = FrameSource(CAMERA_INDEX)
     roi_manager = ROIManager(FRAME_W, FRAME_H, config_path=ROI_CONFIG_PATH)
@@ -143,8 +146,7 @@ def main():
             cv2.resizeWindow(name, FRAME_W, FRAME_H)
 
     tracker = MemoryTracker()
-    sm = VendingStateMachine()
-    sm.machine_id = args.machine
+    sm = VendingStateMachine(args.machine)
     bg = BackgroundModel()
     last_send_time = 0
 
@@ -185,7 +187,7 @@ def main():
         # IDLE: มี order แต่หมดเวลาโดยไม่มีของตกเลย → no_drop
         # (reset เฉพาะ state machine — bg ยังไม่ถูก freeze จึงไม่ต้องเข้า grace)
         if sm.state == "IDLE" and sm.has_order() and sm.is_order_window_expired(now):
-            print(f"[{sm.machine_id}] ⏰ order window หมด — ไม่มีของตกเลย → no_drop")
+            logger.info(f"[{sm.machine_id}] ⏰ order window หมด — ไม่มีของตกเลย → no_drop")
             if sm.transaction_id is None:
                 sm.transaction_id = sm.new_transaction_id()
             sm.finalize_order(frame=frame)

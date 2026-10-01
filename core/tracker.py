@@ -5,18 +5,25 @@ from config import (
     FRAME_H,
     TRACK_MATCH_DIST,
     LANDING_STABLE_FRAMES,
-    CENTROID_STABLE_DIST as CFG_CENTROID_STABLE_DIST,
+    CENTROID_STABLE_DIST,
     GHOST_FRAME_TOLERANCE,
 )
 
-# จำนวน frame ติดต่อกันที่ centroid ต้องนิ่งพอ จึงถือว่า "ยืนยันรูปร่าง = ลงจอด" ได้
-# ปรับผ่าน config.LANDING_STABLE_FRAMES (ยิ่งน้อยยิ่งจับของไว)
-SHAPE_STABLE_FRAMES = LANDING_STABLE_FRAMES
+# การนิ่ง ("ลงจอด") ใช้ config:
+#   LANDING_STABLE_FRAMES : จำนวนเฟรมติดกันที่ centroid ต้องนิ่ง
+#   CENTROID_STABLE_DIST  : ระยะ px ที่ centroid ขยับได้ต่อเฟรมแล้วยังถือว่านิ่ง
+#   ใช้ centroid แทน area เพราะ noise ข้างใน object ทำให้ box size ขยับ
+#   แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
 
-# ระยะ pixel ที่ centroid เคลื่อนที่ได้ต่อเฟรมแล้วยังถือว่า "นิ่ง"
-# ใช้ centroid แทน area เพราะ noise ข้างใน object ทำให้ box size ขยับ
-# แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
-CENTROID_STABLE_DIST = CFG_CENTROID_STABLE_DIST
+# ── ค่าคงที่ภายใน tracker (ไม่ได้เปิดให้ตั้งใน .env) ──────────────────────────────
+# กล่องหดเหลือน้อยกว่า SHRINK_RATIO ของเดิม และ centroid ขยับไม่เกิน SHRINK_MAX_MOVE px
+# → ถือว่า mask หดแปบเดียว (noise กระพริบ) คืนกล่องเดิมทั้งหมด
+SHRINK_RATIO = 0.75
+SHRINK_MAX_MOVE = 30
+# กรณีปกติ: กล่องหดได้ไม่เกินเฟรมละ (1 - SHRINK_SMOOTH) = 5% (smoothing)
+SHRINK_SMOOTH = 0.95
+# object ใหม่ (MOVING) ที่หายไปภายในเวลานี้ → ลบทันที ไม่ต้องรอ ghost tolerance
+NEW_OBJ_GRACE_SEC = 0.5
 
 # state ของ object ที่ถือว่ายัง "ขยับ / ยังไม่ถูกนับ" อยู่ใน ROI
 ACTIVE_STATES = ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
@@ -67,13 +74,13 @@ class MemoryTracker:
                 old_w, old_h = obj["shape"]
                 dist = math.hypot(cx - px, cy - py)
 
-                if (w * h) / max(1, old_w * old_h) < 0.75 and dist < 30:
+                if (w * h) / max(1, old_w * old_h) < SHRINK_RATIO and dist < SHRINK_MAX_MOVE:
                     # motion หดแปบเดียว → คืน shape เดิม ป้องกัน noise กระพริบ
                     cx, cy, w, h = px, py, old_w, old_h
                 else:
                     # ไม่ให้หดเร็วเกิน (smoothing ปกติ)
-                    w = max(w, int(old_w * 0.95))
-                    h = max(h, int(old_h * 0.95))
+                    w = max(w, int(old_w * SHRINK_SMOOTH))
+                    h = max(h, int(old_h * SHRINK_SMOOTH))
 
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
@@ -87,7 +94,7 @@ class MemoryTracker:
                     else:
                         obj["shape_stable_count"] = 0
 
-                    if obj["shape_stable_count"] >= SHAPE_STABLE_FRAMES:
+                    if obj["shape_stable_count"] >= LANDING_STABLE_FRAMES:
                         obj["shape_confirmed_time"] = current_time
                         obj["state"] = "SHAPE_CONFIRMED"
                     else:
@@ -112,7 +119,7 @@ class MemoryTracker:
                 continue
 
             # วัตถุที่เพิ่งเกิดใหม่ไม่กี่ frame → ลบทิ้งทันที ไม่ต้องรอ
-            if obj["state"] == "MOVING" and (current_time - obj["first_seen"]) < 0.5:
+            if obj["state"] == "MOVING" and (current_time - obj["first_seen"]) < NEW_OBJ_GRACE_SEC:
                 continue
 
             # หายออกจาก ROI: นับ ghost frame จนเกิน tolerance แล้วลบ

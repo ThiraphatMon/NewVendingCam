@@ -5,11 +5,14 @@ from datetime import datetime
 from api.retry_queue import send_or_queue
 from utils.image_saver import save_evidence_image
 from config import ORDER_WINDOW, CAP_COUNT_TO_ORDER_QTY
+from utils.logger import get_logger
+
+logger = get_logger("state_machine")
 
 
 class VendingStateMachine:
-    def __init__(self, default_machine="VENDING_01"):
-        self.machine_id = default_machine
+    def __init__(self, machine_id):
+        self.machine_id = machine_id
         self._reset_fields()
 
     def _reset_fields(self):
@@ -38,7 +41,7 @@ class VendingStateMachine:
         # ไม่ต้องรอให้มี motion ก่อน เพื่อให้ badge countdown ขึ้นเลย
         # และถ้าหมดเวลาโดยไม่มีของตกเลย → no_drop
         self.order_window_start = time.time()
-        print(
+        logger.info(
             f"[{self.machine_id}] 🛒 รับ order #{order['id']} "
             f"qty={order['qty']} — เริ่มนับ {ORDER_WINDOW}s ทันที"
         )
@@ -53,7 +56,7 @@ class VendingStateMachine:
 
     def reset_order_window(self, now: float):
         self.order_window_start = now
-        print(f"[{self.machine_id}] ⏱️ order window reset → รอต่ออีก {ORDER_WINDOW}s")
+        logger.info(f"[{self.machine_id}] ⏱️ order window reset → รอต่ออีก {ORDER_WINDOW}s")
 
     def is_order_window_expired(self, now: float) -> bool:
         if self.order_window_start is None:
@@ -84,7 +87,7 @@ class VendingStateMachine:
         else:
             status = "anomaly"
 
-        print(
+        logger.info(
             f"[{self.machine_id}] 🏁 order #{order_id} จบ — "
             f"ได้ {got}/{expected} ชิ้น → {status}"
         )
@@ -99,7 +102,18 @@ class VendingStateMachine:
                 has_order=True,
             )
 
-        self._emit_order_result(order_id, status, got, expected, summary_img_path)
+        # ส่งผลสรุป order กลับ server → server อัปเดต orders.status และ items_detected
+        if order_id is not None:
+            self._emit(
+                "ORDER_RESULT",
+                f"{self.transaction_id}-summary",
+                summary_img_path,
+                order_id=order_id,
+                order_status=status,
+                items_detected=got,
+                items_expected=expected,
+                land_time=self._ts(time.time()),
+            )
         return status
 
     # ─────────────────────────────────────────────
@@ -118,14 +132,14 @@ class VendingStateMachine:
                     # order_window_start เริ่มนับตั้งแต่ set_order() แล้ว ไม่ reset ใหม่
                     elapsed = now - self.order_window_start
                     remaining = max(0, ORDER_WINDOW - elapsed)
-                    print(
+                    logger.info(
                         f"[{self.machine_id}] 📦 ของกำลังตก... "
                         f"(txn={self.transaction_id}) "
                         f"[order #{self.current_order['id']} "
                         f"qty={self.order_qty()} เหลือ {remaining:.0f}s]"
                     )
                 else:
-                    print(
+                    logger.info(
                         f"[{self.machine_id}] 📦 ของกำลังตก... "
                         f"(txn={self.transaction_id}) [ไม่มี order]"
                     )
@@ -137,7 +151,13 @@ class VendingStateMachine:
 
             elif event == "timeout":
                 if not self.captured_items:
-                    self._emit_no_drop()
+                    # DROP_TIMEOUT หมดแบบไม่มี order (มี order จะใช้ finalize_order แทน)
+                    self._emit(
+                        "NO_DROP",
+                        self.transaction_id,
+                        land_time=None,
+                        order_id=self._order_id(),
+                    )
                 self.reset()
 
         elif self.state == "EVIDENCE_CAPTURED":
@@ -189,69 +209,31 @@ class VendingStateMachine:
         if self.has_order():
             self.reset_order_window(now)
 
-        print(
+        logger.info(
             f"[{self.machine_id}] 📸 จับของชิ้นที่ {item_no} ได้! "
             f"obj_id={obj_id}  txn={self.transaction_id}"
         )
-        self._emit_item_landed(obj_id, now, img_path, item_no)
+        self._emit(
+            "ITEM_LANDED",
+            f"{self.transaction_id}-item{item_no}",
+            img_path,
+            item_no=item_no,
+            obj_id=obj_id,
+            land_time=self._ts(now),
+            # แนบ order_id เพื่อให้ server เชื่อม transaction กับ order
+            order_id=self._order_id(),
+        )
 
     # ─────────────────────────────────────────────
     # emit helpers
     # ─────────────────────────────────────────────
-    def _emit_item_landed(self, obj_id, land_time, image_path, item_no):
-        item_transaction_id = f"{self.transaction_id}-item{item_no}"
+    def _emit(self, event, transaction_id, image_path=None, **fields):
+        """ส่ง event ขึ้น server ใน background thread (ส่งไม่ได้ → เข้า retry queue)"""
         payload = {
             "machine_id": self.machine_id,
-            "event": "ITEM_LANDED",
-            "transaction_id": item_transaction_id,
-            "item_no": item_no,
-            "obj_id": obj_id,
-            "land_time": self._ts(land_time),
-            # ── Phase 3: แนบ order_id เพื่อให้ server เชื่อม transaction กับ order
-            "order_id": self.current_order["id"] if self.current_order else "",
-        }
-        threading.Thread(
-            target=send_or_queue,
-            args=(payload, image_path),
-            daemon=True,
-        ).start()
-
-    def _emit_no_drop(self):
-        """
-        ส่ง NO_DROP เมื่อ DROP_TIMEOUT หมดแบบไม่มี order
-        (กรณีมี order จะใช้ finalize_order แทน)
-        """
-        img_path = None
-        payload = {
-            "machine_id": self.machine_id,
-            "event": "NO_DROP",
-            "transaction_id": self.transaction_id,
-            "land_time": None,
-            "order_id": self.current_order["id"] if self.current_order else "",
-        }
-        threading.Thread(
-            target=send_or_queue,
-            args=(payload, img_path),
-            daemon=True,
-        ).start()
-
-    def _emit_order_result(self, order_id, status, got, expected, image_path):
-        """
-        ส่งผลสรุป order กลับ server
-        server จะอัปเดต orders.status และ orders.items_detected
-        """
-        if order_id is None:
-            return
-        summary_txn = f"{self.transaction_id}-summary"
-        payload = {
-            "machine_id": self.machine_id,
-            "event": "ORDER_RESULT",
-            "transaction_id": summary_txn,
-            "order_id": order_id,
-            "order_status": status,
-            "items_detected": got,
-            "items_expected": expected,
-            "land_time": self._ts(time.time()),
+            "event": event,
+            "transaction_id": transaction_id,
+            **fields,
         }
         threading.Thread(
             target=send_or_queue,
@@ -275,6 +257,9 @@ class VendingStateMachine:
 
     def is_obj_captured(self, obj_id):
         return obj_id in self.captured_items
+
+    def _order_id(self):
+        return self.current_order["id"] if self.current_order else ""
 
     def _ts(self, t):
         return datetime.fromtimestamp(t).strftime("%H:%M:%S")

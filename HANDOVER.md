@@ -39,7 +39,7 @@
 - เชื่อมกับ **ระบบ order** ผ่าน WebSocket — รู้ว่าลูกค้าสั่งกี่ชิ้น แล้วเทียบกับที่จับได้
 - สรุปผลเป็น 3 สถานะ: `completed` (ครบ), `anomaly` (ไม่ครบ/เกิน), `no_drop` (ไม่ตกเลย)
 - **ทนเน็ตหลุด** — ถ้าส่งขึ้น server ไม่ได้ จะเก็บ queue ไว้ retry อัตโนมัติ
-- รันได้ทั้งบน **PC (มีจอ debug)** และ **Raspberry Pi (ไม่มีจอ / headless)**
+- รันได้ทั้งบน **PC (มีจอ debug)** และ **Orange Pi ผ่าน Docker (ไม่มีจอ / headless)**
 
 ### สิ่งที่ระบบ *ไม่ได้* ทำ
 - ไม่รู้ว่าสินค้าคือ "อะไร" (ไม่มี object classification / AI จำแนกชนิดสินค้า)
@@ -54,12 +54,13 @@
 
 ### 2.1 Background Subtraction (การลบพื้นหลัง)
 หัวใจของการจับ motion คือ **เปรียบเทียบเฟรมปัจจุบันกับ "ภาพพื้นหลัง" (background)**
-- เก็บภาพพื้นหลังไว้ (ช่องรับของว่าง ๆ) เรียกว่า `bg_np`
+- เก็บภาพพื้นหลังไว้ (ช่องรับของว่าง ๆ) ใน `BackgroundModel.bg` (`core/background.py`)
 - ทุกเฟรมใหม่ เอามาลบกับ background → `diff = |frame - bg|`
 - ตรงไหน `diff` สูง = ตรงนั้นมีของเปลี่ยนไป = **motion**
 
 Background ไม่ได้ fix ตายตัว แต่ค่อย ๆ อัปเดตตามสภาพแสง (running average ด้วย
-`learning rate` = `LR`) เพื่อไม่ให้แสงเปลี่ยนกลายเป็น motion หลอก
+`BG_LEARNING_RATE`) เพื่อไม่ให้แสงเปลี่ยนช้า ๆ กลายเป็น motion หลอก
+ตอนเจอของตก background จะถูก **freeze** (หยุดเรียนรู้) ไม่ให้ของถูกกลืนเข้าไป
 
 ### 2.2 ROI — Region of Interest (บริเวณที่สนใจ)
 เราสนใจแค่ **ช่องรับสินค้า** ไม่ใช่ทั้งเฟรม (ข้างนอกอาจมีคนเดินผ่าน เงา ฯลฯ)
@@ -69,16 +70,15 @@ motion ที่เกิดนอก ROI จะถูกตัดทิ้ง�
 ### 2.3 "ของตก = เคลื่อนที่แล้วมานิ่ง"
 กุญแจสำคัญของการนับ: **ของที่กำลังตกจะเคลื่อนที่ (centroid ขยับ) พอตกถึงที่จะนิ่ง**
 - ของกำลังตก → state `MOVING` / `DETECTING`
-- ของนิ่งครบ N เฟรม → state `SHAPE_CONFIRMED` = "ลงจอดแล้ว" = **จังหวะที่ capture**
-
-เราไม่ได้รอ timer ยาว ๆ แต่จับทันทีที่ "นิ่ง" เพื่อให้พร้อมรับชิ้นถัดไปเร็ว
+- ของนิ่งครบ `LANDING_STABLE_FRAMES` เฟรม → state `SHAPE_CONFIRMED` = "ลงจอดแล้ว"
+- นิ่งต่ออีก `CAPTURE_HOLD_SEC` → **capture** (นับ + ถ่ายภาพ)
 
 ### 2.4 Re-baseline (ล้างพื้นหลังใหม่หลัง capture)
 หลังจับของ 1 ชิ้นได้ เราเอา **เฟรมปัจจุบันทั้งภาพมาเป็น background ใหม่ทันที**
-ผลคือ motion mask ว่างเปล่า (ของที่เพิ่งจับถูก "กลืน" เข้าพื้นหลัง)
+(`BackgroundModel.rebaseline()`) ผลคือ motion mask ว่างเปล่า (ของที่เพิ่งจับถูก "กลืน" เข้าพื้นหลัง)
 → ของชิ้นถัดไปที่ตกลงมา (แม้ตกทับที่เดิม) จะกลายเป็น motion ใหม่สด ๆ → นับเป็นชิ้นใหม่ได้
 
-> นี่คือดีไซน์หลักของระบบ — เข้าใจตรงนี้แล้วจะเข้าใจ 80% ของโค้ด main loop
+> นี่คือดีไซน์หลักของระบบ (เปิดถาวร ไม่มี switch ปิด) — เข้าใจตรงนี้แล้วจะเข้าใจ 80% ของ main loop
 
 ### 2.5 Tracker (ตัวจำวัตถุข้ามเฟรม)
 กล้องให้มาทีละเฟรม แต่ละเฟรมเจอ "กล่อง" (bounding box) ของ motion
@@ -98,38 +98,47 @@ IDLE ──(เจอ motion)──> DROP_DETECTED ──(จับของไ�
 ## 3. โครงสร้างไฟล์
 
 ```
-vending-clean/
-├── main.py                  ★ หัวใจ — main loop, ประสานทุกอย่าง
-├── config.py                ★ ค่าตั้งทั้งหมด (อ่านจาก .env)
+MotionDetectionForVendingMachine/
+├── main.py                  ★ main loop — อ่านจากบนลงล่างเห็นลำดับทั้งระบบ
+├── config.py                ★ ค่าตั้งทั้งหมด (อ่านจาก .env) เรียงตามความสำคัญ 6 หมวด
 ├── .env                     ค่าตั้งจริงของเครื่องนี้ (ไม่ commit ขึ้น git)
+├── .envexample              ตัวอย่าง .env (คัดลอกเป็น .env แล้วแก้)
 ├── requirements.txt         library ที่ต้องลง
 ├── Dockerfile               สร้าง container
 ├── docker-compose.yml       รัน container + ผูกกล้อง + mount โฟลเดอร์
 │
 ├── core/                    ★ ตรรกะหลักของการมองเห็น
-│   ├── detect.py            สร้าง motion mask + หากล่อง (bounding box)
-│   ├── tracker.py           จำวัตถุข้ามเฟรม + รวมกล่องที่แตก
+│   ├── frame_source.py      อ่านเฟรมจากกล้อง/วิดีโอ + resize + reconnect + pacing
+│   ├── background.py        BackgroundModel (bg, freeze, grace, rebaseline, env change)
+│   ├── detect.py            สร้าง motion mask + หากล่อง + รวมกล่องที่แตก
+│   ├── tracker.py           จำวัตถุข้ามเฟรม + ตัดสินว่านิ่ง (ลงจอด) หรือยัง
 │   ├── roi.py               จัดการบริเวณที่สนใจ (โหลด/วาด/สร้าง mask)
-│   └── state_machine.py     ตรรกะสถานะ + นับของ + สรุปผล order + ส่ง event
+│   ├── state_machine.py     สถานะ + นับของ + สรุปผล order + ส่ง event
+│   └── reset_policy.py      กติกาว่าเมื่อไหร่ต้อง reset กลับ IDLE (รวมไว้ที่เดียว)
 │
 ├── api/                     ★ การสื่อสารกับ server
-│   ├── client.py            ฟังก์ชันยิง HTTP ขึ้น cloud (post_event, ROI sync)
-│   ├── sent_frame.py        ส่งภาพ realtime ขึ้น server (สำหรับ monitor)
+│   ├── client.py            HTTP: post_event, register, ROI sync, ภาพ realtime
 │   ├── retry_queue.py       queue เก็บ event ที่ส่งไม่สำเร็จ + retry
 │   └── order_listener.py    รับ order ใหม่ผ่าน WebSocket
 │
+├── ui/
+│   └── overlay.py           วาดข้อมูล debug บนจอ (เฉพาะ PC / HEADLESS=0)
+│
 ├── utils/                   ★ เครื่องมือเสริม
 │   ├── image_saver.py       บันทึกภาพหลักฐาน (แยกโฟลเดอร์ with/without order)
-│   ├── disk_cleanup.py      ลบภาพเก่าอัตโนมัติ (กันดิสก์เต็ม)
-│   └── logger.py            ตั้งค่า logging (เขียนไฟล์ + rotate)
+│   ├── disk_cleanup.py      ลบภาพเก่าอัตโนมัติ (กัน eMMC เต็ม)
+│   └── logger.py            logging (เขียนไฟล์ + rotate) + LogThrottle
 │
-└── data/
-    └── roi_config.json      พิกัด ROI (แก้ได้จาก server หรือแก้ไฟล์ตรง ๆ)
+├── data/
+│   └── roi_config.json      พิกัด ROI (แก้ได้จาก server หรือแก้ไฟล์ตรง ๆ)
+├── evidence_images/         ภาพหลักฐาน (runtime, mount ออกนอก container)
+└── logs/                    log ไฟล์ (runtime, mount ออกนอก container)
 ```
 
-**กฎการพึ่งพา (dependency):** `main.py` เรียกใช้ `core/*` + `api/*` + `utils/*`
-โมดูลใน `core/` แทบไม่พึ่งกัน (ยกเว้น state_machine เรียก image_saver + retry_queue)
-ทำให้ทดสอบแต่ละส่วนแยกกันได้
+**กฎการพึ่งพา (dependency):** `main.py` เรียกใช้ `core/*` + `api/*` + `ui/*` + `utils/*`
+โมดูลใน `core/` แทบไม่พึ่งกัน (ยกเว้น state_machine เรียก image_saver + retry_queue,
+reset_policy ใช้ helper จาก tracker) ทำให้ทดสอบแต่ละส่วนแยกกันได้
+ทุกไฟล์อ่านค่าตั้งจาก `config.py` เท่านั้น (ไม่เรียก `os.getenv` เอง)
 
 ---
 
@@ -139,39 +148,39 @@ vending-clean/
 
 ```
   [กล้อง/วิดีโอ]
-        │ frame (numpy BGR)
-        ▼
-  main.py: cvtColor เป็น grayscale
         │
         ▼
-  bg_np (background) ──► diff = |frame - bg|
+  core/frame_source.py: FrameSource.read()   → เฟรม BGR 640x480 (หลุด → reconnect)
         │
         ▼
-  core/detect.py: build_fgmask(diff)         → binary motion mask
+  core/background.py: BackgroundModel.update() → diff = |gray - bg| (+ เรียนรู้ bg ถ้าไม่ freeze)
         │
         ▼
-  core/roi.py: build_mask() → bitwise_and     → เหลือ motion เฉพาะใน ROI
-        │
-        ▼
-  core/detect.py: contour_boxes()            → list ของกล่อง (x,y,w,h)
-        │
-        ▼
-  core/tracker.py: group_close_boxes()       → รวมกล่องที่แตกของชิ้นเดียว
+  main.py: detect_objects()
+        ├─ core/detect.py: build_fgmask(diff)      → binary motion mask
+        ├─ core/roi.py: build_mask() → bitwise_and → เหลือ motion เฉพาะใน ROI
+        ├─ core/background.py: find_env_change()  → ก้อนใหญ่เกิน = แสง/bg เปลี่ยน
+        ├─ core/detect.py: contour_boxes()         → list ของกล่อง (x,y,w,h)
+        ├─ core/detect.py: drop_large_boxes()      → (เฉพาะตอน env change) ตัดก้อนใหญ่
+        └─ core/detect.py: group_close_boxes()     → รวมกล่องที่แตกของชิ้นเดียว
         │
         ▼
   core/tracker.py: MemoryTracker.update()    → จำวัตถุข้ามเฟรม + คำนวณ state
         │  (objects: {id: {centroid, shape, state, ...}})
         ▼
-  main.py: ตรวจว่ามี object state=SHAPE_CONFIRMED นิ่งครบไหม
+  main.py: capture_landed() — object SHAPE_CONFIRMED นิ่งครบ CAPTURE_HOLD_SEC ไหม
         │  ถ้าใช่ ▼
   core/state_machine.py: trigger("still_in_ROI")
         │  ├─► _capture_item() → บันทึกลง captured_items
         │  ├─► utils/image_saver.py: save_evidence_image()   [เขียนไฟล์ .jpg]
-        │  └─► _emit_item_landed() → api/retry_queue.py: send_or_queue()
+        │  └─► _emit("ITEM_LANDED") → api/retry_queue.py: send_or_queue()
         │                                    │
         ▼                                    ▼
-  main.py: reset_motion_baseline()    api/client.py: post_event() → ☁️ server
-        (bg = เฟรมปัจจุบัน, พร้อมชิ้นถัดไป)   (ส่งไม่ได้ → เก็บ queue รอ retry)
+  bg.rebaseline() + tracker.clear_all()  api/client.py: post_event() → ☁️ server
+  (bg = เฟรมปัจจุบัน, พร้อมชิ้นถัดไป)       (ส่งไม่ได้ → เก็บ queue รอ retry)
+        │
+        ▼
+  core/reset_policy.py: decide_reset()  → ถึงเวลา reset ไหม → main.apply_reset()
 ```
 
 ### 4.2 เส้นทาง order (ขนานกับเส้นทางหลัก)
@@ -186,18 +195,20 @@ vending-clean/
   core/state_machine.py: finalize_order() → เทียบ got vs expected
                                               │
                                               ▼
-                          _emit_order_result() → ☁️ server (completed/anomaly/no_drop)
+                          _emit("ORDER_RESULT") → ☁️ server (completed/anomaly/no_drop)
 ```
 
 ### 4.3 เส้นทางเสริม (background threads — รันตลอดเวลา)
 
-| Thread | ไฟล์ | ทำอะไร | ทุกกี่นาน |
+เริ่มทั้งหมดใน `main.start_services()`
+
+| Thread | ไฟล์ | ทำอะไร | ทุกกี่นาน (config) |
 |--------|------|--------|-----------|
-| retry loop | retry_queue.py | ส่ง event ที่ค้างซ้ำ | 60 วิ |
-| order listener | order_listener.py | ฟัง WebSocket รอ order | ตลอด (reconnect 5 วิ) |
-| disk cleanup | disk_cleanup.py | ลบภาพเก่า | ทุก 1 ชม. |
-| ROI polling | main.py → client.py | ดึง ROI ใหม่จาก server | 10 วิ |
-| register + push ROI | main.py → client.py | ลงทะเบียนตู้ตอนเปิด | ครั้งเดียว |
+| retry loop | retry_queue.py | ส่ง event ที่ค้างซ้ำ | `RETRY_INTERVAL` 60 วิ |
+| order listener | order_listener.py | ฟัง WebSocket รอ order | ตลอด (reconnect `WS_RECONNECT_SEC` 5 วิ) |
+| disk cleanup | disk_cleanup.py | ลบภาพเก่า | `CLEANUP_INTERVAL_HOURS` 1 ชม. |
+| ROI polling | client.py: `start_roi_polling()` | ดึง ROI ใหม่จาก server | `ROI_POLL_INTERVAL` 10 วิ |
+| register + push ROI | client.py | ลงทะเบียนตู้ตอนเปิด | ครั้งเดียว |
 
 > ทุก thread เป็น `daemon=True` = ดับตามโปรแกรมหลักอัตโนมัติ
 
@@ -213,18 +224,18 @@ vending-clean/
       → state ยัง IDLE, เริ่มนับ ORDER_WINDOW (30 วิ)
 
 [1] ขวดที่ 1 เริ่มตกลงมาในช่องรับของ
-      → เกิด motion ใน ROI
-      → main loop: bg_frozen = True (แช่แข็ง background ไว้ ไม่ให้ขวดถูกดูดเข้า bg)
+      → เกิด motion ใน ROI (is_motion_in_roi)
+      → bg.freeze() (แช่แข็ง background ไว้ ไม่ให้ขวดถูกดูดเข้า bg)
       → sm.trigger("motion_in_ROI") → state: IDLE → DROP_DETECTED
 
 [2] ขวดที่ 1 ตกถึงก้นช่อง หยุดนิ่ง
       → tracker เห็น centroid นิ่งครบ 4 เฟรม → state = SHAPE_CONFIRMED
-      → main loop: นิ่งครบ CAPTURE_HOLD_SEC → sm.trigger("still_in_ROI")
+      → capture_landed(): นิ่งครบ CAPTURE_HOLD_SEC → sm.trigger("still_in_ROI")
       → _capture_item(): บันทึกภาพ LANDED_item1.jpg, นับเป็นชิ้นที่ 1
       → state: DROP_DETECTED → EVIDENCE_CAPTURED
       → ส่ง ITEM_LANDED event ขึ้น server
       → reset_order_window() (นับ 30 วิใหม่ รอชิ้นถัดไป)
-      → reset_motion_baseline() + tracker.clear_all()
+      → bg.rebaseline() + tracker.clear_all()
          (bg = เฟรมนี้, ขวดที่ 1 กลืนเข้า bg, tracker ลืมขวดที่ 1)
 
 [3] ขวดที่ 2 ตกลงมา (bg สะอาดแล้ว ขวด 2 = motion ใหม่)
@@ -233,10 +244,10 @@ vending-clean/
       → item_count() == order_qty() == 2
 
 [4] หมด ORDER_WINDOW (ไม่มีของตกเพิ่มใน 30 วิ)
+      → decide_reset() คืน "order_done"
       → sm.finalize_order(): got=2, expected=2 → status = "completed"
-      → บันทึก ORDER_SUMMARY.jpg
-      → _emit_order_result() → ส่ง completed + ภาพขึ้น server
-      → do_reset(): state → IDLE, พร้อมรับ order ถัดไป
+      → บันทึก ORDER_SUMMARY.jpg → ส่ง ORDER_RESULT + ภาพขึ้น server
+      → reset_all(): state → IDLE, bg.unfreeze() + grace period พร้อมรับ order ถัดไป
 ```
 
 **กรณีผิดปกติ:**
@@ -252,15 +263,12 @@ vending-clean/
 ### 6.1 `config.py` — ศูนย์รวมค่าตั้ง
 
 โหลดค่าจาก `.env` (ผ่าน `python-dotenv`) แปลงเป็น Python constant ให้ไฟล์อื่น import
-**ทุกค่าปรับผ่าน .env ได้โดยไม่ต้องแก้โค้ด** ยกเว้น `FRAME_W/FRAME_H` (fix 640×480)
+**ทุกค่าปรับผ่าน .env ได้โดยไม่ต้องแก้โค้ด** ยกเว้นหมวด 6 (`FRAME_W/FRAME_H`, `ROI_CONFIG_PATH`)
 
-ค่าที่สำคัญ (รายละเอียดเต็มในหัวข้อ 8):
-- `CAMERA_INDEX` — เลขกล้อง (0,1,..) หรือ path ไฟล์วิดีโอ (auto-detect)
-- `MOT_THRESH` — ความไวจับ motion
-- `MIN_AREA`, `GROUP_DIST` — กรอง/รวมกล่อง
-- `LANDING_STABLE_FRAMES`, `CAPTURE_HOLD_SEC` — เงื่อนไข "นิ่ง = ลงจอด"
-- `ORDER_WINDOW`, `CONFIRMED_HOLD_TIMEOUT` — timer ต่าง ๆ
-- `HEADLESS` — 0 = มีจอ debug, 1 = ไม่มีจอ (Pi)
+- ค่าเรียงเป็น 6 หมวดตามความสำคัญ (ดูตารางเต็มในหัวข้อ 8) แต่ละค่ามีคอมเมนต์บอกว่า ↑/↓ แล้วเกิดอะไร
+- ใส่ค่าผิดรูปแบบใน .env (เช่น `MOT_THRESH=abc`) → โปรแกรมหยุดพร้อมบอกชื่อค่าที่ผิด
+- `summary()` — คืนข้อความรายการค่าที่ใช้จริงทั้งหมด (ซ่อน `API_KEY`)
+  main เรียกตอน startup → ดูได้จาก `docker compose logs`
 
 ---
 
@@ -284,9 +292,9 @@ vending-clean/
 - กรองก้อนที่พื้นที่ ≤ `min_area` ทิ้ง (เล็กเกิน = noise)
 - **output:** list ของ `(x, y, w, h)`
 
----
-
-### 6.3 `core/tracker.py` — จำวัตถุข้ามเฟรม
+#### `drop_large_boxes(boxes, roi_areas, max_ratio)`
+ตัดกล่องที่ใหญ่เกิน `max_ratio` ของพื้นที่ ROI area ใดก็ได้ — ใช้เฉพาะเฟรมที่เจอ env change
+(ก้อนใหญ่ = แสง/bg เปลี่ยน ไม่ส่งเข้า tracker แต่ก้อนเล็กที่เหลือยังส่งต่อ)
 
 #### `group_close_boxes(boxes, max_dist, overlap_pad, mode)`
 **รวมกล่องที่เป็นชิ้นส่วนของวัตถุเดียวกัน** กลับเป็นกล่องเดียว
@@ -296,6 +304,10 @@ vending-clean/
 - `mode="overlap"`: รวมเฉพาะกล่องที่ซ้อนทับกันจริง
 - ใช้ **union-find แบบง่าย** (วน group แล้ว merge กลุ่มที่เชื่อมกัน)
 - **output:** list ของกล่องที่รวมแล้ว `(x, y, w, h)`
+
+---
+
+### 6.3 `core/tracker.py` — จำวัตถุข้ามเฟรม
 
 #### `class MemoryTracker`
 ตัวจำวัตถุ เก็บ `self.objects = {id: {...}}` แต่ละ object มี field:
@@ -313,47 +325,53 @@ vending-clean/
 1. **Matching:** สำหรับแต่ละกล่องที่เจอ หา object เดิมที่ centroid **ใกล้ที่สุด**
    (ระยะ < `TRACK_MATCH_DIST`) → ถือว่าเป็นตัวเดิมที่ขยับมา
    - ถ้าเจอคู่: อัปเดต centroid/shape, เช็คว่านิ่งไหม
+     - กล่องหดเหลือ < `SHRINK_RATIO` (75%) และขยับ < `SHRINK_MAX_MOVE` (30px)
+       → ถือเป็น noise กระพริบ คืนกล่องเดิม, ปกติหดได้ไม่เกินเฟรมละ 5% (`SHRINK_SMOOTH`)
      - centroid ขยับ ≤ `CENTROID_STABLE_DIST` → `shape_stable_count++`
-     - นิ่งครบ `SHAPE_STABLE_FRAMES` เฟรม → state = **SHAPE_CONFIRMED** (ลงจอด!)
+     - นิ่งครบ `LANDING_STABLE_FRAMES` เฟรม → state = **SHAPE_CONFIRMED** (ลงจอด!)
      - ขยับเยอะ → รีเซ็ต count, state = DETECTING
    - ถ้าไม่เจอคู่: สร้าง object ใหม่ (state = MOVING, id ใหม่)
 2. **Disappearance:** object เดิมที่ไม่ถูก match เฟรมนี้ = หายไป
-   - เพิ่งเกิด < 0.5 วิ → ลบทันที (noise)
+   - เพิ่งเกิด < `NEW_OBJ_GRACE_SEC` (0.5 วิ) → ลบทันที (noise)
    - หายเกิน `GHOST_FRAME_TOLERANCE` เฟรม → ลบ (ของออกจาก ROI จริง)
    - ยังไม่เกิน → เก็บไว้ก่อน (เผื่อกระพริบ)
 - **output:** `self.objects` (dict ล่าสุด) — main loop เอาไปตัดสินใจต่อ
 
-**`clear_all()`** — ล้าง object ทั้งหมด (เรียกหลัง capture + re-baseline)
+**`clear_all()`** — ล้าง object ทั้งหมด (เรียกหลัง capture + re-baseline และตอน reset)
 > หมายเหตุ: **ไม่ reset `next_id`** — เพราะถ้า id ซ้ำกับที่ state machine จำอยู่
 > ของชิ้นใหม่อาจถูก skip โดยไม่ตั้งใจ
+
+**helper ระดับโมดูล:**
+- `is_motion_in_roi(tracked)` — มี object ที่ยังขยับไหม (IDLE ใช้ตัดสินว่าเริ่มมีของตก)
+- `has_active_motion(tracked, captured_ids)` — มีมือ/ของใหม่ขยับ (ไม่นับของที่ capture แล้ว)
+  ใช้ทั้งใน `reset_policy` (หยุด hold timer) และ `ui/overlay` (แสดง countdown)
 
 ---
 
 ### 6.4 `core/roi.py` — บริเวณที่สนใจ
 
 #### `class ROIManager`
-โหลด/จัดการพิกัด ROI จาก `data/roi_config.json` รองรับ 4 แบบ:
+โหลด/จัดการพิกัด ROI จาก `data/roi_config.json` (`ROI_CONFIG_PATH`) รองรับ 4 แบบ:
 `rect` (สี่เหลี่ยม), `polygon`/`quad` (หลายเหลี่ยม), `multi_polygon` (หลายพื้นที่)
 
 | method | หน้าที่ |
 |--------|---------|
 | `load()` | อ่าน json → เก็บ points/rect/areas ตาม roi_type |
-| `reload_if_changed()` | เช็ค mtime ของไฟล์ทุก 5 วิ ถ้าเปลี่ยน → โหลดใหม่ (server แก้ ROI ได้สด) |
+| `reload_if_changed()` | เช็ค mtime ของไฟล์ทุก `ROI_CHECK_INTERVAL` (5 วิ) ถ้าเปลี่ยน → โหลดใหม่ (server แก้ ROI ได้สด) |
 | `_scale_point()` | แปลงพิกัดจากขนาดที่ตั้งไว้ → ขนาดเฟรมจริง (เผื่อ config คนละ resolution) |
-| `_scaled_rect()` | คืน (x1,y1,x2,y2) ของ rect หลัง scale (helper รวมโค้ดที่เคยซ้ำ 3 ที่) |
+| `_scaled_rect()` | คืน (x1,y1,x2,y2) ของ rect หลัง scale |
 | `build_mask(shape)` | สร้าง mask ขาว-ดำ: ใน ROI = ขาว, นอก = ดำ (ใช้ bitwise_and กับ fgmask) |
-| `get_roi_areas(shape)` | คืนแต่ละพื้นที่ ROI แยกกัน + จำนวน pixel (ใช้ large-motion check) |
+| `get_roi_areas(shape)` | คืนแต่ละพื้นที่ ROI แยกกัน + จำนวน pixel (ใช้ตรวจ env change) |
 | `draw(frame)` | วาด ROI ลงเฟรม (โหมด DISPLAY เท่านั้น) |
 
-**จุดสำคัญ:** `reload_if_changed()` เช็คไฟล์แค่ทุก 5 วิ (ไม่ใช่ทุกเฟรม)
-เพื่อลด I/O บน SD card ของ Pi
+**จุดสำคัญ:** `reload_if_changed()` เช็คไฟล์แค่ทุก 5 วิ (ไม่ใช่ทุกเฟรม) เพื่อลด I/O บน eMMC
 
 ---
 
 ### 6.5 `core/state_machine.py` — สมองของระบบ
 
-#### `class VendingStateMachine`
-เก็บสถานะ + ของที่จับได้ + context ของ order สื่อสารกับ server ผ่าน emit helpers
+#### `class VendingStateMachine(machine_id)`
+เก็บสถานะ + ของที่จับได้ + context ของ order สื่อสารกับ server ผ่าน `_emit()`
 
 **field สำคัญ:**
 - `state` — IDLE / DROP_DETECTED / EVIDENCE_CAPTURED
@@ -373,52 +391,91 @@ vending-clean/
 | `trigger(event, ...)` | **ตัวขับ state machine** (ดูหัวข้อ 7) |
 | `can_capture_more()` | ถ้ามี order + CAP_COUNT_TO_ORDER_QTY → ห้ามนับเกิน qty |
 | `_capture_item(...)` | บันทึกของ 1 ชิ้น: save ภาพ + เก็บ captured_items + emit |
-| `finalize_order(frame)` | สรุปผล order → completed/anomaly/no_drop → emit + reset |
+| `finalize_order(frame)` | สรุปผล order → completed/anomaly/no_drop → emit |
+| `new_transaction_id()` | สร้าง `TXN-YYYYMMDD-HHMMSS` (ใช้ที่เดียวทั้งระบบ) |
 | `reset()` | ล้าง field กลับ IDLE |
 
-**emit helpers** (ส่ง event ขึ้น server ผ่าน thread แยก):
-- `_emit_item_landed()` → event `ITEM_LANDED` (ของตก 1 ชิ้น + ภาพ)
-- `_emit_no_drop()` → event `NO_DROP` (ไม่มีของตกเลย กรณีไม่มี order)
-- `_emit_order_result()` → event `ORDER_RESULT` (สรุปผล order + ภาพ summary)
+**`_emit(event, transaction_id, image_path, **fields)`** — ส่ง event ขึ้น server ผ่าน thread แยก
+| event | ส่งเมื่อ | transaction_id |
+|-------|---------|----------------|
+| `ITEM_LANDED` | ของตก 1 ชิ้น + ภาพ | `{txn}-item{n}` |
+| `NO_DROP` | DROP_TIMEOUT หมดโดยไม่มีของ (กรณีไม่มี order) | `{txn}` |
+| `ORDER_RESULT` | สรุปผล order + ภาพ summary | `{txn}-summary` |
 
 > ทุก emit ยิงผ่าน `send_or_queue()` ใน thread แยก → ไม่ block main loop
 > ถ้าเน็ตหลุด event จะไปนอนใน retry queue เอง
 
 ---
 
-### 6.6 `api/client.py` — ยิง HTTP ขึ้น cloud
+### 6.6 `core/background.py` — background model
+
+#### `class BackgroundModel`
+รวมสถานะ background ทั้งหมดไว้ที่เดียว (เดิมเป็นตัวแปรลอย 8 ตัวใน main loop)
+
+| field | ความหมาย |
+|-------|----------|
+| `bg` | ภาพพื้นหลังปัจจุบัน (float32 grayscale) |
+| `frozen` | True = หยุดเรียนรู้ (กำลังรับของ) |
+| `snapshot` | bg ตอน freeze / หลัง rebaseline (ใช้ restore ตอน env change) |
+| `clean_bg` | bg ที่ไม่มี motion เก็บไว้ทุก `CLEAN_BG_INTERVAL` ตอน IDLE |
+| `grace_until` | เวลาสิ้นสุด grace period หลัง reset |
+
+| method | เรียกเมื่อ | ทำอะไร |
+|--------|-----------|--------|
+| `update(gray, now, idle)` | ทุกเฟรม | คืน diff; ถ้าไม่ freeze → เรียนรู้ bg (`BG_LEARNING_RATE`, ระหว่าง grace ใช้ `BG_RELEARN_RATE`) + เก็บ clean_bg |
+| `freeze()` | IDLE เจอ motion | หยุดเรียนรู้ + ดึง bg กลับไปที่ clean_bg |
+| `rebaseline(gray)` | capture สำเร็จ | เฟรมนี้เป็น bg ใหม่ (mask ว่างทันที) |
+| `restore_snapshot()` | env change ตอนไม่ IDLE | ดึง snapshot กลับมา |
+| `unfreeze(now)` | reset กลับ IDLE | กลับมาเรียนรู้ + เข้า grace `RESET_GRACE_SEC` |
+| `clear()` | กล้องหลุด / กดปุ่ม r | ล้างหมด เฟรมถัดไปเป็น bg ใหม่ |
+| `in_grace(now)` | ก่อน trigger ของใหม่ | ยังอยู่ใน grace period ไหม |
+
+#### `find_env_change(fgmask, roi_areas)`
+มี ROI area ไหนที่ motion รวมเกิน `MAX_BLOB_ROI_RATIO` ไหม → True = env change (ดูหัวข้อ 10.3)
+
+---
+
+### 6.7 `core/frame_source.py` — แหล่งภาพ
+
+#### `class FrameSource(source)`
+- `read()` — คืนเฟรม 640x480 เสมอ (resize ให้ถ้าขนาดไม่ตรง) หรือ `None` ถ้ากล้องหลุด
+  (ปิดแล้วเปิดใหม่หลัง `CAMERA_RECONNECT_SEC` — main จะ `bg.clear()`; ไฟล์วิดีโอจะวนเล่นซ้ำ)
+- `pace()` — หน่วงให้ไฟล์วิดีโอเล่นตาม FPS จริง (กล้องจริงไม่ทำอะไร)
+
+---
+
+### 6.8 `core/reset_policy.py` — กติกา reset
+
+#### `decide_reset(sm, tracked, now)` → `"order_done"` / `"hold_timeout"` / `"drop_timeout"` / `"empty_frame"` / `None`
+รายละเอียดลำดับความสำคัญในหัวข้อ 7.3 — main เรียก `apply_reset()` ทำงานตามเหตุผลแล้ว `reset_all()`
+
+---
+
+### 6.9 `api/client.py` — ยิง HTTP ขึ้น cloud
 
 | function | หน้าที่ |
 |----------|---------|
 | `_headers()` | สร้าง header ใส่ API key (ถ้ามี) — ใช้ร่วมกันทั้ง api/ |
 | `post_event(payload, image_path)` | ★ ส่ง event + ภาพ (multipart) ขึ้น server → คืน True/False |
 | `register_machine(id)` | ลงทะเบียนตู้ตอน startup (ส่ง SYSTEM_ONLINE, server auto-create machine) |
-| `fetch_remote_roi(id)` | ดึง ROI จาก server มาเขียนทับ local (เรียกทุก 10 วิ) |
+| `fetch_remote_roi(id)` | ดึง ROI จาก server มาเขียนทับ local |
+| `start_roi_polling(id)` | thread เรียก `fetch_remote_roi` ทุก `ROI_POLL_INTERVAL` (10 วิ) |
 | `push_default_roi(id, path)` | push ROI local ขึ้น server ถ้า server ยังไม่มี (ครั้งเดียว) |
+| `send_frame(id, frame)` | ส่งภาพสด JPEG ขึ้น `realtime-image` ทุก `SEND_INTERVAL` (0 = ปิด) timeout 2 วิ |
 
 **`post_event` คืนค่า boolean** — สำคัญมาก เพราะ retry_queue ใช้ค่านี้ตัดสินว่า
 จะลบภาพทิ้ง (สำเร็จ) หรือเก็บ queue (ล้มเหลว)
 
 ---
 
-### 6.7 `api/sent_frame.py` — ส่งภาพ realtime
-
-#### `send_frame(machine_id, frame)`
-encode เฟรมเป็น JPEG แล้ว POST ขึ้น endpoint `realtime-image`
-main loop เรียกทุก `SEND_INTERVAL` (1 วิ) เพื่อให้ dashboard ฝั่ง server เห็นภาพสด
-- timeout สั้น (2 วิ) — ถ้าส่งไม่ทันก็ข้าม ไม่ค้าง main loop
-- ใช้ `_headers()` จาก client.py (ไม่เขียนซ้ำ)
-
----
-
-### 6.8 `api/retry_queue.py` — ทนเน็ตหลุด
+### 6.10 `api/retry_queue.py` — ทนเน็ตหลุด
 
 หลักการ: **event ทุกตัวต้องส่งถึง server ให้ได้ ถ้าส่งไม่ได้ห้ามทิ้ง**
 
 | function | หน้าที่ |
 |----------|---------|
 | `send_or_queue(payload, image_path)` | ★ ลองส่งทันที สำเร็จ→ลบภาพ, ล้มเหลว→เก็บ queue |
-| `_retry_loop()` | thread วน retry queue ทุก 60 วิ สำเร็จ→ลบภาพออกจาก queue |
+| `_retry_loop()` | thread วน retry queue ทุก `RETRY_INTERVAL` สำเร็จ→ลบภาพออกจาก queue |
 | `start_retry_thread()` | เริ่ม thread (เรียกตอน startup) |
 | `_delete_image(path)` | ลบภาพออกจากดิสก์ (หลังส่งสำเร็จ) |
 
@@ -430,14 +487,14 @@ main loop เรียกทุก `SEND_INTERVAL` (1 วิ) เพื่อใ
 
 ---
 
-### 6.9 `api/order_listener.py` — รับ order ผ่าน WebSocket
+### 6.11 `api/order_listener.py` — รับ order ผ่าน WebSocket
 
 เชื่อม WebSocket ไป server ฟัง message `new_order` แบบ real-time
 
 | function | หน้าที่ |
 |----------|---------|
 | `start_order_listener()` | เริ่ม thread เชื่อม WS (เรียกตอน startup) |
-| `_run_forever()` | loop เชื่อม WS + reconnect อัตโนมัติทุก 5 วิ ถ้าหลุด |
+| `_run_forever()` | loop เชื่อม WS + reconnect อัตโนมัติทุก `WS_RECONNECT_SEC` ถ้าหลุด |
 | `_on_message(ws, msg)` | รับ message: ถ้าเป็น new_order ของตู้เรา → เก็บ _pending_order |
 | `get_pending_order()` | main loop เรียกดู order ที่รออยู่ |
 | `clear_pending_order()` | ล้าง order (เมื่อจบ order แล้ว) |
@@ -449,7 +506,7 @@ main loop เรียกทุก `SEND_INTERVAL` (1 วิ) เพื่อใ
 
 ---
 
-### 6.10 `utils/image_saver.py` — บันทึกภาพหลักฐาน
+### 6.12 `utils/image_saver.py` — บันทึกภาพหลักฐาน
 
 #### `save_evidence_image(frame, event_name, transaction_id, has_order)`
 - แยก 2 โฟลเดอร์: `with_order/` (มี order) และ `without_order/` (ไม่มี — สิ่งแปลกปลอม)
@@ -459,20 +516,34 @@ main loop เรียกทุก `SEND_INTERVAL` (1 วิ) เพื่อใ
 
 ---
 
-### 6.11 `utils/disk_cleanup.py` — กันดิสก์เต็ม
+### 6.13 `utils/disk_cleanup.py` — กันดิสก์เต็ม
 
 #### `start_cleanup_thread()`
 thread วนลบภาพเก่ากว่า `CLEANUP_KEEP_DAYS` (default 3 วัน) ทุก `CLEANUP_INTERVAL_HOURS` (1 ชม.)
-> สำคัญบน Pi ที่ดิสก์เล็ก — ถ้าไม่ลบ ภาพหลักฐานสะสมจนเต็ม
+> สำคัญบน Orange Pi ที่ eMMC เล็ก — ถ้าไม่ลบ ภาพหลักฐานสะสมจนเต็ม
 
 ---
 
-### 6.12 `utils/logger.py` — logging
+### 6.14 `utils/logger.py` — logging
 
 #### `get_logger(name)`
-คืน logger ที่เขียนทั้งไฟล์ (`logs/vending.log`, rotate 5MB × 5 ไฟล์) และ console
-เรียกซ้ำได้ ได้ object เดิม (กัน handler ซ้ำ)
+คืน logger `vending.<name>` — ทุกตัวส่งต่อไปที่ logger แม่ `vending` ซึ่งมี handler ชุดเดียว:
+ไฟล์ `logs/vending.log` (rotate 5MB × 5 ไฟล์, ระดับ DEBUG) และ console (ระดับ INFO)
+ทั้งระบบใช้ logger แทน `print` (ข้อความมี timestamp + ชื่อโมดูล)
 
+#### `LogThrottle(interval)`
+จำกัดความถี่ log ที่อาจเกิดทุกเฟรม — ผ่านได้ 1 ครั้งต่อ interval แล้วบอกจำนวนที่ข้ามไป
+ใช้กับ: env change / BG restored (5 วิ), ส่งภาพสดไม่สำเร็จ (60 วิ)
+
+---
+
+### 6.15 `ui/overlay.py` — จอ debug (เฉพาะ PC)
+
+- `render_overlay(...)` — วาด ROI, badge สถานะ, `BG FROZEN`, `Items: n`, countdown order /
+  `RESET IN`, กรอบ object ใน tracker
+- `draw_captured_items(frame, sm)` — วาดกรอบ `#n COUNTED` จากพิกัดที่จำไว้ (ดู 10.5)
+
+ไม่มีผลต่อการนับ — บน Orange Pi (`HEADLESS=1`) ไม่ถูกเรียกเลย
 
 ---
 
@@ -510,68 +581,91 @@ thread วนลบภาพเก่ากว่า `CLEANUP_KEEP_DAYS` (defaul
 
 | state ปัจจุบัน | event | ทำอะไร | state ใหม่ |
 |----------------|-------|--------|-----------|
-| IDLE | `motion_in_ROI` | ตั้ง drop_time, สร้าง transaction_id, print ของกำลังตก | DROP_DETECTED |
+| IDLE | `motion_in_ROI` | ตั้ง drop_time, สร้าง transaction_id, log ของกำลังตก | DROP_DETECTED |
 | DROP_DETECTED | `still_in_ROI` | `_capture_item()` (ถ้ายังนับได้) | EVIDENCE_CAPTURED |
-| DROP_DETECTED | `timeout` | ถ้าไม่มีของ → `_emit_no_drop()`, reset | IDLE |
+| DROP_DETECTED | `timeout` | ถ้าไม่มีของ → `_emit("NO_DROP")`, reset | IDLE |
 | EVIDENCE_CAPTURED | `still_in_ROI` | capture ชิ้นถัดไป (ถ้ายังนับได้) | คงเดิม |
 
-### 7.3 การตัดสินใจ reset (อยู่ใน main.py ไม่ใช่ใน state_machine)
+### 7.3 การตัดสินใจ reset (`core/reset_policy.py: decide_reset()`)
 
-main loop เป็นคนตัดสินว่าเมื่อไหร่ควร reset กลับ IDLE โดยลำดับความสำคัญ:
+main เรียกเฉพาะตอน state = DROP_DETECTED / EVIDENCE_CAPTURED (หลังพยายาม capture ในเฟรมนั้น)
+ลำดับความสำคัญ:
 
-1. **มี order + order window หมด** → `finalize_order()` + reset (สรุปผลก่อน)
-2. **มี confirmed item ค้าง** → ไม่ reset ที่นี่ ปล่อยให้ block EVIDENCE_CAPTURED จัดการ
-   ด้วย `CONFIRMED_HOLD_TIMEOUT` (นับใหม่ทุกครั้งที่มี motion → รอว่าไม่มีของตกเพิ่มจริง)
-3. **ไม่มี order + ไม่มี item + เกิน DROP_TIMEOUT** → reset
-4. **frame ว่าง (ไม่มีอะไรใน ROI)** → reset
+1. **`order_done`** — มี order + order window หมด → `finalize_order()` + reset
+2. **มีของที่นับแล้ว** → ห้าม DROP_TIMEOUT / frame ว่าง มาตัด
+   - มี motion/ของใหม่ใน ROI → เลื่อน `land_time` เป็นตอนนี้ (เริ่มนับ hold ใหม่)
+   - มี order → รอ order window หมด (ข้อ 1) อย่างเดียว
+   - ไม่มี order → **`hold_timeout`** ครบ `CONFIRMED_HOLD_TIMEOUT` โดยไม่มี motion ใหม่ → reset
+3. **`drop_timeout`** — ไม่มี order + ยังไม่ได้ของ + เกิน `DROP_TIMEOUT` → ส่ง NO_DROP + reset
+4. **`empty_frame`** — ไม่มี order + ยังไม่ได้ของ + ROI ว่าง → reset (มี order → รอ window หมด)
 
-> เหตุผลที่ logic reset อยู่ใน main.py ไม่ใช่ state_machine: มันต้องดูข้อมูลจาก
-> tracker (มี motion ไหม, frame ว่างไหม) ซึ่ง state_machine ไม่รู้จัก
+ทุกกรณีจบด้วย `reset_all()` = `sm.reset()` + `tracker.clear_all()` + `bg.unfreeze()` (เข้า grace)
+
+**กรณีพิเศษใน main.py:** IDLE + มี order + window หมดโดยไม่มีของตกเลย → `finalize_order()` (no_drop)
+แล้ว `sm.reset()` อย่างเดียว (bg ยังไม่ถูก freeze จึงไม่ต้อง grace) — อยู่ใน main เพราะต้องเช็ค
+ก่อนรับ motion ใหม่ในเฟรมเดียวกัน
+
+> เหตุผลที่ logic reset ไม่อยู่ใน state_machine: มันต้องดูข้อมูลจาก tracker
+> (มี motion ไหม, frame ว่างไหม) ซึ่ง state_machine ไม่รู้จัก
 
 ---
 
 ## 8. การตั้งค่า
 
-### 8.1 ตัวแปร .env ที่สำคัญ
+### 8.1 ตัวแปร .env
 
-**การมองเห็น (detection):**
+ทุกค่าอยู่ใน `config.py` (มีคอมเมนต์อธิบาย) และตัวอย่างใน `.envexample`
+ค่าที่ไม่ได้ใส่ใน .env ใช้ default ในตาราง · ตอนเริ่มโปรแกรมจะ log ค่าที่ใช้จริงทั้งหมด
+
+**หมวด 1 — ตัวตนตู้และการเชื่อมต่อ (ต้องตั้งทุกตู้):**
+| ตัวแปร | default | ความหมาย |
+|--------|---------|----------|
+| `MACHINE_ID_DEFAULT` | VENDING_01 | ชื่อตู้ (ห้ามซ้ำ) — `python main.py --machine X` ทับได้ |
+| `CLOUD_API_URL` | (ว่าง) | endpoint ส่ง event เช่น `http://host:5100/api/events` |
+| `WS_URL` | ws://localhost:5100/ws | WebSocket url รับ order |
+| `API_KEY` | (ว่าง) | key ยืนยันตัวตนกับ server (ถ้ามี) |
+| `CAMERA_INDEX` | 0 | เลขกล้อง หรือ path ไฟล์วิดีโอ |
+| `HEADLESS` | 1 | 1 = ไม่มีจอ (Orange Pi / Docker), 0 = เปิดหน้าต่าง debug (PC) |
+
+**หมวด 2 — ความไว / ความเร็วการจับ (จูนบ่อยที่สุด):**
 | ตัวแปร | default | ความหมาย | ปรับเมื่อ |
 |--------|---------|----------|-----------|
-| `MOT_THRESH` | 25 | ความไวจับ motion | ต่ำลง = จับของจาง ๆ ได้แต่ noise เยอะ |
-| `MIN_AREA` | 150 | พื้นที่ขั้นต่ำของกล่อง (px) | ของเล็กหลุด → ลดค่า |
-| `GROUP_DIST` | 60 | ระยะรวมกล่อง (px) | ของ 2 ชิ้นถูกรวม → ลดค่า |
-| `GROUP_MODE` | distance | วิธีรวมกล่อง | ของบินใกล้กัน → "overlap" |
-| `MORPH_OPEN_KSIZE` | 5 | ลบ noise | noise เยอะ → เพิ่ม |
-| `MORPH_DILATE_KSIZE` | 5 | เชื่อม mask ที่ขาด | กรอบขาด → เพิ่ม |
-| `MORPH_DILATE_ITER` | 2 | จำนวนรอบ dilate | " |
+| `CAPTURE_HOLD_SEC` | 1.5 | นิ่งเพิ่มหลังลงจอดก่อน capture (วิ) | ลูกค้าหยิบเร็วแล้วพลาด → ลด |
+| `MOT_THRESH` | 25 | ความไวจับ motion | ของจางหลุด → ลด / noise เยอะ → เพิ่ม |
+| `MIN_AREA` | 150 | พื้นที่ขั้นต่ำของก้อน (px²) | ของเล็กหลุด → ลด |
+| `MAX_BLOB_ROI_RATIO` | 0.30 | ก้อนใหญ่เกินสัดส่วนนี้ของ ROI = env change | ตู้ขายของชิ้นใหญ่ → เพิ่ม |
+| `LANDING_STABLE_FRAMES` | 4 | เฟรมที่ต้องนิ่งจึงถือว่าลงจอด | |
+| `CENTROID_STABLE_DIST` | 10 | ระยะ centroid ขยับได้แล้วยังถือว่านิ่ง (px) | |
 
-**จังหวะการจับ (timing):**
+**หมวด 3 — เวลา order / reset:**
 | ตัวแปร | default | ความหมาย |
 |--------|---------|----------|
-| `LANDING_STABLE_FRAMES` | 4 | เฟรมที่ต้องนิ่งจึงถือว่าลงจอด |
-| `CAPTURE_HOLD_SEC` | 2 | นิ่งเพิ่มหลังลงจอดก่อน capture (0=ทันที) |
-| `MIN_PRESENCE_SEC` | 0.2 | เวลาขั้นต่ำใน ROI ก่อน capture (กัน noise) |
-| `CENTROID_STABLE_DIST` | 10 | ระยะ centroid ขยับได้แล้วยังถือว่านิ่ง (px) |
+| `ORDER_WINDOW` | 30 | เวลารอของตกหลังได้ order (วิ) — นับใหม่ทุกครั้งที่ capture |
+| `CONFIRMED_HOLD_TIMEOUT` | 30 | ไม่มี order: รอว่าไม่มีของตกเพิ่มก่อน reset (วิ) |
+| `DROP_TIMEOUT` | 25 | ไม่มี order: เห็น motion แต่ไม่มีของนิ่งนานเท่านี้ → NO_DROP (วิ) |
+| `CAP_COUNT_TO_ORDER_QTY` | 1 | ห้ามนับเกิน qty ที่สั่ง (⚠ จะตรวจไม่พบตู้ปล่อยของเกิน) |
+
+**หมวด 4 — ขั้นสูง (ไม่ควรแตะ):**
+| ตัวแปร | default | ความหมาย |
+|--------|---------|----------|
+| `GROUP_MODE` / `GROUP_DIST` / `GROUP_OVERLAP_PAD` | distance / 60 / 4 | การรวมก้อนที่แตก |
+| `MORPH_OPEN_KSIZE` / `MORPH_DILATE_KSIZE` / `MORPH_DILATE_ITER` | 5 / 5 / 2 | ทำความสะอาด mask |
 | `TRACK_MATCH_DIST` | 150 | ระยะที่ tracker match วัตถุเดิม (px) |
+| `GHOST_FRAME_TOLERANCE` | 2 | ก้อนหายได้กี่เฟรมก่อนลบ |
+| `BG_LEARNING_RATE` | 0.1 | ความเร็วที่ bg ปรับตามแสง |
+| `RESET_GRACE_SEC` / `BG_RELEARN_RATE` | 1.5 / 0.3 | grace period หลัง reset (ดู 10.1) |
+| `CLEAN_BG_INTERVAL` | 0.5 | เก็บ clean_bg ทุกกี่วิ (ดู 10.2) |
 
-**timer / order:**
+**หมวด 5 — ระบบ / ดูแลเครื่อง:**
 | ตัวแปร | default | ความหมาย |
 |--------|---------|----------|
-| `ORDER_WINDOW` | 30 | เวลารอของตกหลังได้ order (วิ) — reset ทุกครั้งที่ capture |
-| `CONFIRMED_HOLD_TIMEOUT` | 20 | รอว่าไม่มีของตกเพิ่มก่อน reset (วิ, กรณีไม่มี order) |
-| `CAP_COUNT_TO_ORDER_QTY` | 1 | ห้ามนับเกิน qty ที่สั่ง (1=เปิด) |
-| `REBASELINE_ON_CAPTURE` | 1 | ล้าง bg หลัง capture (1=เปิด, ดีไซน์หลัก) |
+| `SEND_INTERVAL` | 1 | ส่งภาพสดทุกกี่วิ (0 = ปิด) |
+| `ROI_POLL_INTERVAL` / `ROI_CHECK_INTERVAL` | 10 / 5 | ดึง ROI จาก server / เช็คไฟล์ ROI |
+| `RETRY_INTERVAL` | 60 | retry event ที่ค้าง (วิ) |
+| `CAMERA_RECONNECT_SEC` / `WS_RECONNECT_SEC` | 2 / 5 | รอก่อนต่อใหม่ |
+| `CLEANUP_KEEP_DAYS` / `CLEANUP_INTERVAL_HOURS` | 3 / 1 | ลบภาพเก่า |
 
-**การเชื่อมต่อ / โหมด:**
-| ตัวแปร | ความหมาย |
-|--------|----------|
-| `CAMERA_INDEX` | เลขกล้อง (0) หรือ path วิดีโอ |
-| `HEADLESS` | 0=มีจอ debug, 1=ไม่มีจอ (Pi) |
-| `MACHINE_ID_DEFAULT` | ชื่อตู้ |
-| `CLOUD_API_URL` | endpoint ส่ง event เช่น http://host/api/events |
-| `WS_URL` | WebSocket url รับ order |
-| `API_KEY` | key ยืนยันตัวตนกับ server (ถ้ามี) |
-| `CLEANUP_KEEP_DAYS` | เก็บภาพกี่วัน (default 3) |
+**หมวด 6 — ค่าคงที่ (แก้ในโค้ดเท่านั้น ห้ามแก้):** `FRAME_W=640`, `FRAME_H=480`, `ROI_CONFIG_PATH`
 
 ### 8.2 `data/roi_config.json` — พิกัด ROI
 
@@ -600,15 +694,24 @@ python main.py
 # หรือระบุชื่อตู้: python main.py --machine VENDING_02
 ```
 โหมดนี้จะเปิด 2 หน้าต่าง: "Vending System" (ภาพ + overlay) และ "Motion Mask"
-กด `q` = ออก, `r` = reset ระบบ
+กด `q` = ออก, `r` = reset ระบบ (ล้าง state + tracker + background ทั้งหมด)
 
-### 9.2 รันบน Raspberry Pi (production)
+### 9.2 รันบน Orange Pi (production, Docker)
 ```bash
-# ตั้ง .env: HEADLESS=1
-docker compose up -d
+cp .envexample .env      # แก้หมวด 1 ให้ตรงตู้, HEADLESS=1
+docker compose up -d --build
+docker compose logs -f --tail=100 vending-cam   # ดู "Active config" ว่าค่าถูก
 ```
-`docker-compose.yml` ผูก `/dev/video0` (กล้อง) และ mount `evidence_images/` + `data/`
-ออกมานอก container เพื่อให้ภาพ + config ไม่หายเมื่อ container restart
+`docker-compose.yml` ผูก `/dev/video0` (กล้อง) และ mount `evidence_images/`, `data/`, `logs/`
+ออกมานอก container → ภาพ, ROI และ log ไม่หายเมื่อ rebuild/restart
+
+**อัปเดตแบบ rollback ได้:**
+```bash
+docker tag $(docker compose images -q vending-cam) vending-cam:prev   # เก็บ image เก่า
+# copy source ใหม่ (ไม่เอา .venv / .env / evidence_images / logs) แล้ว
+docker compose up -d --build
+# มีปัญหา: กลับไปใช้ source เก่าแล้ว build ใหม่ (หรือตั้ง image: vending-cam:prev ชั่วคราว)
+```
 
 ### 9.3 requirements
 ```
@@ -622,27 +725,32 @@ opencv-python, numpy, requests, python-dotenv, websocket-client
 จุดเหล่านี้เคยเป็น bug หรือเป็นดีไซน์ที่ไม่ชัดในตัวเอง — อ่านก่อนแก้โค้ด
 
 ### 10.1 มือถูก snapshot เป็น background ตอน reset
-หลัง `do_reset()` มือลูกค้าอาจยังอยู่ในเฟรม ถ้าล้าง `bg_np = None` ทันที เฟรมถัดไป
-จะจับมือเป็น background ใหม่ → พอมือถอยออกกลายเป็น "blob หลอก"
-**แก้แล้วด้วย:** grace period (`RESET_GRACE_PERIOD` 1.5 วิ) — ช่วงนี้ re-learn เร็ว
-(`LR_RELEARN`) เพื่อดูดมือเข้า bg และห้าม trigger motion ใหม่
+หลัง reset มือลูกค้าอาจยังอยู่ในเฟรม ถ้าล้าง bg ทันที เฟรมถัดไปจะจับมือเป็น background ใหม่
+→ พอมือถอยออกกลายเป็น "blob หลอก"
+**แก้แล้วด้วย:** `bg.unfreeze()` ไม่ล้าง bg แต่เข้า grace period (`RESET_GRACE_SEC` 1.5 วิ)
+ช่วงนี้ re-learn เร็ว (`BG_RELEARN_RATE`) เพื่อดูดมือเข้า bg และห้าม trigger motion ใหม่
 
 ### 10.2 Clean BG snapshot
-ตอน freeze background (เจอของชิ้นแรก) เราไม่ใช้ `bg_np` ปัจจุบัน (อาจดูดมือไปบางส่วนแล้ว)
-แต่ใช้ `clean_bg` = snapshot ตอน IDLE + ไม่มี motion เก็บไว้ล่วงหน้าทุก 0.5 วิ
+ตอน freeze background (เจอของชิ้นแรก) เราไม่ใช้ bg ปัจจุบัน (อาจดูดมือไปบางส่วนแล้ว)
+แต่ใช้ `clean_bg` = snapshot ตอน IDLE + ไม่มี motion เก็บไว้ล่วงหน้าทุก `CLEAN_BG_INTERVAL`
 → ได้ background ที่สะอาดจริง
 
 ### 10.3 Large motion = env change
-ถ้า motion blob ใหญ่เกิน `MAX_BLOB_ROI_RATIO` (60%) ของพื้นที่ ROI → ถือว่าเป็น
-"สภาพแวดล้อมเปลี่ยน" (แสง เงา คนบังกล้อง) ไม่ใช่ของตก → restore bg + ไม่ trigger
-กัน false positive จากแสงกระพริบ
+ถ้า motion รวมใน ROI area ใดเกิน `MAX_BLOB_ROI_RATIO` (30%) ของพื้นที่ → ถือว่าเป็น
+"สภาพแวดล้อมเปลี่ยน" (แสง เงา คนบังกล้อง) ไม่ใช่ของตก:
+- ก้อนที่ใหญ่เกิน threshold ถูกตัดออก ไม่ส่งเข้า tracker (ก้อนเล็กที่เหลือยังส่งต่อ)
+- **IDLE:** ไม่ทำอะไรกับ bg — bg ยังเรียนรู้ปกติ (`BG_LEARNING_RATE`) จึงกลืนแสงใหม่ใน ~0.3 วิ
+- **ไม่ IDLE (bg freeze อยู่):** `restore_snapshot()` ดึง bg ตอน freeze กลับมา + เลื่อน hold timer
+  - ⚠ **known issue:** ถ้าแสงเปลี่ยน "ค้าง" หลังจับของได้แล้ว (ไม่มี order) bg ที่ freeze อยู่ไม่เรียนรู้แสงใหม่
+    → env change เกิดทุกเฟรม → hold timer ถูกเลื่อนตลอด → ค้าง EVIDENCE_CAPTURED จนกว่าแสงจะกลับ
+    (มี order → จบตาม ORDER_WINDOW ปกติ)
+- ⚠ ของชิ้นใหญ่กว่า 30% ของ ROI จะถูกมองเป็น env change และไม่ถูกนับ
 
-### 10.4 Re-baseline คือดีไซน์หลัก (อย่าเผลอปิด)
-`REBASELINE_ON_CAPTURE=1` เป็นกลไกที่ทำให้ **นับของหลายชิ้นที่ตกทับที่เดิมได้**
-ถ้าปิด (0) ของที่นับแล้วจะค้างเป็น motion → ชิ้นถัดไปที่ตกทับจะไม่ถูกนับเป็นชิ้นใหม่
-มีโค้ดที่พึ่งดีไซน์นี้: หลัง capture จะ `reset_motion_baseline()` + `tracker.clear_all()`
+### 10.4 Re-baseline คือดีไซน์หลัก
+`bg.rebaseline()` + `tracker.clear_all()` หลัง capture เป็นกลไกที่ทำให้ **นับของหลายชิ้นที่ตกทับที่เดิมได้**
+(เดิมมี switch `REBASELINE_ON_CAPTURE` แต่ปิดแล้วระบบนับหลายชิ้นพัง จึงเปิดถาวร)
 
-### 10.5 กรอบ CONFIRMED เป็นแค่ overlay
+### 10.5 กรอบ COUNTED เป็นแค่ overlay
 หลัง re-baseline ของถูกกลืนเข้า bg (มองไม่เห็นใน mask แล้ว) แต่เรายังวาดกรอบเขียว
 "COUNTED" ได้ เพราะกรอบนั้นวาดจากพิกัดที่จำไว้ใน `captured_items` (cx/cy/w/h)
 **ไม่เกี่ยวกับ motion mask** — อย่าไปหา object ใน tracker มาวาด (มันไม่มีแล้ว)
@@ -657,8 +765,12 @@ opencv-python, numpy, requests, python-dotenv, websocket-client
 
 ### 10.8 Video file pacing
 ถ้า `CAMERA_INDEX` เป็น path วิดีโอ OpenCV จะอ่านเฟรมเร็วสุดเท่าที่ CPU ไหว
-(ไม่ผูก FPS คลิป) ทำให้ timer เพี้ยน → main loop มี pacing หน่วงให้เล่นตาม FPS จริง
+(ไม่ผูก FPS คลิป) ทำให้ timer เพี้ยน → `FrameSource.pace()` หน่วงให้เล่นตาม FPS จริง
 กล้องจริงไม่ต้องหน่วง (ส่งเฟรมตามอัตราของมันเอง)
+
+### 10.9 `tracked` คือ dict เดียวกับ `tracker.objects`
+`tracker.clear_all()` ทำให้ตัวแปร `tracked` ใน main ว่างไปด้วย — reset_policy อาศัยพฤติกรรมนี้
+(หลัง capture `tracked` ว่าง) ถ้าเปลี่ยน `update()` ให้คืน copy ต้องตรวจตรงนี้
 
 ---
 
@@ -669,13 +781,15 @@ opencv-python, numpy, requests, python-dotenv, websocket-client
 classification (เช่น YOLO) เข้าไปในขั้นตอนหลัง `contour_boxes`
 
 **Q: ถ้าอยากเพิ่มความแม่นยำ ควรปรับอะไรก่อน?**
-เริ่มจาก `MOT_THRESH` (ความไว), `MIN_AREA` (กรองขนาด), แล้ว `LANDING_STABLE_FRAMES`
-(ความไวการจับตอนนิ่ง) ปรับผ่าน .env ทดสอบกับวิดีโอจริงได้เลย
+เริ่มจากหมวด 2 ใน config: `CAPTURE_HOLD_SEC`, `MOT_THRESH` (ความไว), `MIN_AREA` (กรองขนาด),
+`MAX_BLOB_ROI_RATIO` แล้วค่อย `LANDING_STABLE_FRAMES` ปรับผ่าน .env ทดสอบกับวิดีโอจริงได้เลย
 
-**Q: ทำไม logic reset อยู่ใน main.py ไม่ใช่ state_machine?**
-เพราะการตัดสิน reset ต้องดูข้อมูลจาก tracker (มี motion ไหม, frame ว่างไหม) ซึ่ง
-state_machine ไม่รู้จัก tracker — มันดูแค่ order + captured_items
+**Q: logic reset อยู่ที่ไหน?**
+`core/reset_policy.py: decide_reset()` ที่เดียว (ยกเว้นกรณี IDLE + order หมด ดู 7.3)
 
 **Q: 3 threads ส่งข้อมูลขึ้น server พร้อมกันจะชนกันไหม?**
 ไม่ชน เพราะแต่ละ event เป็น HTTP request อิสระ retry queue มี lock กัน race
 เฉพาะตอนแก้ list ส่วน order listener มี lock กัน `_pending_order`
+
+**Q: ดู log ได้ที่ไหน?**
+`docker compose logs vending-cam` (console) หรือไฟล์ `logs/vending.log` บน host (เก็บย้อนหลัง ~25MB)

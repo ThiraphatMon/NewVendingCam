@@ -9,6 +9,9 @@ core/frame_source.py — อ่านเฟรมจากกล้องหร�
 import time
 import cv2
 from config import FRAME_W, FRAME_H, CAMERA_RECONNECT_SEC
+from utils.logger import get_logger
+
+logger = get_logger("frame_source")
 
 
 class FrameSource:
@@ -26,7 +29,7 @@ class FrameSource:
             fps = 30.0
         self.frame_period = 1.0 / fps
         if self.is_video_file:
-            print(f"🎞️ Video file @ {fps:.2f} FPS → pacing playback ตามเวลาจริง")
+            logger.info(f"🎞️ Video file @ {fps:.2f} FPS → pacing playback ตามเวลาจริง")
         self._next_deadline = None  # ตั้งตอนอ่านเฟรมแรก
 
     def _open(self):
@@ -45,7 +48,7 @@ class FrameSource:
 
         ret, frame = self.cap.read()
         if not ret:
-            print("⚠️ กล้องหลุด กำลัง reconnect...")
+            logger.warning("⚠️ กล้องหลุด กำลัง reconnect...")
             self.cap.release()
             time.sleep(CAMERA_RECONNECT_SEC)
             self.cap = self._open()
