@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import time
+import datetime
 import argparse
+import config
 from config import (
     FRAME_W,
     FRAME_H,
@@ -14,230 +16,41 @@ from config import (
     HEADLESS,
     SEND_INTERVAL,
     MAX_BLOB_ROI_RATIO,
-    ORDER_WINDOW,
     MOT_THRESH,
     MORPH_OPEN_KSIZE,
     MORPH_DILATE_KSIZE,
     MORPH_DILATE_ITER,
     GROUP_MODE,
     GROUP_OVERLAP_PAD,
-    MIN_PRESENCE_SEC,
     CAPTURE_HOLD_SEC,
-    REBASELINE_ON_CAPTURE,
+    BG_LEARNING_RATE,
+    BG_RELEARN_RATE,
+    RESET_GRACE_SEC,
+    CLEAN_BG_INTERVAL,
+    CAMERA_RECONNECT_SEC,
+    ROI_CONFIG_PATH,
 )
 import threading
-from api.client import fetch_remote_roi, push_default_roi, register_machine
+from api.client import (
+    push_default_roi,
+    register_machine,
+    send_frame,
+    start_roi_polling,
+)
 from api.retry_queue import start_retry_thread
-from core.tracker import MemoryTracker, group_close_boxes
-from core.detect import build_fgmask, contour_boxes
+from core.tracker import MemoryTracker
+from core.detect import build_fgmask, contour_boxes, group_close_boxes
 from core.state_machine import VendingStateMachine
 from core.roi import ROIManager
 from utils.disk_cleanup import start_cleanup_thread
+from ui.overlay import draw_captured_items, render_overlay
 
-from api.sent_frame import send_frame
 from api.order_listener import (
     start_order_listener,
     get_pending_order,
     clear_pending_order,
 )
 
-
-
-def draw_captured_items(frame, sm, tracked, now):
-    """วาดกรอบของที่ confirmed แล้ว (ใช้เฉพาะโหมด DISPLAY)."""
-    all_gone = True
-    for obj_id, item_info in sm.captured_items.items():
-        landed_obj = tracked.get(obj_id)
-        # วาดกรอบสด (เขียวสว่าง) เฉพาะของที่ยังเห็นอยู่จริงใน tracker (ไม่ใช่ ghost)
-        # ปกติในโหมด re-baseline ของถูกกลืนเข้า bg ทันที → ตกไป branch COUNTED ด้านล่าง
-        item_visible = (
-            landed_obj is not None
-            and landed_obj.get("ghost_frames", 0) == 0
-        )
-        if item_visible:
-            all_gone = False
-            # วาดกรอบสีเขียว (confirmed)
-            cx, cy = landed_obj["centroid"]
-            w, h = landed_obj["shape"]
-            latest_land = max(
-                sm.captured_items.values(), key=lambda i: i["land_time"]
-            )["land_time"]
-            hold_elapsed = now - latest_land
-            time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
-            cv2.rectangle(
-                frame,
-                (cx - w // 2, cy - h // 2),
-                (cx + w // 2, cy + h // 2),
-                (0, 255, 0),
-                3,
-            )
-            cv2.putText(
-                frame,
-                f"#{item_info['item_no']} CONFIRMED ({time_left:.0f}s)",
-                (cx - w // 2, cy - h // 2 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.40,
-                (0, 255, 0),
-                1,
-            )
-        elif (
-            REBASELINE_ON_CAPTURE
-            and item_info.get("cx") is not None
-            and item_info.get("w")
-        ):
-            # [RE-BASELINE] ของถูกกลืนเข้า bg แล้ว (ไม่อยู่ใน tracker)
-            # → วาดกรอบจากพิกัดที่จำไว้ เพื่อให้เห็นว่านับชิ้นนี้แล้ว
-            cx, cy = int(item_info["cx"]), int(item_info["cy"])
-            w, h = int(item_info["w"]), int(item_info["h"])
-            cv2.rectangle(
-                frame,
-                (cx - w // 2, cy - h // 2),
-                (cx + w // 2, cy + h // 2),
-                (0, 200, 0),
-                2,
-            )
-            cv2.putText(
-                frame,
-                f"#{item_info['item_no']} COUNTED",
-                (cx - w // 2, cy - h // 2 - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.40,
-                (0, 200, 0),
-                1,
-            )
-
-
-def render_overlay(frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, actual_h):
-    """วาด ROI + badges + กรอบ tracked objects ลงบน frame (ใช้เฉพาะโหมด DISPLAY)."""
-    # ── วาด ROI + state badge ───────────────────────────────────────────
-    roi_manager.draw(frame)
-    color = (
-        (0, 255, 0)
-        if sm.state == "EVIDENCE_CAPTURED"
-        else (0, 200, 255) if sm.state == "DROP_DETECTED" else (150, 150, 150)
-    )
-
-    if bg_frozen:
-        cv2.putText(
-            frame,
-            "BG FROZEN",
-            (10, actual_h - 15),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 200, 0),
-            1,
-        )
-
-    # item count badge (แสดงเฉพาะตอนกำลังจับของ)
-    if sm.state != "IDLE" and sm.item_count() > 0:
-        badge = f"Items: {sm.item_count()}"
-        cv2.putText(
-            frame,
-            badge,
-            (10, actual_h - 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 200),
-            1,
-        )
-
-    # ── order window countdown badge (ขวาล่าง) ──────────────────────────
-    if sm.has_order() and sm.order_window_start is not None:
-        elapsed = now - sm.order_window_start
-        time_left = max(0, ORDER_WINDOW - elapsed)
-        order_badge = (
-            f"ORDER #{sm.current_order['id']} "
-            f"{sm.item_count()}/{sm.order_qty()} "
-            f"({time_left:.0f}s)"
-        )
-        # คำนวณ x ให้ชิดขวา
-        (badge_w, badge_h), _ = cv2.getTextSize(
-            order_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
-        )
-        badge_x = actual_w - badge_w - 10
-        badge_y = actual_h - 15
-        cv2.putText(
-            frame,
-            order_badge,
-            (badge_x, badge_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 200, 255),
-            2,
-        )
-        
-        # ──  เพิ่มโค้ดส่วนนี้: แสดง Hold Timeout Countdown ที่ขวาล่าง (เฉพาะตอนไม่มีออเดอร์) ──
-    elif sm.state == "EVIDENCE_CAPTURED" and sm.captured_items:
-        latest_item = max(sm.captured_items.values(), key=lambda i: i["land_time"])
-        
-        # ตรวจสอบว่าในพื้นที่ ROI ตอนนี้มีมือหรือวัตถุใหม่กำลังขยับอยู่หรือไม่ (ถ้ามีให้ตรึงเวลาไว้เต็ม)
-        has_active_motion = any(
-            obj_id not in sm.captured_items
-            and obj["state"] in ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
-            for obj_id, obj in tracked.items()
-        )
-        
-        if has_active_motion:
-            hold_time_left = CONFIRMED_HOLD_TIMEOUT
-        else:
-            hold_elapsed = now - latest_item["land_time"]
-            hold_time_left = max(0, CONFIRMED_HOLD_TIMEOUT - hold_elapsed)
-            
-        # สร้างข้อความแสดงเวลาถอยหลังก่อนรีเซ็ตระบบ
-        hold_badge = f"RESET IN: {hold_time_left:.0f}s"
-        (badge_w, badge_h), _ = cv2.getTextSize(hold_badge, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        badge_x = actual_w - badge_w - 10
-        badge_y = actual_h - 15  # ใช้พิกัดความสูงเท่ากันกับป้ายออเดอร์เพราะมันไม่แสดงพร้อมกัน
-        
-        # วาดข้อความสีแดง (0, 0, 255) หรือปรับสีตามชอบเพื่อให้เห็นเด่นชัด
-        cv2.putText(frame, hold_badge, (badge_x, badge_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-        
-
-    cv2.rectangle(frame, (actual_w - 255, 5), (actual_w - 5, 80), (20, 20, 20), -1)
-    cv2.putText(
-        frame,
-        sm.state,
-        (actual_w - 245, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        color,
-        2,
-    )
-
-    # ── วาดกรอบ tracked objects ที่ยังไม่ confirmed ─────────────────────
-    sc = {
-        "CONFIRMED_STOP": (0, 255, 0),
-        "SHAPE_CONFIRMED": (0, 255, 0),
-        "MOVING": (0, 0, 255),
-        "DETECTING": (0, 140, 255),
-    }
-
-    for obj_id, obj in tracked.items():
-        # ข้ามของที่ confirmed แล้ว (วาดไปแล้วด้านบน)
-        if sm.is_obj_captured(obj_id):
-            continue
-        cx, cy = obj["centroid"]
-        w, h = obj["shape"]
-        state = obj["state"]
-        box_color = (
-            (0, 165, 255) if "WAITING" in state else sc.get(state, (0, 0, 255))
-        )
-        cv2.rectangle(
-            frame,
-            (cx - w // 2, cy - h // 2),
-            (cx + w // 2, cy + h // 2),
-            box_color,
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"ID:{obj_id} {state[:12]}",
-            (cx - w // 2, cy - h // 2 - 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            box_color,
-            1,
-        )
 
 
 def main():
@@ -247,6 +60,7 @@ def main():
 
     print(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
     print(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
+    print(config.summary())
 
     start_cleanup_thread()
     start_retry_thread()
@@ -261,7 +75,7 @@ def main():
     actual_w = FRAME_W
     actual_h = FRAME_H
 
-    roi_manager = ROIManager(actual_w, actual_h, config_path="data/roi_config.json")
+    roi_manager = ROIManager(actual_w, actual_h, config_path=ROI_CONFIG_PATH)
 
     # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
     if not HEADLESS:
@@ -278,7 +92,7 @@ def main():
 
     threading.Thread(
         target=push_default_roi,
-        args=(args.machine, "data/roi_config.json"),
+        args=(args.machine, ROI_CONFIG_PATH),
         daemon=True,
     ).start()
 
@@ -286,29 +100,17 @@ def main():
     sm = VendingStateMachine()
     sm.machine_id = args.machine
 
-    def roi_polling_task():
-        while True:
-            try:
-                fetch_remote_roi(sm.machine_id)
-            except Exception as e:
-                print(f"⚠️ roi_polling_task error: {e}")
-            time.sleep(10)
-
-    threading.Thread(target=roi_polling_task, daemon=True).start()
+    start_roi_polling(sm.machine_id)
 
     bg_np = None
-    LR = 0.1
-    # MOT_THRESH ย้ายไปอยู่ใน config.py แล้ว (ปรับผ่าน .env ได้)
     bg_frozen = False
     bg_frozen_snapshot = None  # snapshot ของ bg ตอนที่ freeze (ตอนเจอของชิ้นแรก)
-    RECONNECT_DELAY = 2
 
     # [CLEAN BG] เก็บ snapshot ของ bg ที่ clean (ไม่มี motion) ไว้ล่วงหน้า
     # เพื่อใช้ตอน freeze แทน bg_np ที่อาจถูกดูดมือเข้าไปบางส่วนแล้ว
     # update ทุกๆ CLEAN_BG_INTERVAL วินาที เฉพาะตอน IDLE + ไม่มี motion
     clean_bg = None
     clean_bg_last_update = 0.0
-    CLEAN_BG_INTERVAL = 0.5  # วินาที (ปรับได้)
 
     # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
     # หลัง do_reset() มือผู้ใช้อาจยังอยู่ในเฟรม ถ้า bg_np = None ทันที
@@ -316,8 +118,7 @@ def main():
     # แก้: ไม่ล้าง bg_np แต่ unfreeze ให้ re-learn ช้าๆ + ล็อก grace period
     # ระหว่าง grace period ห้าม trigger DROP_DETECTED ใหม่
     # เพื่อให้ background ดูดมือเข้าไปก่อน แล้วค่อยรับ motion ใหม่
-    RESET_GRACE_PERIOD = 1.5  # วินาที (ปรับได้ถ้าต้องการ)
-    LR_RELEARN = 0.3  # learning rate เร็วขึ้นระหว่าง grace เพื่อดูดมือเข้า bg
+    # (ระยะ grace = RESET_GRACE_SEC, learning rate ระหว่าง grace = BG_RELEARN_RATE)
     reset_grace_until = 0.0  # timestamp สิ้นสุด grace period
 
     last_send_time = 0
@@ -340,7 +141,7 @@ def main():
         if not ret:
             print("⚠️ กล้องหลุด กำลัง reconnect...")
             cap.release()
-            time.sleep(RECONNECT_DELAY)
+            time.sleep(CAMERA_RECONNECT_SEC)
             cap = cv2.VideoCapture(CAMERA_INDEX)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
@@ -359,7 +160,8 @@ def main():
 
         now = time.time()
 
-        if now - last_send_time >= SEND_INTERVAL:
+        # ส่งภาพสดขึ้น dashboard (SEND_INTERVAL=0 = ปิด)
+        if SEND_INTERVAL > 0 and now - last_send_time >= SEND_INTERVAL:
             send_frame(sm.machine_id, frame)
             last_send_time = now
 
@@ -374,7 +176,7 @@ def main():
         if not bg_frozen:
             # [BUG FIX] ระหว่าง grace period re-learn เร็วขึ้นเพื่อดูดมือเข้า background
             # ก่อนที่ระบบจะเปิดรับ motion ใหม่
-            lr = LR_RELEARN if now < reset_grace_until else LR
+            lr = BG_RELEARN_RATE if now < reset_grace_until else BG_LEARNING_RATE
             cv2.addWeighted(bg_np, 1 - lr, frame_gray, lr, 0, dst=bg_np)
 
             # [CLEAN BG] snapshot bg ที่สะอาด เฉพาะตอน IDLE + ไม่มี motion
@@ -485,11 +287,11 @@ def main():
             # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
             # เดิม: bg_np = None → เฟรมถัดไป snapshot มือเป็น background ใหม่ทันที
             # ใหม่: ไม่ล้าง bg_np แต่ unfreeze + ตั้ง grace period
-            #       ระหว่าง grace: re-learn เร็ว (LR_RELEARN) เพื่อดูดมือเข้า bg
+            #       ระหว่าง grace: re-learn เร็ว (BG_RELEARN_RATE) เพื่อดูดมือเข้า bg
             #       ระหว่าง grace: ห้าม trigger DROP_DETECTED ใหม่
-            #       หลัง grace: กลับใช้ LR ปกติ พร้อมรับของชิ้นใหม่
-            reset_grace_until = now + RESET_GRACE_PERIOD
-            print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_PERIOD}s")
+            #       หลัง grace: กลับใช้ BG_LEARNING_RATE ปกติ พร้อมรับของชิ้นใหม่
+            reset_grace_until = now + RESET_GRACE_SEC
+            print(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_SEC}s")
 
         def reset_motion_baseline():
             """[RESET MOTION] เอาเฟรมปัจจุบัน "ทั้งภาพ" มาเป็น background ใหม่
@@ -515,8 +317,6 @@ def main():
         if sm.state == "IDLE" and sm.has_order() and sm.is_order_window_expired(now):
             print(f"[{sm.machine_id}] ⏰ order window หมด — ไม่มีของตกเลย → no_drop")
             if sm.transaction_id is None:
-                import datetime
-
                 sm.transaction_id = datetime.datetime.now().strftime(
                     "TXN-%Y%m%d-%H%M%S"
                 )
@@ -554,15 +354,9 @@ def main():
                 # พอถึงที่แล้วจะนิ่งครบ LANDING_STABLE_FRAMES → state = SHAPE_CONFIRMED
                 # = จังหวะที่ควร capture ทันที แล้วพร้อมรับชิ้นถัดไปเลย
                 #
-                # เดิม: ต้องรอ presence >= CONFIRM_TIME+1.5 (~2.5s) + hold อีก CONFIRM_TIME
-                #       → ของชิ้นที่ 2 ที่ลูกค้าหยิบเร็ว ๆ จับไม่ทัน
-                # ใหม่: presence floor แค่กัน noise แวบเดียว (MIN_PRESENCE_SEC)
-                #       + hold หลังนิ่งสั้นมาก/เป็นศูนย์ (CAPTURE_HOLD_SEC)
-                #       slat บังมือแล้ว จึงไม่ต้องใช้ presence ยาว ๆ กันมืออีก
-                presence = now - obj.get("first_seen", now)
-                if presence < MIN_PRESENCE_SEC:
-                    continue
-
+                # ต้องนิ่งต่อเนื่องอีก CAPTURE_HOLD_SEC หลังลงจอด จึง capture
+                # (ไม่ต้องเช็คเวลาอยู่ใน ROI แยก เพราะนิ่งครบ hold = อยู่ใน ROI นานพออยู่แล้ว)
+                # slat บังมือแล้ว จึงไม่ต้องใช้ presence ยาว ๆ กันมืออีก
                 # ของที่ลงจอดแล้ว (นิ่ง) และนิ่งครบ hold สั้น ๆ → capture
                 if (
                     obj["state"] == "SHAPE_CONFIRMED"
@@ -584,7 +378,7 @@ def main():
                     # จากพิกัดใน captured_items — ไม่เกี่ยวกับ motion mask)
                     # ของชิ้นถัดไปที่ตกลงมา (แม้ตกทับที่เดิม) จะเป็น motion ใหม่
                     # เพียงชิ้นเดียวในเฟรมสะอาด → capture เป็นชิ้นใหม่ได้
-                    if REBASELINE_ON_CAPTURE and sm.is_obj_captured(obj_id):
+                    if sm.is_obj_captured(obj_id):
                         reset_motion_baseline()
                         tracker.clear_all()  # เปลี่ยนเป็นคำสั่งนี้ เพื่อให้ Tracker ลืม Item 1 ไปเลยทันที
                         break
@@ -628,7 +422,7 @@ def main():
         # ── EVIDENCE_CAPTURED: จับ timeout + reset (ทำงานทั้ง HEADLESS/DISPLAY) ─
         if sm.state == "EVIDENCE_CAPTURED":
             if not HEADLESS:
-                draw_captured_items(frame, sm, tracked, now)
+                draw_captured_items(frame, sm)
 
             # force-reset: ทุก confirmed item หายจาก ROI หรือ hold timeout เกิน
             if sm.captured_items:
@@ -707,8 +501,6 @@ def main():
                 bg_np = None
                 bg_frozen = False
                 reset_grace_until = 0.0
-        else:
-            pass
 
     cap.release()
     if not HEADLESS:

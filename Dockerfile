@@ -26,6 +26,7 @@ COPY main.py config.py ./
 COPY api ./api
 COPY core ./core
 COPY utils ./utils
+COPY ui ./ui
 COPY data ./data
 
 # 6. สร้างโฟลเดอร์ runtime ซึ่ง docker-compose จะ bind mount จาก host

@@ -19,9 +19,6 @@ class VendingStateMachine:
 
         # --- multi-item tracking ---
         self.captured_items = {}
-        self.land_obj_id = None
-        self.capture_time = None
-        self.land_img_path = None
 
         # ── Order context ─────────────────────────────────────────────────────
         # None = ไม่มี order (motion ที่จับได้จะถูกแยกลง without_order folder)
@@ -184,10 +181,6 @@ class VendingStateMachine:
             "w": w,
             "h": h,
         }
-
-        self.land_obj_id = obj_id
-        self.capture_time = now
-        self.land_img_path = img_path
 
         if self.state != "EVIDENCE_CAPTURED":
             self.state = "EVIDENCE_CAPTURED"

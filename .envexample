@@ -1,19 +1,52 @@
-# # อัพเดทใหม่สำหรับลง Orange Pi
-# # คัดลอกไฟล์นี้เป็น .env แล้วเปลี่ยน URL, MACHINE_ID และ API_KEY ให้เป็นค่าจริง
+# คัดลอกไฟล์นี้เป็น .env แล้วแก้ค่าในหมวด 1 ให้เป็นค่าจริงของตู้
+# ค่าที่ขึ้นต้นด้วย # = ใช้ค่า default (ตัวเลขที่เห็นคือ default) — เอา # ออกเมื่อต้องการเปลี่ยน
+# คำอธิบายแต่ละค่าดูที่ config.py · ตอนเริ่มโปรแกรมจะ print ค่าที่ใช้จริง (docker compose logs)
 
-# # Orange Pi ทำงานแบบไม่มีหน้าต่างแสดงภาพ
-# HEADLESS=1
+# ── หมวด 1: ตัวตนของตู้และการเชื่อมต่อ (ต้องตั้งทุกตู้) ──────────────────────────
+MACHINE_ID_DEFAULT=VENDING_01
+CLOUD_API_URL=https://your-server.example/api/events
+WS_URL=wss://your-server.example/ws
+API_KEY=
+# กล้อง /dev/video0 ที่ถูก map มาจาก docker-compose.yml (หรือ path ไฟล์วิดีโอตอนทดสอบบน PC)
+CAMERA_INDEX=0
+# Orange Pi ไม่มีจอ = 1 | ทดสอบบน PC ดูหน้าต่าง debug = 0
+HEADLESS=1
 
-# # กล้อง /dev/video0 ที่ถูก map มาจาก docker-compose.yml
-# CAMERA_INDEX=0
+# ── หมวด 2: ความไวและความเร็วในการจับของ (จูนบ่อยที่สุด) ─────────────────────────
+# CAPTURE_HOLD_SEC=1.5
+# MOT_THRESH=25
+# MIN_AREA=150
+# MAX_BLOB_ROI_RATIO=0.30
+# LANDING_STABLE_FRAMES=4
+# CENTROID_STABLE_DIST=10
 
-# # ค่าตัวอย่าง: โปรแกรมยังเปิดกล้องได้ แต่การเชื่อม cloud จะไม่สำเร็จจนกว่าจะเปลี่ยน URL
-# CLOUD_API_URL=https://your-server.example/api/events
-# WS_URL=wss://your-server.example/ws
-# MACHINE_ID_DEFAULT=VENDING_01
-# API_KEY=
-
-# # เวลาและการดูแลพื้นที่ eMMC
+# ── หมวด 3: จังหวะเวลาของ order และการ reset ────────────────────────────────────
 # ORDER_WINDOW=30
-# CLEANUP_KEEP_DAYS=3
-# CLEANUP_INTERVAL_HOURS=1
+# CONFIRMED_HOLD_TIMEOUT=30
+# DROP_TIMEOUT=25
+# CAP_COUNT_TO_ORDER_QTY=1
+
+# ── หมวด 4: ขั้นสูง (ไม่ควรแตะถ้าไม่จำเป็น) ─────────────────────────────────────
+# GROUP_MODE=distance
+# GROUP_DIST=60
+# GROUP_OVERLAP_PAD=4
+# MORPH_OPEN_KSIZE=5
+# MORPH_DILATE_KSIZE=5
+# MORPH_DILATE_ITER=2
+# TRACK_MATCH_DIST=150
+# GHOST_FRAME_TOLERANCE=2
+# BG_LEARNING_RATE=0.1
+# RESET_GRACE_SEC=1.5
+# BG_RELEARN_RATE=0.3
+# CLEAN_BG_INTERVAL=0.5
+
+# ── หมวด 5: ระบบและการดูแลเครื่อง ────────────────────────────────────────────────
+# ส่งภาพสดทุกกี่วินาที (0 = ปิด)
+# SEND_INTERVAL=1
+# ROI_POLL_INTERVAL=10
+# ROI_CHECK_INTERVAL=5
+# RETRY_INTERVAL=60
+# CAMERA_RECONNECT_SEC=2
+# WS_RECONNECT_SEC=5
+CLEANUP_KEEP_DAYS=3
+CLEANUP_INTERVAL_HOURS=1

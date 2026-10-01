@@ -3,12 +3,13 @@ import os
 import time
 import cv2
 import numpy as np
+from config import ROI_CHECK_INTERVAL, ROI_CONFIG_PATH
 
-ROI_CHECK_INTERVAL = 5.0  # เช็ค mtime ทุก 5 วินาที แทนที่จะเช็คทุก frame
+# ROI_CHECK_INTERVAL: เช็ค mtime ทุกกี่วินาที แทนที่จะเช็คทุก frame (ตั้งใน config)
 
 
 class ROIManager:
-    def __init__(self, frame_w, frame_h, config_path="data/roi_config.json"):
+    def __init__(self, frame_w, frame_h, config_path=ROI_CONFIG_PATH):
         self.frame_w = int(frame_w)
         self.frame_h = int(frame_h)
         self.config_path = config_path
@@ -71,7 +72,7 @@ class ROIManager:
 
     def reload_if_changed(self):
         """เช็คและ reload config — แต่จะทำ syscall getmtime แค่ทุก ROI_CHECK_INTERVAL วินาที
-        แทนที่จะเรียกทุก frame เพื่อลด I/O load บน Pi SD card"""
+        แทนที่จะเรียกทุก frame เพื่อลด I/O load บน eMMC ของ Pi"""
         now = time.time()
         if now - self._last_check_time < ROI_CHECK_INTERVAL:
             return  # ยังไม่ถึงเวลาเช็ค ข้ามไปก่อน

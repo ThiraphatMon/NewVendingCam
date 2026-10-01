@@ -72,7 +72,7 @@ HEADLESS = _bool("HEADLESS", True)
 
 # เวลาที่ของต้อง "นิ่ง" หลังลงจอด ก่อนถ่ายภาพนับ (วินาที)
 #   ↓ จับไวขึ้น แต่เสี่ยงถ่ายตอนของยังเด้ง | ↑ ชัวร์ขึ้น แต่ลูกค้าหยิบเร็วจะพลาด
-CAPTURE_HOLD_SEC = _float("CAPTURE_HOLD_SEC", 1.5)
+CAPTURE_HOLD_SEC = _float("CAPTURE_HOLD_SEC", 0.5)
 
 # ความไวต่อการเปลี่ยนแปลงของภาพ (ค่าความต่างสีเทา 0-255)
 #   ↓ (15-20) จับของสีจาง/กลืนพื้นได้ แต่ noise เยอะ | ↑ (30+) เงียบขึ้น แต่ของจางอาจหลุด
@@ -103,7 +103,7 @@ CENTROID_STABLE_DIST = _int("CENTROID_STABLE_DIST", 10)
 ORDER_WINDOW = _int("ORDER_WINDOW", 30)
 
 # กรณีไม่มี order: จับของได้แล้ว ไม่มีอะไรขยับเพิ่มครบกี่วินาทีจึง reset กลับ IDLE
-CONFIRMED_HOLD_TIMEOUT = _int("CONFIRMED_HOLD_TIMEOUT", 30)
+CONFIRMED_HOLD_TIMEOUT = _int("CONFIRMED_HOLD_TIMEOUT", 20)
 
 # กรณีไม่มี order: เห็นการเคลื่อนไหวแต่ไม่มีของนิ่งเลยนานกี่วินาที → ส่ง NO_DROP แล้ว reset
 DROP_TIMEOUT = _float("DROP_TIMEOUT", 25.0)
@@ -146,6 +146,10 @@ BG_RELEARN_RATE = _float("BG_RELEARN_RATE", 0.3)
 
 # เก็บภาพ "ช่องรับของว่าง" (clean background) ทุกกี่วินาที ตอน IDLE และไม่มี motion
 CLEAN_BG_INTERVAL = _float("CLEAN_BG_INTERVAL", 0.5)
+
+# 1 = เจอ env change → ใช้เฟรมปัจจุบันเป็น background ใหม่ทันที (พร้อมจับชิ้นถัดไป)
+# 0 = พฤติกรรมเก่า (ดึง background ก่อนเจอของกลับมา)
+ENV_CHANGE_REBASELINE = _bool("ENV_CHANGE_REBASELINE", True)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

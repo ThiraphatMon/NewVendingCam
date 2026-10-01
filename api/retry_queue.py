@@ -7,7 +7,7 @@ retry_queue.py
   1. ทุกครั้งที่จะส่ง event → เรียก send_or_queue()
   2. ถ้าส่งสำเร็จทันที → ลบรูปออกจากเครื่องเลย
   3. ถ้าส่งไม่สำเร็จ  → บันทึกลง pending_queue (เก็บไว้ใน memory)
-  4. background thread วน retry ทุก 1 นาที
+  4. background thread วน retry ทุก RETRY_INTERVAL วินาที (ตั้งใน config)
   5. เมื่อ retry สำเร็จ → ลบรูปออกจากเครื่อง
 """
 
@@ -15,9 +15,7 @@ import threading
 import time
 import os
 from api.client import post_event
-
-# ---- ค่าคงที่ ----
-RETRY_INTERVAL = 60  # วินาที (retry ทุก 1 นาที)
+from config import RETRY_INTERVAL
 
 # ---- Queue และ Lock ----
 # pending_queue คือ list ของ dict แต่ละตัวมีรูปแบบดังนี้:

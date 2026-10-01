@@ -1,6 +1,9 @@
 import requests
 import os
-from config import CLOUD_API_URL, API_KEY
+import threading
+import time
+import cv2
+from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH, ROI_POLL_INTERVAL
 import json
 
 
@@ -93,13 +96,13 @@ def fetch_remote_roi(machine_id):
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") != "no_config" and "roi_type" in data:
-                with open("data/roi_config.json", "w", encoding="utf-8") as f:
+                with open(ROI_CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
 
-def push_default_roi(machine_id: str, local_config_path: str = "data/roi_config.json"):
+def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
     """
     ส่ง ROI default ของตู้นี้ขึ้น Server เฉพาะเมื่อ Server ยังไม่มีข้อมูล (no_config)
     เรียกครั้งเดียวตอน startup เท่านั้น
@@ -136,3 +139,53 @@ def push_default_roi(machine_id: str, local_config_path: str = "data/roi_config.
             print(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
     except Exception as e:
         print(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
+
+
+def start_roi_polling(machine_id):
+    """เริ่ม background thread ดึง ROI จาก server ทุก ROI_POLL_INTERVAL วินาที"""
+
+    def _loop():
+        while True:
+            try:
+                fetch_remote_roi(machine_id)
+            except Exception as e:
+                print(f"⚠️ roi_polling_task error: {e}")
+            time.sleep(ROI_POLL_INTERVAL)
+
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+# ─────────────────────────────────────────────
+# ภาพ realtime สำหรับ dashboard (เดิมอยู่ใน api/sent_frame.py)
+# ─────────────────────────────────────────────
+def send_frame(machine_id, frame):
+    success, buffer = cv2.imencode(".jpg", frame)
+
+    if not success:
+        print("⚠️ Failed to encode realtime frame")
+        return False
+
+    try:
+        base_url = CLOUD_API_URL.replace("/events", "")
+        url = f"{base_url}/machines/{machine_id}/realtime-image"
+
+        files = {
+            "image": ("realtime.jpg", buffer.tobytes(), "image/jpeg")
+        }
+
+        resp = requests.post(
+            url,
+            files=files,
+            headers=_headers(),
+            timeout=2,
+        )
+
+        if 200 <= resp.status_code < 300:
+            return True
+
+        print(f"⚠️ Send realtime frame failed: {resp.status_code} - {resp.text}")
+        return False
+
+    except Exception as e:
+        print(f"⚠️ Send realtime frame error: {e}")
+        return False

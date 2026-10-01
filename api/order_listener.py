@@ -2,7 +2,7 @@ import threading
 import time
 import json
 import websocket
-from config import MACHINE_ID, WS_URL
+from config import MACHINE_ID, WS_URL, WS_RECONNECT_SEC
 from utils.logger import get_logger
 
 logger = get_logger("order_listener")
@@ -72,7 +72,6 @@ def _on_open(ws):
 
 def _run_forever():
     """loop reconnect อัตโนมัติถ้าหลุด"""
-    RECONNECT_DELAY = 5
     while True:
         try:
             ws = websocket.WebSocketApp(
@@ -85,8 +84,8 @@ def _run_forever():
             ws.run_forever()
         except Exception as e:
             logger.warning(f"WebSocket exception: {e}")
-        logger.info(f"🔄 reconnect ใน {RECONNECT_DELAY}s...")
-        time.sleep(RECONNECT_DELAY)
+        logger.info(f"🔄 reconnect ใน {WS_RECONNECT_SEC}s...")
+        time.sleep(WS_RECONNECT_SEC)
 
 
 def start_order_listener():
