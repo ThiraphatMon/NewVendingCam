@@ -35,7 +35,7 @@ DROP_TIMEOUT = 25.0
 LANDING_STABLE_FRAMES = int(os.getenv("LANDING_STABLE_FRAMES", "4"))
 
 # CAPTURE_HOLD_SEC : เวลาที่ต้องนิ่งเพิ่ม "หลัง" ลงจอดก่อน capture (0 = จับทันทีที่นิ่ง)
-CAPTURE_HOLD_SEC = float(os.getenv("CAPTURE_HOLD_SEC", "2"))
+CAPTURE_HOLD_SEC = float(os.getenv("CAPTURE_HOLD_SEC", "0.5"))
 
 # MIN_PRESENCE_SEC : เวลาขั้นต่ำที่ object ต้องอยู่ใน ROI ก่อน capture (กัน noise แวบเดียว)
 MIN_PRESENCE_SEC = float(os.getenv("MIN_PRESENCE_SEC", "0.2"))
