@@ -4,6 +4,7 @@ import time
 import cv2
 import numpy as np
 from config import ROI_CHECK_INTERVAL, ROI_CONFIG_PATH
+from utils.json_file import write_json_atomic
 from utils.logger import get_logger
 
 logger = get_logger("roi")
@@ -44,29 +45,44 @@ class ROIManager:
         }
 
     def load(self):
+        """โหลด ROI จากไฟล์ (ไม่มีไฟล์ → สร้าง default)
+        ไฟล์พัง / เขียนไม่เสร็จ / ค่าผิดรูปแบบ → log warning แล้วใช้ ROI เดิมต่อ (ไม่ทำให้โปรแกรมตาย)"""
         if not os.path.exists(self.config_path):
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            config = self._default_config()
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        else:
+            write_json_atomic(self.config_path, self._default_config())
+
+        try:
+            self.last_mtime = os.path.getmtime(self.config_path)
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
-        self.last_mtime = os.path.getmtime(self.config_path)
-        frame = config.get("frame", {})
-        self.config_frame_w = int(frame.get("width", self.frame_w))
-        self.config_frame_h = int(frame.get("height", self.frame_h))
-        self.roi_type = config.get("roi_type", "rect")
+            # แปลงค่าทั้งหมดก่อน แล้วค่อยใช้จริง → พังกลางทางจะไม่เหลือ ROI ครึ่ง ๆ
+            frame = config.get("frame", {})
+            config_frame_w = int(frame.get("width", self.frame_w))
+            config_frame_h = int(frame.get("height", self.frame_h))
+            roi_type = config.get("roi_type", "rect")
+            areas, points, rect = self.areas, self.points, self.rect
+            if roi_type == "multi_polygon":
+                areas = list(config.get("areas", []))
+            elif roi_type in ("polygon", "quad"):
+                points = list(config.get("points", []))
+            elif roi_type == "rect":
+                rect = dict(config.get("rect", self.rect))
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            logger.warning(
+                f"⚠️ อ่าน ROI จาก {self.config_path} ไม่ได้ ({e}) → ใช้ ROI เดิมต่อ ({self.roi_type})"
+            )
+            return
+
+        self.config_frame_w, self.config_frame_h = config_frame_w, config_frame_h
+        self.roi_type = roi_type
+        self.areas, self.points, self.rect = areas, points, rect
 
         if self.roi_type == "multi_polygon":
-            self.areas = config.get("areas", [])
             logger.info(f"✅ Loaded multi_polygon ROI: {len(self.areas)} area(s)")
         elif self.roi_type in ("polygon", "quad"):
-            self.points = config.get("points", [])
             logger.info(f"✅ Loaded {self.roi_type} ROI: {len(self.points)} point(s)")
         elif self.roi_type == "rect":
-            self.rect = config.get("rect", self.rect)
             logger.info("✅ Loaded rect ROI")
         else:
             logger.warning(f"⚠️ Unknown roi_type: {self.roi_type}. Fallback to default rect.")

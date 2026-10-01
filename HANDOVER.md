@@ -103,7 +103,8 @@ MotionDetectionForVendingMachine/
 ├── config.py                ★ ค่าตั้งทั้งหมด (อ่านจาก .env) เรียงตามความสำคัญ 6 หมวด
 ├── .env                     ค่าตั้งจริงของเครื่องนี้ (ไม่ commit ขึ้น git)
 ├── .envexample              ตัวอย่าง .env (คัดลอกเป็น .env แล้วแก้)
-├── requirements.txt         library ที่ต้องลง
+├── requirements.txt         library สำหรับ Orange Pi / Docker (opencv แบบ headless)
+├── requirements-pc.txt      library สำหรับ PC (opencv แบบมีหน้าต่าง)
 ├── Dockerfile               สร้าง container
 ├── docker-compose.yml       รัน container + ผูกกล้อง + mount โฟลเดอร์
 │
@@ -127,6 +128,7 @@ MotionDetectionForVendingMachine/
 ├── utils/                   ★ เครื่องมือเสริม
 │   ├── image_saver.py       บันทึกภาพหลักฐาน (แยกโฟลเดอร์ with/without order)
 │   ├── disk_cleanup.py      ลบภาพเก่าอัตโนมัติ (กัน eMMC เต็ม)
+│   ├── json_file.py         อ่าน/เขียน JSON แบบ atomic (ไฟล์ ROI)
 │   └── logger.py            logging (เขียนไฟล์ + rotate) + LogThrottle
 │
 ├── data/
@@ -356,7 +358,7 @@ reset_policy ใช้ helper จาก tracker) ทำให้ทดสอบ�
 
 | method | หน้าที่ |
 |--------|---------|
-| `load()` | อ่าน json → เก็บ points/rect/areas ตาม roi_type |
+| `load()` | อ่าน json → เก็บ points/rect/areas ตาม roi_type · ไฟล์พัง/ค่าผิด → log warning แล้ว**ใช้ ROI เดิมต่อ** (ไม่ตาย) · ไม่มีไฟล์ → สร้าง default |
 | `reload_if_changed()` | เช็ค mtime ของไฟล์ทุก `ROI_CHECK_INTERVAL` (5 วิ) ถ้าเปลี่ยน → โหลดใหม่ (server แก้ ROI ได้สด) |
 | `_scale_point()` | แปลงพิกัดจากขนาดที่ตั้งไว้ → ขนาดเฟรมจริง (เผื่อ config คนละ resolution) |
 | `_scaled_rect()` | คืน (x1,y1,x2,y2) ของ rect หลัง scale |
@@ -458,10 +460,11 @@ reset_policy ใช้ helper จาก tracker) ทำให้ทดสอบ�
 | `_headers()` | สร้าง header ใส่ API key (ถ้ามี) — ใช้ร่วมกันทั้ง api/ |
 | `post_event(payload, image_path)` | ★ ส่ง event + ภาพ (multipart) ขึ้น server → คืน True/False |
 | `register_machine(id)` | ลงทะเบียนตู้ตอน startup (ส่ง SYSTEM_ONLINE, server auto-create machine) |
-| `fetch_remote_roi(id)` | ดึง ROI จาก server มาเขียนทับ local |
+| `fetch_remote_roi(id)` | ดึง ROI จาก server → เขียนทับ local **เฉพาะเมื่อข้อมูลต่างจากเดิม** แบบ atomic (tmp → `os.replace`) |
 | `start_roi_polling(id)` | thread เรียก `fetch_remote_roi` ทุก `ROI_POLL_INTERVAL` (10 วิ) |
 | `push_default_roi(id, path)` | push ROI local ขึ้น server ถ้า server ยังไม่มี (ครั้งเดียว) |
-| `send_frame(id, frame)` | ส่งภาพสด JPEG ขึ้น `realtime-image` ทุก `SEND_INTERVAL` (0 = ปิด) timeout 2 วิ |
+| `submit_frame(id, frame)` | main loop ฝากเฟรมไว้แล้วไปต่อทันที — thread `frame-sender` ส่งเฉพาะเฟรมล่าสุด (ส่งไม่ทัน → เฟรมเก่าถูกทับทิ้ง) ทุก `SEND_INTERVAL` (0 = ปิด) |
+| `send_frame(id, frame)` | ส่งภาพสด JPEG ขึ้น `realtime-image` (timeout 2 วิ) — ถูกเรียกจาก thread ไม่ใช่ main loop |
 
 **`post_event` คืนค่า boolean** — สำคัญมาก เพราะ retry_queue ใช้ค่านี้ตัดสินว่า
 จะลบภาพทิ้ง (สำเร็จ) หรือเก็บ queue (ล้มเหลว)
@@ -688,7 +691,7 @@ main เรียกเฉพาะตอน state = DROP_DETECTED / EVIDENCE_CA
 
 ### 9.1 รันบน PC (ทดสอบ + debug)
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-pc.txt     # ไม่ใช่ requirements.txt (ตัวนั้นเป็น opencv headless เปิดหน้าต่างไม่ได้)
 # ตั้ง .env: HEADLESS=0, CAMERA_INDEX=0 (หรือ path วิดีโอ)
 python main.py
 # หรือระบุชื่อตู้: python main.py --machine VENDING_02
@@ -705,18 +708,25 @@ docker compose logs -f --tail=100 vending-cam   # ดู "Active config" ว่�
 `docker-compose.yml` ผูก `/dev/video0` (กล้อง) และ mount `evidence_images/`, `data/`, `logs/`
 ออกมานอก container → ภาพ, ROI และ log ไม่หายเมื่อ rebuild/restart
 
-**อัปเดตแบบ rollback ได้:**
+**อัปเดตแบบ rollback ได้** (compose ตั้งชื่อ image เป็น `vending-cam:latest`):
 ```bash
-docker tag $(docker compose images -q vending-cam) vending-cam:prev   # เก็บ image เก่า
+docker tag vending-cam:latest vending-cam:prev    # เก็บ image ที่ใช้อยู่ไว้ก่อน
 # copy source ใหม่ (ไม่เอา .venv / .env / evidence_images / logs) แล้ว
 docker compose up -d --build
-# มีปัญหา: กลับไปใช้ source เก่าแล้ว build ใหม่ (หรือตั้ง image: vending-cam:prev ชั่วคราว)
+docker compose logs -f --tail=100 vending-cam     # ดู "Active config" ว่าค่าถูก
+
+# มีปัญหา → กลับไป image เดิมทันทีโดยไม่ต้อง build:
+docker tag vending-cam:prev vending-cam:latest
+docker compose up -d --no-build
 ```
+container ใช้เวลาไทย (`TZ=Asia/Bangkok` ใน Dockerfile) → เวลาใน log, ชื่อไฟล์ภาพ และ TXN ID เป็นเวลาไทย
 
 ### 9.3 requirements
 ```
-opencv-python, numpy, requests, python-dotenv, websocket-client
+numpy, requests, python-dotenv, websocket-client
++ opencv-python-headless (requirements.txt — Pi/Docker)  หรือ  opencv-python (requirements-pc.txt — PC)
 ```
+ห้ามลง opencv 2 แบบพร้อมกันใน env เดียว (import cv2 ชนกัน)
 
 ---
 

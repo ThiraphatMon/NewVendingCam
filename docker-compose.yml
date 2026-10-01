@@ -2,6 +2,8 @@ services:
   vending-cam:
     # อัพเดทใหม่สำหรับลง Orange Pi: build บนบอร์ดจะเลือก linux/arm64 อัตโนมัติ
     build: .
+    # ตั้งชื่อ image ไว้ → ก่อนอัปเดต tag เก็บเป็น vending-cam:prev เพื่อ rollback ได้ (ดู HANDOVER 9.2)
+    image: vending-cam:latest
     container_name: vending-cam
     init: true
     restart: unless-stopped

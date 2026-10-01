@@ -5,12 +5,15 @@ FROM python:3.11-slim-bookworm
 # ส่ง log ออก docker logs ทันที และไม่สร้าง __pycache__ บน eMMC
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Bangkok
 
-# 2. ลง library ที่ OpenCV ต้องการ (ระบบ)
+# 2. ลง library ที่ OpenCV ต้องการ (ระบบ) + tzdata ให้ TZ=Asia/Bangkok มีผล
+#    (เวลาใน log, ชื่อไฟล์ภาพ และ TXN ID เป็นเวลาไทย ไม่ใช่ UTC)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgl1 \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. กำหนดโฟลเดอร์ทำงานในกล่อง

@@ -18,7 +18,7 @@ from config import (
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD,
     CAPTURE_HOLD_SEC, CONFIRMED_HOLD_TIMEOUT,
 )
-from api.client import push_default_roi, register_machine, send_frame, start_roi_polling
+from api.client import push_default_roi, register_machine, start_roi_polling, submit_frame
 from api.order_listener import start_order_listener, get_pending_order, clear_pending_order
 from api.retry_queue import start_retry_thread
 from core.background import BackgroundModel, find_env_change
@@ -158,9 +158,9 @@ def main():
             continue
         now = time.time()
 
-        # ส่งภาพสดขึ้น dashboard (SEND_INTERVAL=0 = ปิด)
+        # ส่งภาพสดขึ้น dashboard ผ่าน background thread ไม่ block loop (SEND_INTERVAL=0 = ปิด)
         if SEND_INTERVAL > 0 and now - last_send_time >= SEND_INTERVAL:
-            send_frame(sm.machine_id, frame)
+            submit_frame(sm.machine_id, frame)
             last_send_time = now
 
         # ── 2) background → diff ────────────────────────────────────────────

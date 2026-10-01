@@ -1,0 +1,8 @@
+# สำหรับ PC (ทดสอบ / debug ด้วย HEADLESS=0 ที่ต้องเปิดหน้าต่าง)
+# เหมือน requirements.txt ทุกตัว ยกเว้น opencv ที่เป็นแบบมี GUI
+# ห้ามลง opencv-python กับ opencv-python-headless พร้อมกันใน env เดียว (ชนกัน)
+opencv-python==4.10.0.84
+numpy==1.26.4
+requests==2.32.3
+python-dotenv==1.0.1
+websocket-client==1.8.0

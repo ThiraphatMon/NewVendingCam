@@ -1,4 +1,5 @@
-opencv-python==4.10.0.84
+# สำหรับ Orange Pi / Docker (ไม่มีจอ) — บน PC ที่ต้องเปิดหน้าต่าง debug ใช้ requirements-pc.txt
+opencv-python-headless==4.10.0.84
 numpy==1.26.4
 requests==2.32.3
 python-dotenv==1.0.1
