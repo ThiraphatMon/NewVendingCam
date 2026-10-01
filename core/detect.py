@@ -103,3 +103,13 @@ def group_close_boxes(boxes, max_dist=50, overlap_pad=4, mode="distance"):
         )
         for g in groups
     ]
+
+
+def drop_large_boxes(boxes, roi_areas, max_ratio):
+    """ตัดกล่องที่ใหญ่เกิน max_ratio ของพื้นที่ ROI area ใดก็ได้ (ใช้ตอนเจอ env change)
+    ก้อนใหญ่ = แสง/bg เปลี่ยน ไม่ส่งเข้า tracker แต่ก้อนเล็กที่เหลือยังส่งต่อตามปกติ"""
+    return [
+        (bx, by, bw, bh)
+        for bx, by, bw, bh in boxes
+        if not any(bw * bh > a["area_px"] * max_ratio for a in roi_areas)
+    ]

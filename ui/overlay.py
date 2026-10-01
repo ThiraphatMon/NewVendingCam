@@ -6,6 +6,7 @@ ui/overlay.py — วาดข้อมูล debug ลงบนเฟรม (�
 
 import cv2
 from config import CONFIRMED_HOLD_TIMEOUT, ORDER_WINDOW
+from core.tracker import has_active_motion
 
 
 def draw_captured_items(frame, sm):
@@ -39,6 +40,9 @@ def draw_captured_items(frame, sm):
 
 def render_overlay(frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, actual_h):
     """วาด ROI + badges + กรอบ tracked objects ลงบน frame (ใช้เฉพาะโหมด DISPLAY)."""
+    if sm.state == "EVIDENCE_CAPTURED":
+        draw_captured_items(frame, sm)
+
     # ── วาด ROI + state badge ───────────────────────────────────────────
     roi_manager.draw(frame)
     color = (
@@ -101,13 +105,7 @@ def render_overlay(frame, sm, tracked, roi_manager, bg_frozen, now, actual_w, ac
         latest_item = max(sm.captured_items.values(), key=lambda i: i["land_time"])
         
         # ตรวจสอบว่าในพื้นที่ ROI ตอนนี้มีมือหรือวัตถุใหม่กำลังขยับอยู่หรือไม่ (ถ้ามีให้ตรึงเวลาไว้เต็ม)
-        has_active_motion = any(
-            obj_id not in sm.captured_items
-            and obj["state"] in ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
-            for obj_id, obj in tracked.items()
-        )
-        
-        if has_active_motion:
+        if has_active_motion(tracked, sm.captured_items):
             hold_time_left = CONFIRMED_HOLD_TIMEOUT
         else:
             hold_elapsed = now - latest_item["land_time"]

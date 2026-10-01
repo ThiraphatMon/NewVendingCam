@@ -112,7 +112,7 @@ class VendingStateMachine:
             if event == "motion_in_ROI":
                 self.state = "DROP_DETECTED"
                 self.drop_time = now
-                self.transaction_id = datetime.now().strftime("TXN-%Y%m%d-%H%M%S")
+                self.transaction_id = self.new_transaction_id()
 
                 if self.has_order():
                     # order_window_start เริ่มนับตั้งแต่ set_order() แล้ว ไม่ reset ใหม่
@@ -265,6 +265,10 @@ class VendingStateMachine:
 
     def reset(self):
         self._reset_fields()
+
+    @staticmethod
+    def new_transaction_id():
+        return datetime.now().strftime("TXN-%Y%m%d-%H%M%S")
 
     def item_count(self):
         return len(self.captured_items)

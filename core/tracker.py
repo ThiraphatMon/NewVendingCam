@@ -18,6 +18,26 @@ SHAPE_STABLE_FRAMES = LANDING_STABLE_FRAMES
 # แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
 CENTROID_STABLE_DIST = CFG_CENTROID_STABLE_DIST
 
+# state ของ object ที่ถือว่ายัง "ขยับ / ยังไม่ถูกนับ" อยู่ใน ROI
+ACTIVE_STATES = ("MOVING", "DETECTING", "SHAPE_CONFIRMED")
+
+
+def is_motion_in_roi(tracked):
+    """มี object ใดใน ROI ที่ยังขยับอยู่ไหม (ใช้ตอน IDLE ตัดสินว่าเริ่มมีของตก)"""
+    return any(
+        obj["state"] in ACTIVE_STATES or "WAITING" in obj["state"]
+        for obj in tracked.values()
+    )
+
+
+def has_active_motion(tracked, captured_ids):
+    """มีมือ/ของใหม่ขยับใน ROI ไหม โดยไม่นับ object ที่ capture ไปแล้ว
+    (ใช้หยุด hold timer หลังจับของได้ และแสดงผลบนจอ)"""
+    return any(
+        obj_id not in captured_ids and obj["state"] in ACTIVE_STATES
+        for obj_id, obj in tracked.items()
+    )
+
 
 class MemoryTracker:
     def __init__(self):
