@@ -33,6 +33,7 @@ from config import (
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
     STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES,
+    ENV_SETTLE_REBASELINE, REMOVAL_CHECK, REMOVAL_EDGE_RATIO, REMOVAL_MATCH_RATIO, REMOVAL_UNCERTAIN_SEND_S0,
 )
 from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
 from core import cycle as cyc
@@ -40,6 +41,7 @@ from core.background import BackgroundModel, find_env_change
 from core.cycle import AnomalyLimiter, CycleMachine
 from core.detect import build_fgmask, contour_boxes, drop_large_boxes, group_close_boxes
 from core.frame_source import FrameSource
+from core import removal
 from core.roi import ROIManager
 from core.tracker import MemoryTracker, is_motion_in_roi
 from utils import daily_log, image_saver
@@ -60,10 +62,12 @@ WATCH_TIMEOUT_SEC = 25.0
 OUTSIDE_CYCLE = "OUTSIDE_CYCLE"              # ไม่มีรอบ แต่มีวัตถุนิ่งครบเกณฑ์
 EXTRA_AFTER_CONFIRM = "EXTRA_AFTER_CONFIRM"  # ยืนยันแล้ว เจอวัตถุใหม่นิ่งอีก (น่าสงสัย)
 NO_CONFIRM_AT_CLOSE = "NO_CONFIRM_AT_CLOSE"  # ปิดรอบโดยไม่ได้ยืนยัน
+POSSIBLE_REMOVAL = "POSSIBLE_REMOVAL"        # รอบ ACTIVE: วัตถุนิ่งที่ดูเหมือนของถูกหยิบออก → ไม่ยืนยัน
 _ANOMALY_LABELS = {
     OUTSIDE_CYCLE: "OUTSIDE CYCLE",
     EXTRA_AFTER_CONFIRM: "SUSPICIOUS (extra after confirm)",
     NO_CONFIRM_AT_CLOSE: "NO CONFIRM AT CLOSE",
+    POSSIBLE_REMOVAL: "POSSIBLE REMOVAL (not counted)",
 }
 
 
@@ -217,7 +221,7 @@ class App:
             self.bg.restore_snapshot()
         if env_change and idle:
             self.bg.mark_scene_changed()  # [WATCH] clean_bg ก่อน env change ห้ามใช้ตอน START
-        if env_change and self.cm.can_confirm() and self.bg.roi_still():
+        if ENV_SETTLE_REBASELINE and env_change and self.cm.can_confirm() and self.bg.roi_still():
             self._rebaseline_settled_env(frame_gray, now)
             return frame, fgmask, {}
         tracked = self.tracker.update(detected)
@@ -225,10 +229,14 @@ class App:
         if self.cm.state == cyc.WAIT_START:
             self._watch(tracked, now)
 
-        if find_landed(tracked, now) is not None:
+        landed = find_landed(tracked, now)
+        if landed is not None:
             if self.cm.can_confirm():
                 if now >= self.confirm_retry_at:
-                    self._confirm(frame, frame_gray, now)
+                    if self._looks_like_removal(tracked[landed], frame_gray):
+                        self._capture_anomaly(POSSIBLE_REMOVAL, frame, frame_gray, now)
+                    else:
+                        self._confirm(frame, frame_gray, now)
             elif self.cm.state == cyc.CONFIRMED_WAIT_STOP:
                 self._capture_anomaly(EXTRA_AFTER_CONFIRM, frame, frame_gray, now)
             elif self.cm.state == cyc.WAIT_START and self.watch_since is not None:
@@ -375,6 +383,30 @@ class App:
             f"→ ตั้งพื้นหลังของรอบใหม่เป็นเฟรมนี้"
         )
 
+    def _looks_like_removal(self, obj, frame_gray):
+        """[REMOVAL] candidate ในรอบ ACTIVE เป็น "ของหายไป" (ลูกค้าหยิบออก) ไม่ใช่สินค้าตก?
+        เทียบ patch กับพื้นหลังของรอบ + ฉากนิ่งก่อนวัตถุนี้ปรากฏ (core/removal.py)
+        True = ไม่ยืนยัน (main ถ่าย anomaly POSSIBLE_REMOVAL + ตั้งพื้นหลังใหม่ รอบยัง ACTIVE รับของจริงต่อได้)"""
+        if not REMOVAL_CHECK:
+            return False
+        box = removal.box_of(obj, frame_gray.shape)
+        if box is None:
+            return False
+        v = removal.classify(
+            frame_gray, self.bg.bg, self.bg.scenes_before(obj["first_seen"]), box,
+            REMOVAL_EDGE_RATIO, REMOVAL_MATCH_RATIO, MOT_THRESH,
+        )
+        cycle = self.cm.cycle_id[:8]
+        if v.kind == removal.ADDITION:
+            logger.debug(f"🔍 รอบ {cycle}: candidate เป็นของใส่เข้า ({v.describe()})")
+            return False
+        if v.kind == removal.UNCERTAIN and REMOVAL_UNCERTAIN_SEND_S0:
+            logger.warning(f"🔍 รอบ {cycle}: ดูเหมือนหยิบออกแต่ไม่แน่ใจ ({v.describe()}) → ยืนยันตาม REMOVAL_UNCERTAIN_SEND_S0=1")
+            return False
+        why = "หยิบออก" if v.kind == removal.REMOVAL else "ไม่แน่ใจว่าหยิบออก (ไม่มีฉากก่อนหน้ายืนยัน)"
+        logger.warning(f"🔍 รอบ {cycle}: วัตถุนิ่งดูเหมือน{why} ({v.describe()}) → ไม่ยืนยัน ไม่ส่ง S0")
+        return True
+
     # ── เฝ้าดูนอกรอบ / anomaly ───────────────────────────────────────────────
     def _watch(self, tracked, now):
         """[WATCH] WAIT_START: มี motion ใน ROI → freeze bg (ใช้ clean_bg ก่อนมี motion)
@@ -405,12 +437,15 @@ class App:
         cycle_id = self.cm.cycle_id
         if self.anomaly_limiter.allow(self.mono()):
             self._save_anomaly(kind, cycle_id, frame)
+        elif kind == POSSIBLE_REMOVAL:
+            # ตัดสินใจไม่ส่ง S0 ในรอบ → ต้องมีหลักฐานใน DB เสมอ (เกินโควตาแค่ไม่ถ่ายภาพ)
+            self._save_anomaly(kind, cycle_id, None, why_no_image="เกินโควตาภาพ anomaly")
         else:
             logger.info(f"🔕 [{kind}] วัตถุนิ่งครบเกณฑ์ แต่เกินโควตาภาพ anomaly → ไม่ถ่าย")
         self.bg.rebaseline(frame_gray, now)
         self.tracker.clear_all()
 
-    def _save_anomaly(self, kind, cycle_id, frame):
+    def _save_anomaly(self, kind, cycle_id, frame, why_no_image="ไม่มีเฟรม"):
         path = None
         if frame is not None:
             path = image_saver.save_evidence(
@@ -422,7 +457,7 @@ class App:
         except sqlite3.Error as e:
             logger.error(f"❌ บันทึก anomaly {kind} ลง DB ไม่ได้: {e}")
         where = f"รอบ {cycle_id[:8]}" if cycle_id else "นอกรอบ"
-        logger.warning(f"🚩 ANOMALY {kind} ({where}) — ไม่นับยอด ภาพ: {path or 'ไม่มี (ไม่มีเฟรม)'}")
+        logger.warning(f"🚩 ANOMALY {kind} ({where}) — ไม่นับยอด ภาพ: {path or f'ไม่มี ({why_no_image})'}")
 
     def view(self):
         """ข้อมูลสำหรับ overlay"""

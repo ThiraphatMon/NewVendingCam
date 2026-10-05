@@ -9,7 +9,7 @@
 | S0 ตั้งต้น + D2 baseline freshness | ✅ เสร็จ | autorun S0 | 100 passed | ✅ / ❌ (คาดไว้) | 3.41s / 3.40s, 3.40s |
 | S1 ปิดงาน D2 (ตั้งพื้นหลังใหม่หลัง env change สงบ) | ✅ เสร็จ | autorun S1 | 103 passed | ✅ (+8b, 8c) / ✅* | 3.41s / 3.41s, 3.42s |
 | S2 ขั้น E (พร้อมลง Orange Pi) | ✅ เสร็จ | autorun S2 | 107 passed | ✅ (+8b, 8c) / ✅ | 3.40s / 3.43s, 3.39s |
-| S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | รอ | | | | |
+| S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | autorun S3 | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
 | S4 ความนิ่งของ tracker | รอ | | | | |
 | S5 กล้องค้าง | รอ | | | | |
 | S6 สรุป | รอ | | | | |
@@ -57,12 +57,36 @@
   known limitations; `ORANGE_PI_DOCKER.md` อัปเดตตามกัน
 - e2e: `redis_e2e.docker()` อ่าน output เป็น UTF-8 (เดิม cp1252 ทำ thread error ตอนอ่าน `docker logs` ภาษาไทย)
 
+### S3
+- ใหม่ `core/removal.py` (pure): `classify()` เทียบ candidate ในรอบ ACTIVE ก่อนยืนยัน
+  - วัดเฉพาะพิกเซลที่เปลี่ยน (|ปัจจุบัน − พื้นหลังรอบ| > MOT_THRESH) ในกล่องของ tracker + ขอบ 8px
+    (ครั้งแรกวัดทั้งกล่อง → ในคลิปจริงกล่อง tracker กว้าง 288px สัญญาณจาง: หยิบออก ×0.82 vs ใส่เข้า ×1.14 แยกไม่ได้ → เปลี่ยนเป็นเฉพาะพิกเซลที่เปลี่ยน)
+  - สัญญาณ 1 ความคม (Sobel) ลด: คลิปจริงผ่าน App — ใส่เข้า ×1.52, หยิบออก ×0.40 (เกณฑ์ `REMOVAL_EDGE_RATIO` 0.6)
+  - สัญญาณ 2 กลับไปเหมือนฉากนิ่งก่อนวัตถุนี้ปรากฏ (scene history): หยิบออก 11.9–13.1 vs พื้นหลังรอบ 77.6;
+    ใส่เข้า 76.6 vs 76.8 (เกณฑ์ `REMOVAL_MATCH_RATIO` 0.5)
+  - ADDITION = ขอบไม่ลด (แม้ฉากก่อนหน้าตรง — กรณีซื้อซ้ำที่ตำแหน่งเดิม ว่าง→ของ→ว่าง→ของ ซึ่งสัญญาณ 2 อย่างเดียวแยกไม่ได้)
+    / REMOVAL = ขอบลด + ฉากก่อนหน้าตรง / UNCERTAIN = ขอบลดแต่ไม่มีฉากยืนยัน → default ไม่ส่ง S0
+- `BackgroundModel`: scene history (ring buffer `SCENE_HISTORY_SIZE`=10 ฉาก uint8 ≈ 3MB) บันทึกฉากนิ่งทุกสถานะ
+  ฉากใหม่ต่างจากฉากล่าสุด ≥ MIN_AREA px ใน ROI → เพิ่ม ไม่งั้นแทนที่ (ตามแสงทัน); กล้องหลุดล้างทิ้ง
+- main: REMOVAL/UNCERTAIN → anomaly ใหม่ `POSSIBLE_REMOVAL` (ใช้โควตาภาพร่วม, **แถวใน DB บันทึกเสมอ** แม้เกินโควตา
+  เพราะเป็นหลักฐานว่าทำไมรอบนี้ไม่ส่ง S0) + rebaseline + ล้าง tracker → รอบยัง ACTIVE รับของจริงต่อได้
+- config ใหม่: `REMOVAL_CHECK`=1, `REMOVAL_EDGE_RATIO`=0.6, `REMOVAL_MATCH_RATIO`=0.5, `REMOVAL_UNCERTAIN_SEND_S0`=0,
+  `SCENE_HISTORY_SIZE`=10, `ENV_SETTLE_REBASELINE`=1 (เปิด/ปิดของ S1 — เพิ่มเพื่อทดสอบ S3 แยกได้)
+- B_empty calibration: **ไม่ทำ** (ดูคำถามรอผู้ใช้) — ระบบทำงานได้ด้วย scene history อยู่แล้ว
+- tests: `tests/test_removal.py` 13 ข้อ — classify (ใส่เข้า / หยิบออก / ไม่มีฉากยืนยัน / ซื้อซ้ำที่เดิม /
+  ของสีใกล้พื้นมีลายทั้งใส่และหยิบ / box) + App (หยิบออกระหว่างรอบไม่ยืนยันแล้วรับของจริงต่อได้ / UNCERTAIN default /
+  นโยบายส่ง S0 / ปิด REMOVAL_CHECK = พฤติกรรมเดิม / ซื้อซ้ำที่เดิมยืนยัน / เกินโควตายังบันทึก / scene history)
+- e2e ใหม่ **7b** = ข้อ 7 + `ENV_SETTLE_REBASELINE=0` → ผ่านด้วย S3 อย่างเดียว: log
+  `วัตถุนิ่งดูเหมือนหยิบออก (ขอบ ×0.40, ต่างจากพื้นหลังรอบ 77.9, ต่างจากฉากก่อนหน้า 11.9)` + anomaly POSSIBLE_REMOVAL
+- เวลา START→S0 ไม่เปลี่ยน (classify ทำเฉพาะตอนมี candidate ครั้งเดียว)
+
 ## ไฟล์ที่เปลี่ยน (สะสม)
 - S0: `core/background.py`, `main.py` (D2), `tests/test_evidence.py`, `tests/integration/redis_e2e.py` (ข้อ 8, `.e2e_tmp/`),
   `.gitignore`, `docs/AUTORUN_TASK.md`, `docs/AUTORUN_REPORT.md`
 - S1: `main.py`, `tests/test_evidence.py`, `tests/integration/redis_e2e.py` (8b, 8c)
 - S2: `config.py`, `main.py`, `.envexample`, `requirements*.txt`, `docker-compose.yml`, `Dockerfile`, `.dockerignore`,
   `.gitattributes`, `HANDOVER.md`, `ORANGE_PI_DOCKER.md`, `tests/test_config.py`, `tests/integration/docker_smoke.py`, `redis_e2e.py`
+- S3: `core/removal.py` (ใหม่), `core/background.py`, `main.py`, `config.py`, `.envexample`, `tests/test_removal.py` (ใหม่), `redis_e2e.py` (7b)
 
 ## ความหมายของ test ที่เปลี่ยน
 - S0 (D2): `test_start_during_watch_uses_pre_motion_background` แยกเป็น
@@ -73,11 +97,19 @@
 ## คำถามรอผู้ใช้ (ประเภท A — ทำต่อไปแล้วด้วยทางที่ปลอดภัย)
 - S1: ตั้งพื้นหลังใหม่หลัง env change สงบ ใช้ CLEAN_BG_STABLE_FRAMES (5 เฟรม ≈ 0.17s) ร่วมกัน ไม่แยกค่า
   ทางอื่น: แยกค่า ENV_SETTLE_FRAMES ให้นานกว่า (เช่น 15) → กันการตั้งใหม่ตอน slat ค้างกลางทางได้ดีขึ้น แต่ถาดต้องนิ่งนานขึ้นก่อนเห็นของ
+- S3: เมื่อ "ไม่แน่ใจว่าหยิบออก" (ขอบลดแต่ไม่มีฉากก่อนหน้ายืนยัน เช่นเปิดเครื่องตอนมีของในถาด หรือของเรียบกว่าพื้นถาด)
+  เลือก **ไม่ส่ง S0** + anomaly POSSIBLE_REMOVAL (`REMOVAL_UNCERTAIN_SEND_S0=0`)
+  ทางอื่น: `=1` → ยืนยันตามปกติ — ได้ S0 ของจริงที่เรียบกว่าพื้นถาด แต่กลับไปเสี่ยง S0 ผิดแบบข้อ 7 ตอนไม่มีประวัติฉาก
+- S3: ไม่ทำ B_empty calibration (ภาพถาดว่างที่ผู้ติดตั้งเก็บ) — เหตุผล: แสงในตู้เปลี่ยนตามเวลา ภาพตายตัวจะเก่าเร็ว
+  และ scene history ให้ข้อมูลเดียวกันแบบสดอยู่แล้ว; จะช่วยเฉพาะกรณี UNCERTAIN หลังเปิดเครื่อง
+  ทางอื่น: ทำเป็น optional (`data/empty_tray.png` + ปุ่ม/คำสั่งเก็บภาพ) ใช้เป็นฉากก่อนหน้าเพิ่มอีก 1 ฉาก
+- S3: ระบบตรวจหยิบออกใช้เฉพาะรอบ ACTIVE; ในช่วง CONFIRMED_WAIT_STOP / นอกรอบ รอยหยิบยังถูกบันทึกเป็น
+  EXTRA_AFTER_CONFIRM / OUTSIDE_CYCLE เหมือนเดิม (ไม่กระทบยอด) — ถ้าต้องการให้ติดป้าย POSSIBLE_REMOVAL ด้วยทำเพิ่มได้
 - S2: HANDOVER/ORANGE_PI ระบุ "หยุดโปรแกรมตัวเก่า" แบบทั่วไป (systemctl / kill) เพราะไม่รู้ว่าบอร์ดจริงรันตัวเก่าอย่างไร
   → ควรเติมคำสั่งจริงของตู้
 - S2: ยังไม่ได้ build บน Orange Pi (arm64) จริง — ทดสอบเฉพาะ amd64 ใน WSL
 - S1: ของที่ตก "พร้อมกับ" ตอน env change (เช่นตกขณะ slat ปิด) จะถูกกลืนเข้าพื้นหลังใหม่ → ไม่ยืนยัน (ไม่ส่ง S0) — เลือกทางกัน S0 ผิด
 
 ## Known limitations
-- ข้อ 7: ของวางนิ่งก่อน START แล้วถูกหยิบออกระหว่างรอบ → หลุมถูกยืนยันเป็นของ → S0 ผิด (S3 จะแก้)
+- ~~ข้อ 7~~ แก้แล้วใน S3 (+S1 ในกรณีมี env change) — เหลือ: ของที่เรียบกว่าพื้นถาดมาก หรือไม่มีฉากก่อนหน้า → UNCERTAIN → ไม่ส่ง S0
 - ของที่นิ่งอยู่ก่อน START ≥5 เฟรม ไม่ถูกนับในรอบนั้น (เหมือนตัวเก่า)

@@ -187,6 +187,23 @@ CLEAN_BG_INTERVAL = _float("CLEAN_BG_INTERVAL", 0.5)
 CLEAN_BG_MAX_MOTION_RATIO = _float("CLEAN_BG_MAX_MOTION_RATIO", 0.002)
 CLEAN_BG_STABLE_FRAMES = _int("CLEAN_BG_STABLE_FRAMES", 5)
 
+# รอบ ACTIVE: env change ค้างแต่ ROI นิ่งครบ CLEAN_BG_STABLE_FRAMES → ตั้งพื้นหลังของรอบใหม่เป็นเฟรมนั้น
+#   (เช่น START ตอน slat ยังเปิด แล้ว slat ปิด) 0 = ปิด (มองไม่เห็นอะไรจนจบรอบถ้า env change ค้าง)
+ENV_SETTLE_REBASELINE = _bool("ENV_SETTLE_REBASELINE", True)
+
+# แยก "ลูกค้าหยิบของออก" กับ "สินค้าตก" ก่อนยืนยันในรอบ (core/removal.py)
+#   ของวางอยู่ก่อน START แล้วถูกหยิบออกระหว่างรอบ → รอยที่ของเคยอยู่ไม่ถูกยืนยันเป็นสินค้า (anomaly POSSIBLE_REMOVAL)
+REMOVAL_CHECK = _bool("REMOVAL_CHECK", True)
+# ความคมของ patch (ขอบ/ลาย) ลดเหลือต่ำกว่าสัดส่วนนี้ของพื้นหลังรอบ = "ดูเหมือนของหายไป"
+#   (คลิปทดสอบ: ของตก ×1.52, หยิบออก ×0.40) | ของจริงถูกมองว่าหยิบออก → ↓ | รอยหยิบออกถูกยืนยัน → ↑ (ไม่เกิน 1.0)
+REMOVAL_EDGE_RATIO = _float("REMOVAL_EDGE_RATIO", 0.6)
+# patch ปัจจุบันต่างจาก "ฉากนิ่งก่อนหน้า" น้อยกว่าสัดส่วนนี้ของความต่างจากพื้นหลังรอบ = กลับไปเป็นฉากเดิม
+REMOVAL_MATCH_RATIO = _float("REMOVAL_MATCH_RATIO", 0.5)
+# ดูเหมือนหยิบออกแต่ไม่มีฉากก่อนหน้ายืนยัน (ไม่แน่ใจ): 0 = ไม่ส่ง S0 + anomaly (กัน S0 ผิด) | 1 = ยืนยันตามปกติ
+REMOVAL_UNCERTAIN_SEND_S0 = _bool("REMOVAL_UNCERTAIN_SEND_S0", False)
+# จำฉากนิ่งย้อนหลังกี่ฉาก (ภาพ gray 640x480 ฉากละ ~300KB)
+SCENE_HISTORY_SIZE = _int("SCENE_HISTORY_SIZE", 10)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # หมวด 5 — ระบบและการดูแลเครื่อง

@@ -57,6 +57,15 @@ CLOUD_ENABLED=0
 # CLEAN_BG_INTERVAL=0.5
 # CLEAN_BG_MAX_MOTION_RATIO=0.002
 # CLEAN_BG_STABLE_FRAMES=5
+# รอบ ACTIVE: env change ค้างแต่ ROI นิ่งแล้ว → ตั้งพื้นหลังของรอบใหม่ (1 = เปิด)
+# ENV_SETTLE_REBASELINE=1
+# แยก "ลูกค้าหยิบของออก" กับ "สินค้าตก" (ของที่หายไประหว่างรอบไม่ถูกนับเป็นสินค้า)
+# REMOVAL_CHECK=1
+# REMOVAL_EDGE_RATIO=0.6
+# REMOVAL_MATCH_RATIO=0.5
+# ดูเหมือนหยิบออกแต่ไม่แน่ใจ: 0 = ไม่ส่ง S0 (กัน S0 ผิด) | 1 = ยืนยันตามปกติ
+# REMOVAL_UNCERTAIN_SEND_S0=0
+# SCENE_HISTORY_SIZE=10
 
 # ── หมวด 5: ระบบและการดูแลเครื่อง ────────────────────────────────────────────────
 # CAMERA_RECONNECT_SEC=2

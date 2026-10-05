@@ -16,6 +16,8 @@ core/background.py — background model สำหรับหา motion (รว�
   กล้องหลุด    → clear(): เริ่มใหม่หมด
 """
 
+from collections import deque
+
 import cv2
 import numpy as np
 from config import (
@@ -27,6 +29,8 @@ from config import (
     CLEAN_BG_MAX_MOTION_RATIO,
     CLEAN_BG_STABLE_FRAMES,
     MAX_BLOB_ROI_RATIO,
+    MIN_AREA,
+    SCENE_HISTORY_SIZE,
 )
 from utils.logger import get_logger, LogThrottle
 
@@ -55,6 +59,10 @@ class BackgroundModel:
         self.clean_bg_last_update = 0.0
         self.prev_frame = None  # เฟรมก่อนหน้า (ตัดสินความนิ่งเฟรมต่อเฟรม)
         self.quiet_frames = 0  # จำนวนเฟรมติดกันที่ ROI นิ่ง (กล้องหลุด → clear() → เริ่มนับใหม่)
+        # [SCENE HISTORY] ฉากนิ่งย้อนหลัง (เวลา, ภาพ uint8) — ใช้แยกหยิบออก/ใส่เข้า (core/removal.py)
+        #   ฉากใหม่ต่างจากฉากล่าสุด ≥ MIN_AREA px ใน ROI → เพิ่ม | ไม่ต่าง → แทนที่ฉากล่าสุด (ตามแสงให้ทัน)
+        self.scenes = deque(maxlen=max(1, SCENE_HISTORY_SIZE))
+        self.scene_last_update = 0.0
 
         # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
         # หลัง reset มือผู้ใช้อาจยังอยู่ในเฟรม ถ้าล้าง bg ทันที เฟรมถัดไปจะ snapshot มือ
@@ -106,6 +114,8 @@ class BackgroundModel:
             self.quiet_frames += 1
         else:
             self.mark_scene_changed()
+        if self.quiet_frames >= CLEAN_BG_STABLE_FRAMES and (now - self.scene_last_update) >= CLEAN_BG_INTERVAL:
+            self._record_scene(frame_gray, now, roi_mask)
         if (
             idle
             and self.quiet_frames >= CLEAN_BG_STABLE_FRAMES
@@ -114,6 +124,23 @@ class BackgroundModel:
             self.clean_bg = frame_gray.copy()
             self.clean_bg_valid = True
             self.clean_bg_last_update = now
+
+    def _record_scene(self, frame_gray, now, roi_mask):
+        """[SCENE HISTORY] บันทึกฉากนิ่ง (ทุกสถานะ ไม่ใช่แค่ WAIT_START)"""
+        img = np.clip(frame_gray, 0, 255).astype(np.uint8)
+        self.scene_last_update = now
+        if self.scenes:
+            changed = cv2.absdiff(img, self.scenes[-1][1]) > MOT_THRESH
+            if roi_mask is not None:
+                changed &= roi_mask > 0
+            if int(np.count_nonzero(changed)) < MIN_AREA:
+                self.scenes[-1] = (now, img)
+                return
+        self.scenes.append((now, img))
+
+    def scenes_before(self, t):
+        """ฉากนิ่งที่บันทึกก่อนเวลา t (เช่นก่อนวัตถุ candidate เริ่มปรากฏ) ใหม่สุดก่อน"""
+        return [img for ts, img in reversed(self.scenes) if ts < t]
 
     def roi_still(self):
         """ROI นิ่งเฟรมต่อเฟรมติดกันครบ CLEAN_BG_STABLE_FRAMES แล้วหรือยัง"""

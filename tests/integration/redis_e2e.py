@@ -86,9 +86,10 @@ def reset_keys(r):
 
 # ── main.py เป็น subprocess ──────────────────────────────────────────────────
 class MainProc:
-    def __init__(self, workdir, clip):
+    def __init__(self, workdir, clip, extra_env=None):
         self.workdir = workdir
         self.clip = clip
+        self.extra_env = extra_env or {}
         self.proc = None
         self.log_path = os.path.join(workdir, "logs", "vending.log")
         self._log_pos = 0
@@ -110,6 +111,7 @@ class MainProc:
             "DAILY_LOG_DIR": "logs/item_drops",
             "PYTHONIOENCODING": "utf-8",
         })
+        env.update(self.extra_env)
         self.out = open(os.path.join(self.workdir, "stdout.txt"), "ab")
         self.proc = subprocess.Popen(
             [PYTHON, os.path.join(REPO, "main.py")],
@@ -435,15 +437,28 @@ def sc8c(r, m, wd, rep):
     rep.check("8c", "พื้นหลังรอบ 2", "clean_bg", bg2[:40], "ใช้ clean_bg" in bg2)
 
 
+def sc7b(r, m, wd, rep):
+    # ข้อ 7 แบบปิดการตั้งพื้นหลังใหม่หลัง env change สงบ → ต้องผ่านด้วยการแยกหยิบออก/ใส่เข้า (core/removal.py) อย่างเดียว
+    sc7(r, m, wd, rep)
+    rep.rows[-1] = ("7b",) + rep.rows[-1][1:]
+    lines = m.grep("ดูเหมือนหยิบออก") + m.grep("ไม่แน่ใจว่าหยิบออก")
+    rep.note("[7b] " + (lines[0].split("vending.main: ", 1)[-1] if lines else "ไม่มี log หยิบออก"))
+    rep.check("7b", "จับได้ว่าเป็นการหยิบออก", "POSSIBLE_REMOVAL", ",".join(anomaly_kinds(wd)),
+              "POSSIBLE_REMOVAL" in anomaly_kinds(wd))
+
+
+# env เพิ่มเติมของบางสถานการณ์
+SCENARIO_ENV = {"7b": {"ENV_SETTLE_REBASELINE": "0"}}
+
 SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7, "8": sc8,
-             "8b": sc8b, "8c": sc8c}
+             "8b": sc8b, "8c": sc8c, "7b": sc7b}
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # console Windows (cp1252) พิมพ์ไทยไม่ได้
     ap = argparse.ArgumentParser()
     ap.add_argument("--clip", default=os.environ.get("E2E_CLIP"), required=not os.environ.get("E2E_CLIP"))
-    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,8,8b,8c")
+    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,7b,8,8b,8c")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
     args = ap.parse_args()
     if not os.path.isfile(args.clip):
@@ -460,7 +475,7 @@ def main():
             os.makedirs(os.path.join(wd, "data"))
             shutil.copy(os.path.join(REPO, "data", "roi_config.json"), os.path.join(wd, "data"))
             reset_keys(r)
-            m = MainProc(wd, args.clip)
+            m = MainProc(wd, args.clip, SCENARIO_ENV.get(sc))
             print(f"▶️ สถานการณ์ {sc}")
             m.start()
             try:
