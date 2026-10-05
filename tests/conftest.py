@@ -112,6 +112,7 @@ def env(tmp_path, clock):
         clock=clock,
         db_path=str(tmp_path / "data" / "vending_state.sqlite3"),
         evidence_dir=str(tmp_path / "evidence_images"),
+        daily_dir=str(tmp_path / "logs" / "item_drops"),
         roi=ROIManager(640, 480, config_path=str(roi_path)),
         source=FakeSource(),
     )
@@ -127,7 +128,8 @@ def make_app(env):
         app = App(
             "VENDING_01", env.source, env.roi, store or env.open_store(),
             controller or FakeController(),
-            headless=True, evidence_dir=env.evidence_dir, clock=env.clock, mono=env.clock,
+            headless=True, evidence_dir=env.evidence_dir, daily_log_dir=env.daily_dir,
+            clock=env.clock, mono=env.clock,
         )
         return app
 

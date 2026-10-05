@@ -6,13 +6,17 @@ pure logic ล้วน: ไม่แตะกล้อง / Redis / ไฟล�
 เวลา (now) เป็น monotonic ที่ผู้เรียกส่งเข้ามา → test ใช้ fake clock ได้
 
   WAIT_START ──START──▶ ACTIVE ──ยืนยันสำเร็จ──▶ CONFIRMED_WAIT_STOP
-       ▲                  │ กล้องหลุด                 │ START (เหมือนตัวเก่า: ปิดรอบเดิม + เปิดรอบใหม่)
-       │                  ▼                          │
-       │           BLOCKED_WAIT_STOP                 │
-       └── STOP / ครบ CYCLE_TIMEOUT_SEC ─────────────┘  (ทุก active state)
+       ▲                  │ กล้องหลุด
+       │                  ▼
+       │           BLOCKED_WAIT_STOP
+       └── STOP / ครบ CYCLE_TIMEOUT_SEC (ทุก active state)
 
-  RECOVERY_BLOCKED: restart แล้วเจอรอบค้างใน DB → STOP ถัดไป หรือครบ CYCLE_TIMEOUT_SEC
-                    ปลดกลับ WAIT_START / START ระหว่างนี้ = anomaly ไม่เปิดรอบ
+ตอบสนองต่อลำดับคำสั่งเหมือน legacy_reference/main.py:
+  - START ขณะ CONFIRMED_WAIT_STOP / BLOCKED_WAIT_STOP → ปิดรอบเดิม แล้วเปิดรอบใหม่ทันที
+    (ตัวเก่าจบรอบเองหลังส่ง S0 หรือกล้องอ่านไม่ได้ แล้วรับ START ถัดไปได้เลย)
+  - START ขณะ ACTIVE → ไม่มีผล (ตัวเก่า pop ทิ้ง) รอบเดิมเดินต่อ ไม่รีเซ็ตเวลา
+  - STOP ขณะ WAIT_START → ไม่มีผล
+  - restart ระหว่างรอบ → state_store ปิดรอบค้างเป็น INTERRUPTED แล้วเริ่มที่ WAIT_START
 
 outcome ตอนปิดรอบ (เก็บใน DB เท่านั้น ไม่ส่งรหัสอื่นนอกจาก S0 ให้ controller):
   CONFIRMED    ยืนยันแล้ว (ปิดด้วย STOP / START ถัดไป / timeout — ดู reason)
@@ -23,13 +27,13 @@ outcome ตอนปิดรอบ (เก็บใน DB เท่านั้
 """
 
 import uuid
+from collections import deque
 from dataclasses import dataclass
 
 WAIT_START = "WAIT_START"
 ACTIVE = "ACTIVE"
 CONFIRMED_WAIT_STOP = "CONFIRMED_WAIT_STOP"
 BLOCKED_WAIT_STOP = "BLOCKED_WAIT_STOP"
-RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
 
 # state ที่ถือว่ามีรอบเปิดอยู่
 OPEN_STATES = (ACTIVE, CONFIRMED_WAIT_STOP, BLOCKED_WAIT_STOP)
@@ -64,7 +68,6 @@ class CycleMachine:
         self.timeout_sec = timeout_sec
         self._new_id = new_id or (lambda: uuid.uuid4().hex)
         self.state = WAIT_START
-        self.recovery_since = None  # monotonic ตอนเข้า RECOVERY_BLOCKED
         self._clear_cycle()
 
     def _clear_cycle(self):
@@ -91,43 +94,29 @@ class CycleMachine:
         if self.state == WAIT_START:
             return Result(opened=self._open(now), note="เปิดรอบใหม่")
 
-        if self.state == CONFIRMED_WAIT_STOP:
-            # เหมือนตัวเก่า: ส่ง S0 แล้วพร้อมรับ START ถัดไปทันที (controller อาจไม่ส่ง STOP)
+        if self.state in (CONFIRMED_WAIT_STOP, BLOCKED_WAIT_STOP):
+            # เหมือนตัวเก่า: จบรอบแล้ว (ส่ง S0 / กล้องเสีย) พร้อมรับ START ถัดไปทันที
+            prev = self.state
             closed = self._close("next_start")
             return Result(
                 closed=closed, opened=self._open(now),
-                note="START หลังยืนยันแล้ว → ปิดรอบเดิมและเปิดรอบใหม่",
+                note=f"START ขณะ {prev} → ปิดรอบเดิม ({closed.outcome}) และเปิดรอบใหม่",
             )
 
-        if self.state == RECOVERY_BLOCKED:
-            return Result(
-                anomaly="START_DURING_RECOVERY",
-                note="START ระหว่าง RECOVERY_BLOCKED → ไม่เปิดรอบ (รอ STOP ปลด block)",
-            )
-
-        # ACTIVE / BLOCKED_WAIT_STOP: ไม่เปิดรอบซ้อน ไม่ล้างอะไร
+        # ACTIVE: ไม่เปิดรอบซ้อน ไม่ล้างอะไร (ตัวเก่า pop ทิ้ง)
         return Result(
             anomaly="DUPLICATE_START",
-            note=f"START ซ้ำขณะ {self.state} → ไม่เปิดรอบใหม่",
+            note="START ซ้ำขณะ ACTIVE → ไม่เปิดรอบใหม่ รอบเดิมเดินต่อ",
         )
 
     def on_stop(self, now):
         if self.is_open():
             return Result(closed=self._close("stop"), note="STOP → ปิดรอบ")
-        if self.state == RECOVERY_BLOCKED:
-            self._leave_recovery()
-            return Result(note="STOP → ปลด RECOVERY_BLOCKED กลับ WAIT_START")
         return Result(note="STOP ขณะ WAIT_START → no-op")
 
     # ── เหตุการณ์ภายใน ───────────────────────────────────────────────────────
     def tick(self, now):
-        """เรียกทุก iteration — ครบ CYCLE_TIMEOUT_SEC โดยไม่มี STOP → ปิดรอบเอง
-        (RECOVERY_BLOCKED ก็หมดอายุด้วยค่าเดียวกัน กันตู้ค้างถ้า controller ไม่ส่ง STOP)"""
-        if self.state == RECOVERY_BLOCKED and now - self.recovery_since >= self.timeout_sec:
-            self._leave_recovery()
-            return Result(
-                note=f"RECOVERY_BLOCKED ครบ {self.timeout_sec:.0f}s ไม่มี STOP → กลับ WAIT_START",
-            )
+        """เรียกทุก iteration — ครบ CYCLE_TIMEOUT_SEC โดยไม่มี STOP → ปิดรอบเอง"""
         if self.is_open() and now - self.started_at >= self.timeout_sec:
             return Result(
                 closed=self._close("timeout"),
@@ -154,16 +143,6 @@ class CycleMachine:
         """Redis ขาดระหว่างรอบ: controller อาจส่ง STOP ที่เรายังไม่เห็น → จำไว้ตัดสิน UNCERTAIN"""
         if self.is_open():
             self.redis_gap = True
-
-    def enter_recovery(self, now):
-        """startup เจอรอบค้างใน DB (state_store ปิดเป็น INTERRUPTED แล้ว) → block จน STOP / timeout"""
-        self._clear_cycle()
-        self.state = RECOVERY_BLOCKED
-        self.recovery_since = now
-
-    def _leave_recovery(self):
-        self.state = WAIT_START
-        self.recovery_since = None
 
     # ── ภายใน ───────────────────────────────────────────────────────────────
     def _open(self, now):
@@ -193,3 +172,24 @@ class CycleMachine:
         self._clear_cycle()
         self.state = WAIT_START
         return closed
+
+
+class AnomalyLimiter:
+    """จำกัดความถี่ภาพ anomaly (OUTSIDE_CYCLE + EXTRA_AFTER_CONFIRM ใช้โควตาร่วมกัน)
+    ไม่เกิน 1 ภาพต่อ min_interval วินาที และไม่เกิน max_per_hour ภาพใน 1 ชั่วโมงล่าสุด"""
+
+    def __init__(self, min_interval, max_per_hour):
+        self.min_interval = min_interval
+        self.max_per_hour = max_per_hour
+        self._times = deque()  # monotonic ของภาพที่อนุญาตใน 1 ชั่วโมงล่าสุด
+
+    def allow(self, now):
+        """คืน True และนับโควตา ถ้าถ่ายได้ตอนนี้"""
+        while self._times and now - self._times[0] >= 3600:
+            self._times.popleft()
+        if self._times and now - self._times[-1] < self.min_interval:
+            return False
+        if len(self._times) >= self.max_per_hour:
+            return False
+        self._times.append(now)
+        return True

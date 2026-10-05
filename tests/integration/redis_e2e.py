@@ -219,6 +219,10 @@ def outcomes(workdir):
     return [o for _, o, _ in cycles(workdir)]
 
 
+def anomaly_kinds(workdir):
+    return [k for (k,) in db_query(workdir, "SELECT kind FROM anomalies ORDER BY id")]
+
+
 # ── สถานการณ์ ────────────────────────────────────────────────────────────────
 class Report:
     def __init__(self):
@@ -326,15 +330,20 @@ def sc5(r, m, wd, rep):
     before = count(wd)
     rep.note(f"[5] kill main.py ที่ clip 2.5s (ยอดก่อน kill = {before}, S0 = {s0s(r)})")
     m.start()
-    m.wait_clip(9.0, loop=1)
-    recovering = bool(m.grep("RECOVERY_BLOCKED"))
-    rep.check(5, "หลัง restart", "ยอดเดิม 1, S0 รวม 1, รอบค้าง INTERRUPTED, RECOVERY_BLOCKED",
-              f"ยอด {count(wd)}, S0 {s0s(r)}, {','.join(outcomes(wd))}, recovery_log={recovering}",
-              count(wd) == 1 and s0s(r) == 1 and outcomes(wd) == ["CONFIRMED", "INTERRUPTED"] and recovering)
+    # เหมือนตัวเก่า: restart แล้วรับ START ใหม่ได้ทันที (ไม่มี RECOVERY_BLOCKED)
+    m.wait_clip(1.0, loop=1)
+    push(r, "START")
+    t_s0 = wait_s0(r, 2, timeout=8)
+    m.wait_clip(6.0, loop=1)
     push(r, "STOP")
     time.sleep(0.5)
-    rep.check(5, "STOP ปลด block", "log ปลด RECOVERY_BLOCKED", f"{len(m.grep('ปลด RECOVERY_BLOCKED'))} บรรทัด",
-              bool(m.grep("ปลด RECOVERY_BLOCKED")))
+    rep.check(5, "หลัง restart", "ยอดเดิม 1 ไม่หาย, ไม่มี S0 ของรอบเก่า, รอบค้าง INTERRUPTED",
+              f"ยอดก่อน kill {before}, {','.join(outcomes(wd)[:2])}, log={bool(m.grep('INTERRUPTED'))}",
+              before == 1 and outcomes(wd)[:2] == ["CONFIRMED", "INTERRUPTED"] and bool(m.grep("INTERRUPTED")))
+    rep.check(5, "START แรกหลัง restart เปิดรอบได้ทันที", "S0 รวม 2, ยอด 2, รอบใหม่ CONFIRMED",
+              f"S0 {s0s(r)}, ยอด {count(wd)}, {','.join(outcomes(wd))}",
+              t_s0 is not None and s0s(r) == 2 and count(wd) == 2
+              and outcomes(wd) == ["CONFIRMED", "INTERRUPTED", "CONFIRMED"])
 
 
 def sc6(r, m, wd, rep):
@@ -383,6 +392,10 @@ def main():
             m.start()
             try:
                 SCENARIOS[sc](r, m, wd, rep)
+                used = len(m.grep("ใช้ clean_bg (อายุ"))
+                fallback = len(m.grep("fallback: ไม่มี clean_bg"))
+                rep.note(f"[{sc}] freeze ใช้ clean_bg {used} ครั้ง / fallback {fallback} ครั้ง; "
+                         f"anomaly={anomaly_kinds(wd)}")
                 ff = m.first_frames
                 if len(ff) >= 2:
                     rep.note(f"[{sc}] คาบการวนคลิปที่วัดได้ {ff[1] - ff[0]:.2f}s (คลิป 13.0s + reconnect)")

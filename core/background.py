@@ -3,7 +3,8 @@ core/background.py — background model สำหรับหา motion (รว�
 
 วงจรของ background:
   IDLE         → bg เรียนรู้ตามแสงช้า ๆ (BG_LEARNING_RATE)
-                 + เก็บ clean_bg (ช่องรับของว่าง ไม่มี motion) ไว้ทุก CLEAN_BG_INTERVAL วินาที
+                 + เก็บ clean_bg (ROI นิ่ง: motion ≤ CLEAN_BG_MAX_MOTION_RATIO ของ ROI
+                   ติดกัน CLEAN_BG_STABLE_FRAMES เฟรม) ไว้ทุก CLEAN_BG_INTERVAL วินาที
   เจอ motion   → freeze(): หยุดเรียนรู้ และดึง bg กลับไปที่ clean_bg (ก่อนมือ/ของเข้ามา)
   capture ได้  → rebaseline(): เอาเฟรมปัจจุบันทั้งภาพเป็น bg ใหม่ (และ clean_bg) → ของชิ้นถัดไปเป็น motion ใหม่
   env change   → restore_snapshot(): ดึง bg ตอน freeze กลับมา
@@ -19,6 +20,8 @@ from config import (
     BG_RELEARN_RATE,
     RESET_GRACE_SEC,
     CLEAN_BG_INTERVAL,
+    CLEAN_BG_MAX_MOTION_RATIO,
+    CLEAN_BG_STABLE_FRAMES,
     MAX_BLOB_ROI_RATIO,
 )
 from utils.logger import get_logger, LogThrottle
@@ -44,6 +47,7 @@ class BackgroundModel:
         # เพื่อใช้ตอน freeze แทน bg ที่อาจถูกดูดมือเข้าไปบางส่วนแล้ว
         self.clean_bg = None
         self.clean_bg_last_update = 0.0
+        self.quiet_frames = 0  # จำนวนเฟรมติดกันที่ ROI นิ่ง (ใช้ตัดสินเก็บ clean_bg)
 
         # [BUG FIX: มือถูก snapshot เป็น background ตอน reset]
         # หลัง reset มือผู้ใช้อาจยังอยู่ในเฟรม ถ้าล้าง bg ทันที เฟรมถัดไปจะ snapshot มือ
@@ -55,10 +59,12 @@ class BackgroundModel:
     def in_grace(self, now):
         return now < self.grace_until
 
-    def update(self, frame_gray, now, idle):
+    def update(self, frame_gray, now, idle, roi_mask=None):
         """คืน diff (absdiff ระหว่างเฟรมกับ bg) หรือ None ถ้าเพิ่งตั้ง bg จากเฟรมนี้
 
-        idle: state machine อยู่ IDLE หรือไม่ (เก็บ clean_bg เฉพาะตอน IDLE)
+        idle     : ไม่มีรอบเปิดอยู่หรือไม่ (เก็บ clean_bg เฉพาะตอนนี้)
+        roi_mask : mask ของ ROI (uint8 255 = ใน ROI) — ใช้ตัดสินว่า "นิ่ง" เฉพาะใน ROI
+                   None = ดูทั้งเฟรม
         """
         if self.bg is None:
             self.bg = frame_gray.copy()
@@ -72,35 +78,52 @@ class BackgroundModel:
             lr = BG_RELEARN_RATE if self.in_grace(now) else BG_LEARNING_RATE
             cv2.addWeighted(self.bg, 1 - lr, frame_gray, lr, 0, dst=self.bg)
 
-            # [CLEAN BG] snapshot bg ที่สะอาด เฉพาะตอน IDLE + ไม่มี motion
-            no_raw_motion = (
-                cv2.countNonZero(
-                    np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
-                )
-                == 0
-            )
+            # [CLEAN BG] snapshot bg ที่สะอาด เฉพาะตอน IDLE + ROI นิ่งต่อเนื่อง
+            # ดูเฉพาะใน ROI และยอม noise เล็กน้อย (แสงสะท้อน / การบีบอัดภาพนอก ROI
+            # ทำให้ทั้งเฟรมแทบไม่เคยเป็น 0 พิกเซล — เงื่อนไขเดิมจึงไม่เคยเก็บ clean_bg ได้)
+            raw = np.where(diff > MOT_THRESH, np.uint8(255), np.uint8(0))
+            if roi_mask is not None:
+                raw = cv2.bitwise_and(raw, roi_mask)
+                area = cv2.countNonZero(roi_mask)
+            else:
+                area = raw.size
+            quiet = cv2.countNonZero(raw) <= area * CLEAN_BG_MAX_MOTION_RATIO
+            self.quiet_frames = self.quiet_frames + 1 if quiet else 0
             if (
                 idle
-                and no_raw_motion
+                and self.quiet_frames >= CLEAN_BG_STABLE_FRAMES
                 and not self.in_grace(now)
                 and (now - self.clean_bg_last_update) >= CLEAN_BG_INTERVAL
             ):
                 self.clean_bg = self.bg.copy()
                 self.clean_bg_last_update = now
+        else:
+            self.quiet_frames = 0
 
         return diff
 
-    def freeze(self):
-        """เจอ motion ตอน IDLE → หยุดเรียนรู้ bg (ทำครั้งเดียวต่อรอบ)"""
+    def freeze(self, now, reason=""):
+        """หยุดเรียนรู้ bg (ทำครั้งเดียวจนกว่าจะ unfreeze) คืน True ถ้าใช้ clean_bg
+        reason: ข้อความบอกว่า freeze เพราะอะไร (START / เฝ้าดูนอกรอบ) ใส่ใน log"""
         if self.frozen:
-            return
+            return self.clean_bg is not None
         self.frozen = True
         # [CLEAN BG] ใช้ clean_bg (bg ก่อนมือเข้า) แทน bg ที่อาจถูกดูดมือไปแล้ว
-        # ถ้ายังไม่มี clean_bg (เพิ่งเริ่มระบบ) → fallback ใช้ bg ปัจจุบัน
-        src = self.clean_bg if self.clean_bg is not None else self.bg
+        # ถ้ายังไม่มี clean_bg (เพิ่งเริ่มระบบ / เพิ่งปิดรอบ) → fallback ใช้ bg ปัจจุบัน
+        used_clean = self.clean_bg is not None
+        src = self.clean_bg if used_clean else self.bg
         self.snapshot = src.copy()
         self.bg = src.copy()
-        logger.info("🧊 Background FROZEN — ใช้ clean_bg ก่อนมี motion")
+        tag = f" [{reason}]" if reason else ""
+        if used_clean:
+            age = now - self.clean_bg_last_update
+            logger.info(f"🧊 Background FROZEN{tag} — ใช้ clean_bg (อายุ {age:.1f}s)")
+        else:
+            logger.warning(
+                f"🧊 Background FROZEN{tag} — fallback: ไม่มี clean_bg ใช้ bg ปัจจุบัน "
+                f"(ถ้ามีมือ/ของที่ยังไม่ถูกกลืนเข้า bg อาจถูกตรวจ)"
+            )
+        return used_clean
 
     def unfreeze(self, now):
         """reset กลับ IDLE → ไม่ล้าง bg แต่กลับมาเรียนรู้ + เข้า grace period

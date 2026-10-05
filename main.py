@@ -3,7 +3,10 @@ main.py — main loop ของ VendingCam (ยืนยันสินค้า
 
 ลำดับต่อ iteration (App.step):
   อ่านเฟรม → ประมวลคำสั่ง START/STOP + ผลส่ง S0 (ก่อนดูผลตรวจจับเสมอ) → timeout รอบ
-  → (มีเฟรม) background/diff → mask → ก้อน → tracker → ยืนยัน (เฉพาะ ACTIVE)
+  → (มีเฟรม) background/diff → mask → ก้อน → tracker → ตัดสินวัตถุที่นิ่งครบเกณฑ์:
+       ACTIVE              → ยืนยัน (ภาพ → DB → latch → S0 → daily log)
+       CONFIRMED_WAIT_STOP → ภาพ anomaly EXTRA_AFTER_CONFIRM (ไม่นับยอด)
+       WAIT_START (เฝ้าดู) → ภาพ anomaly OUTSIDE_CYCLE (ไม่นับยอด)
 
   - main loop เป็นเจ้าของ state ของรอบตัวเดียว (core/cycle.py) — Redis worker แค่ส่งเหตุการณ์มา
   - กล้องเปิดครั้งเดียวตอนเริ่ม START/STOP ไม่เปิด/ปิดกล้อง
@@ -26,6 +29,7 @@ from config import (
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD,
     CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, CLOUD_ENABLED, EVIDENCE_DIR,
+    DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
     STATE_DB_PATH, COUNT_TIMEZONE,
@@ -33,12 +37,12 @@ from config import (
 from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
 from core import cycle as cyc
 from core.background import BackgroundModel, find_env_change
-from core.cycle import CycleMachine
+from core.cycle import AnomalyLimiter, CycleMachine
 from core.detect import build_fgmask, contour_boxes, drop_large_boxes, group_close_boxes
 from core.frame_source import FrameSource
 from core.roi import ROIManager
-from core.tracker import MemoryTracker
-from utils import image_saver
+from core.tracker import MemoryTracker, is_motion_in_roi
+from utils import daily_log, image_saver
 from utils.disk_cleanup import start_cleanup_thread
 from utils.logger import get_logger
 from utils.state_store import R_EXPIRED, R_FAILED, StateStore, StateStoreError
@@ -48,6 +52,19 @@ logger = get_logger("main")
 
 # บันทึกภาพ/DB ล้มเหลว → รอกี่วินาทีก่อนลองยืนยันใหม่ (ของยังนิ่งอยู่) กันเขียนดิสก์ทุกเฟรม
 CONFIRM_RETRY_SEC = 1.0
+
+# [WATCH] เฝ้าดูนอกรอบ: freeze bg ได้นานสุดกี่วินาที แล้วปลดกลับไปเรียนรู้ (กันค้าง freeze)
+WATCH_TIMEOUT_SEC = 25.0
+
+# ชนิดภาพ anomaly (ไม่นับยอด ไม่ส่ง S0)
+OUTSIDE_CYCLE = "OUTSIDE_CYCLE"              # ไม่มีรอบ แต่มีวัตถุนิ่งครบเกณฑ์
+EXTRA_AFTER_CONFIRM = "EXTRA_AFTER_CONFIRM"  # ยืนยันแล้ว เจอวัตถุใหม่นิ่งอีก (น่าสงสัย)
+NO_CONFIRM_AT_CLOSE = "NO_CONFIRM_AT_CLOSE"  # ปิดรอบโดยไม่ได้ยืนยัน
+_ANOMALY_LABELS = {
+    OUTSIDE_CYCLE: "OUTSIDE CYCLE",
+    EXTRA_AFTER_CONFIRM: "SUSPICIOUS (extra after confirm)",
+    NO_CONFIRM_AT_CLOSE: "NO CONFIRM AT CLOSE",
+}
 
 
 def start_cloud_services(machine_id):
@@ -63,15 +80,14 @@ def start_cloud_services(machine_id):
     start_roi_polling(machine_id)
 
 
-def detect_objects(diff, roi_manager):
+def detect_objects(diff, roi_manager, roi_mask):
     """diff → motion mask ใน ROI → กล่องของ (รวมก้อนที่แตกแล้ว)
     คืน (fgmask, detected[(cx, cy, w, h)], env_change)"""
     # OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียวที่ขาด) — ดู core/detect.py
     fgmask = build_fgmask(
         diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER
     )
-    roi_manager.reload_if_changed()
-    fgmask = cv2.bitwise_and(fgmask, roi_manager.build_mask(fgmask.shape))
+    fgmask = cv2.bitwise_and(fgmask, roi_mask)
 
     # [NOISE] contour เล็กกว่า MIN_AREA ถูกตัดทิ้ง
     # [ENV CHANGE] ก้อนใหญ่เกิน MAX_BLOB_ROI_RATIO ของ ROI = แสง/bg เปลี่ยน → ไม่ส่งเข้า tracker
@@ -113,7 +129,8 @@ class App:
 
     def __init__(
         self, machine_id, source, roi_manager, store, controller,
-        headless=True, evidence_dir=EVIDENCE_DIR, clock=time.time, mono=time.monotonic,
+        headless=True, evidence_dir=EVIDENCE_DIR, daily_log_dir=DAILY_LOG_DIR,
+        clock=time.time, mono=time.monotonic,
     ):
         self.machine_id = machine_id
         self.source = source
@@ -122,6 +139,7 @@ class App:
         self.controller = controller
         self.headless = headless
         self.evidence_dir = evidence_dir
+        self.daily_log_dir = daily_log_dir
         self.clock = clock
         self.mono = mono
 
@@ -134,24 +152,32 @@ class App:
         self.camera_ok = None
         self.redis_up = None
         self.today_count = store.count_today()
+        self._count_checked_at = 0.0
         self.last_send_time = 0.0
+        self.frame = None              # เฟรมล่าสุด (ใช้ถ่ายภาพ NO_CONFIRM_AT_CLOSE ตอนปิดรอบ)
+        self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
+        self.anomaly_limiter = AnomalyLimiter(ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR)
 
-        # [RECOVERY] process ก่อนหน้าตายกลางรอบ → ปิดเป็น INTERRUPTED แล้ว block จน STOP / timeout
+        # [RECOVERY] process ก่อนหน้าตายกลางรอบ → ปิดเป็น INTERRUPTED + S0 ค้างหมดอายุ
+        # แล้วเริ่มที่ WAIT_START ทันที (เหมือนตัวเก่าที่ restart แล้วรับ START ใหม่ได้เลย)
         interrupted = store.recover_open_cycles()
         if interrupted:
             short = ", ".join(c[:8] for c in interrupted)
             logger.warning(
                 f"♻️ พบรอบค้างจากก่อน restart ({short}) → บันทึกเป็น INTERRUPTED "
-                f"เข้า RECOVERY_BLOCKED (STOP ถัดไป หรือ {CYCLE_TIMEOUT_SEC:.0f}s จึงรับ START ใหม่)"
+                f"(ไม่ส่ง S0 ของรอบเก่า) แล้วเริ่มที่ WAIT_START"
             )
-            self.cm.enter_recovery(self.mono())
-        logger.info(f"📊 ยอดวันนี้ ({store.today()}) = {self.today_count}")
+        # [DAILY LOG] สร้างไฟล์ของวันนี้ใหม่จาก DB (ซ่อมบรรทัดที่ขาด/ซ้ำหลัง crash)
+        today = store.today()
+        n = daily_log.rebuild(self.daily_log_dir, store, today)
+        logger.info(f"📊 ยอดวันนี้ ({today}) = {self.today_count} (daily log {n} บรรทัด)")
 
     # ── 1 iteration ─────────────────────────────────────────────────────────
     def step(self):
         """คืน (frame, fgmask, tracked) สำหรับวาดจอ (frame=None ถ้าไม่มีเฟรม)"""
         frame = self.source.read()
         now = self.clock()
+        self.frame = frame
 
         # คำสั่ง / ผลส่ง S0 ก่อนผลตรวจจับเสมอ (STOP ที่มาระหว่างอ่านเฟรมต้องมีผลก่อนยืนยัน)
         self._handle_inbox(now)
@@ -174,19 +200,29 @@ class App:
             self.last_send_time = now
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        idle = self.cm.state in (cyc.WAIT_START, cyc.RECOVERY_BLOCKED)
-        diff = self.bg.update(frame_gray, now, idle=idle)
+        self.roi_manager.reload_if_changed()
+        roi_mask = self.roi_manager.build_mask(frame_gray.shape)
+        idle = self.cm.state == cyc.WAIT_START
+        diff = self.bg.update(frame_gray, now, idle=idle, roi_mask=roi_mask)
         if diff is None:
             return frame, None, {}
 
-        fgmask, detected, env_change = detect_objects(diff, self.roi_manager)
+        fgmask, detected, env_change = detect_objects(diff, self.roi_manager, roi_mask)
         if env_change and self.bg.frozen:
             self.bg.restore_snapshot()
         tracked = self.tracker.update(detected)
 
-        obj_id = find_landed(tracked, now)
-        if obj_id is not None and self.cm.can_confirm() and now >= self.confirm_retry_at:
-            self._confirm(frame, frame_gray, now)
+        if self.cm.state == cyc.WAIT_START:
+            self._watch(tracked, now)
+
+        if find_landed(tracked, now) is not None:
+            if self.cm.can_confirm():
+                if now >= self.confirm_retry_at:
+                    self._confirm(frame, frame_gray, now)
+            elif self.cm.state == cyc.CONFIRMED_WAIT_STOP:
+                self._capture_anomaly(EXTRA_AFTER_CONFIRM, frame, frame_gray, now)
+            elif self.cm.state == cyc.WAIT_START and self.watch_since is not None:
+                self._capture_anomaly(OUTSIDE_CYCLE, frame, frame_gray, now)
         return frame, fgmask, tracked
 
     # ── คำสั่งและผลจาก Redis worker ─────────────────────────────────────────
@@ -240,20 +276,16 @@ class App:
 
         # [BG] ใช้พื้นหลังก่อน START ตรึงไว้ทั้งรอบ + ล้าง tracker (ห้ามพาวัตถุจากก่อน START มา)
         self.tracker.clear_all()
+        if self.watch_since is not None:
+            # START ระหว่างเฝ้าดูนอกรอบ: bg ถูก freeze ไว้แล้ว (จาก clean_bg ก่อนมี motion) ใช้ต่อได้เลย
+            logger.info("🧊 START ระหว่างเฝ้าดูนอกรอบ → ใช้ bg ที่ freeze ไว้ (ก่อนมี motion) เป็นพื้นหลังของรอบ")
+            self.watch_since = None
         if self.bg.bg is None:
             # ยังไม่มีพื้นหลังเลย (กล้องเพิ่งเริ่ม / หลุด) → ห้ามใช้เฟรมหลัง START เป็นพื้นหลัง
             self.cm.on_camera_lost()
             logger.warning(f"⛔ รอบ {cycle_id[:8]}: ไม่มีพื้นหลังก่อน START → BLOCKED_WAIT_STOP")
-        elif not self.bg.frozen:
-            if self.bg.clean_bg is None:
-                logger.warning(
-                    "⚠️ ยังไม่มี clean_bg (เพิ่งเริ่มระบบ / เพิ่งปิดรอบ) → ใช้ bg ปัจจุบันเป็นพื้นหลังของรอบ "
-                    "(ถ้ามีมือ/ของที่ยังไม่ถูกกลืนเข้า bg อาจถูกตรวจในรอบนี้)"
-                )
-            else:
-                age = now - self.bg.clean_bg_last_update
-                logger.info(f"🧊 ใช้ clean_bg (อายุ {age:.1f}s) เป็นพื้นหลังของรอบ")
-            self.bg.freeze()
+        else:
+            self.bg.freeze(now, reason=f"START {cycle_id[:8]}")
         logger.info(f"▶️ เปิดรอบ {cycle_id[:8]} (state={self.cm.state})")
 
     def _on_closed(self, closed, now):
@@ -263,6 +295,9 @@ class App:
             logger.critical(f"❌ บันทึกการปิดรอบลง DB ไม่ได้: {e}")
         # S0 ที่ยังไม่ได้ส่งของรอบนี้ห้ามส่งอีก
         self.controller.revoke(closed.cycle_id)
+        if not closed.confirmed:
+            # [ANOMALY c] ปิดรอบโดยไม่ได้ยืนยัน → ภาพสภาพถาดตอนปิดรอบ 1 ภาพ (ไม่จำกัดความถี่)
+            self._save_anomaly(NO_CONFIRM_AT_CLOSE, closed.cycle_id, self.frame)
         # [RESET] ล้าง tracker → ปลด freeze + grace (ดูดมือที่ค้างในเฟรมเข้า bg ก่อน)
         self.tracker.clear_all()
         if self.bg.frozen:
@@ -280,6 +315,7 @@ class App:
             )
         self.bg.clear()  # กล้องหลุด → เริ่ม background ใหม่
         self.tracker.clear_all()
+        self.watch_since = None
 
     # ── การยืนยัน ────────────────────────────────────────────────────────────
     def _confirm(self, frame, frame_gray, now):
@@ -305,6 +341,7 @@ class App:
         self.cm.mark_confirmed()
         self.today_count = conf.daily_sequence
         self.controller.request_s0(cycle_id, self.last_cmd_seq)
+        daily_log.append(self.daily_log_dir, conf)
 
         # [RESET MOTION] เฟรมนี้เป็น bg ใหม่ + tracker ลืมของชิ้นนี้ → motion หลังยืนยันเป็นของใหม่
         self.bg.rebaseline(frame_gray, now)
@@ -315,10 +352,62 @@ class App:
             f"(บันทึก {ms:.0f}ms) → ส่ง S0"
         )
 
+    # ── เฝ้าดูนอกรอบ / anomaly ───────────────────────────────────────────────
+    def _watch(self, tracked, now):
+        """[WATCH] WAIT_START: มี motion ใน ROI → freeze bg (ใช้ clean_bg ก่อนมี motion)
+        เพื่อให้วัตถุที่วางนิ่งไม่ถูกกลืนเข้า bg ก่อนครบเกณฑ์ → ถ่ายภาพ OUTSIDE_CYCLE ได้
+        ปลด freeze เมื่อ tracker ว่าง หรือเฝ้าครบ WATCH_TIMEOUT_SEC (ไม่เปิดรอบ ไม่นับยอด)"""
+        if self.watch_since is None:
+            if is_motion_in_roi(tracked) and not self.bg.in_grace(now) and not self.bg.frozen:
+                self.bg.freeze(now, reason="เฝ้าดูนอกรอบ")
+                self.watch_since = now
+            return
+        if not tracked:
+            self._end_watch(now, "ROI ว่างแล้ว")
+        elif now - self.watch_since >= WATCH_TIMEOUT_SEC:
+            self._end_watch(now, f"เฝ้าครบ {WATCH_TIMEOUT_SEC:.0f}s")
+
+    def _end_watch(self, now, why):
+        logger.info(f"👀 จบการเฝ้าดูนอกรอบ ({why}) → ปลด freeze")
+        self.watch_since = None
+        self.tracker.clear_all()
+        self.bg.unfreeze(now)
+
+    def _capture_anomaly(self, kind, frame, frame_gray, now):
+        """[ANOMALY a/b] วัตถุนิ่งครบเกณฑ์นอกช่วงยืนยัน → ภาพ (จำกัดความถี่) ไม่นับยอด ไม่ส่ง S0
+        ถ่ายหรือไม่ก็ตาม: rebaseline + ล้าง tracker (เหมือนหลังยืนยัน) → ไม่จับวัตถุเดิมซ้ำทุกเฟรม"""
+        cycle_id = self.cm.cycle_id
+        if self.anomaly_limiter.allow(self.mono()):
+            self._save_anomaly(kind, cycle_id, frame)
+        else:
+            logger.info(f"🔕 [{kind}] วัตถุนิ่งครบเกณฑ์ แต่เกินโควตาภาพ anomaly → ไม่ถ่าย")
+        self.bg.rebaseline(frame_gray, now)
+        self.tracker.clear_all()
+
+    def _save_anomaly(self, kind, cycle_id, frame):
+        path = None
+        if frame is not None:
+            path = image_saver.save_evidence(
+                frame, image_saver.ANOMALY, kind, cycle_id,
+                base_dir=self.evidence_dir, label=_ANOMALY_LABELS[kind],
+            )
+        try:
+            self.store.record_anomaly(kind, cycle_id, path)
+        except sqlite3.Error as e:
+            logger.error(f"❌ บันทึก anomaly {kind} ลง DB ไม่ได้: {e}")
+        where = f"รอบ {cycle_id[:8]}" if cycle_id else "นอกรอบ"
+        logger.warning(f"🚩 ANOMALY {kind} ({where}) — ไม่นับยอด ภาพ: {path or 'ไม่มี (ไม่มีเฟรม)'}")
+
     def view(self):
         """ข้อมูลสำหรับ overlay"""
+        now = self.clock()
+        if now - self._count_checked_at >= 1.0:
+            # อ่านยอดจาก DB ทุก 1 วินาที → ข้ามเที่ยงคืนแล้วยอดบนจอกลับเป็นของวันใหม่
+            self.today_count = self.store.count_today()
+            self._count_checked_at = now
         return {
             "state": self.cm.state,
+            "watching": self.watch_since is not None,
             "cycle_id": self.cm.cycle_id,
             "today_count": self.today_count,
             "redis_up": self.redis_up,

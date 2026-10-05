@@ -7,7 +7,7 @@ ui/overlay.py — วาดข้อมูล debug ลงบนเฟรม (�
 
 import cv2
 
-from core.cycle import ACTIVE, BLOCKED_WAIT_STOP, CONFIRMED_WAIT_STOP, RECOVERY_BLOCKED
+from core.cycle import ACTIVE, BLOCKED_WAIT_STOP, CONFIRMED_WAIT_STOP
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -15,7 +15,6 @@ _STATE_COLORS = {
     ACTIVE: (0, 200, 255),
     CONFIRMED_WAIT_STOP: (0, 255, 0),
     BLOCKED_WAIT_STOP: (0, 0, 255),
-    RECOVERY_BLOCKED: (0, 0, 255),
 }
 
 _OBJ_COLORS = {
@@ -32,7 +31,7 @@ def _status_text(ok, up_text, down_text):
 
 
 def render_overlay(frame, view, tracked, roi_manager, frame_w, frame_h):
-    """view: dict จาก App.view() — state, cycle_id, today_count, redis_up, camera_ok, bg_frozen, keyboard"""
+    """view: dict จาก App.view() — state, watching, cycle_id, today_count, redis_up, camera_ok, bg_frozen, keyboard"""
     roi_manager.draw(frame)
 
     # ── กรอบวัตถุใน tracker ─────────────────────────────────────────────────
@@ -48,9 +47,10 @@ def render_overlay(frame, view, tracked, roi_manager, frame_w, frame_h):
 
     # ── กล่องสถานะ (ขวาบน) ──────────────────────────────────────────────────
     state = view["state"]
+    label = f"{state} (watch)" if view.get("watching") else state
     cv2.rectangle(frame, (frame_w - 265, 5), (frame_w - 5, 120), (20, 20, 20), -1)
     cv2.putText(
-        frame, state, (frame_w - 255, 30), FONT, 0.55,
+        frame, label, (frame_w - 255, 30), FONT, 0.55,
         _STATE_COLORS.get(state, (150, 150, 150)), 2,
     )
     cycle = view["cycle_id"][:8] if view["cycle_id"] else "-"

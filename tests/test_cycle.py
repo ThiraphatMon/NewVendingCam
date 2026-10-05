@@ -5,7 +5,7 @@ import itertools
 import pytest
 
 from core.cycle import (
-    ACTIVE, BLOCKED_WAIT_STOP, CONFIRMED_WAIT_STOP, RECOVERY_BLOCKED, WAIT_START, CycleMachine,
+    ACTIVE, BLOCKED_WAIT_STOP, CONFIRMED_WAIT_STOP, WAIT_START, AnomalyLimiter, CycleMachine,
 )
 
 
@@ -104,9 +104,19 @@ def test_camera_lost_blocks_confirmation_and_stop_is_uncertain(cm):
     cm.on_start(0)
     assert cm.on_camera_lost() is True
     assert cm.state == BLOCKED_WAIT_STOP and not cm.can_confirm()
-    assert cm.on_start(1).anomaly == "DUPLICATE_START"
     r = cm.on_stop(2)
     assert r.closed.outcome == "UNCERTAIN" and "camera_gap" in r.closed.reason
+
+
+def test_start_while_blocked_closes_uncertain_and_opens_new(cm):
+    # เหมือนตัวเก่า: กล้องอ่านไม่ได้ = จบรอบ แล้วรับ START ถัดไปได้ทันที
+    cm.on_start(0)
+    cm.on_camera_lost()
+    r = cm.on_start(5)
+    assert r.closed.cycle_id == "c1" and r.closed.outcome == "UNCERTAIN"
+    assert r.closed.reason == "next_start;camera_gap" and not r.closed.confirmed
+    assert r.opened == "c2" and cm.state == ACTIVE and cm.can_confirm()
+    assert not cm.camera_gap and cm.started_at == 5  # gap ของรอบเก่าไม่ติดมารอบใหม่
 
 
 def test_camera_lost_after_confirm_keeps_confirmed(cm):
@@ -130,26 +140,6 @@ def test_redis_gap_makes_unconfirmed_close_uncertain(cm):
     assert cm.can_confirm()  # Redis ขาดไม่ block การยืนยัน (ยอดรายวันยังต้องครบ)
     r = cm.on_stop(1)
     assert r.closed.outcome == "UNCERTAIN" and "redis_gap" in r.closed.reason
-
-
-def test_recovery_blocked_ignores_start_until_stop(cm):
-    cm.enter_recovery(now=0)
-    assert cm.state == RECOVERY_BLOCKED and not cm.is_open() and not cm.can_confirm()
-    r = cm.on_start(0)
-    assert r.anomaly == "START_DURING_RECOVERY" and r.opened is None
-    assert cm.tick(299) is None
-    r = cm.on_stop(1)
-    assert r.closed is None and cm.state == WAIT_START
-    assert cm.on_start(2).opened == "c1"
-
-
-def test_recovery_blocked_expires_after_cycle_timeout(cm):
-    cm.enter_recovery(now=1000)
-    assert cm.tick(1299.9) is None and cm.state == RECOVERY_BLOCKED
-    r = cm.tick(1300)
-    assert r.closed is None and "RECOVERY_BLOCKED" in r.note
-    assert cm.state == WAIT_START and cm.recovery_since is None
-    assert cm.on_start(1301).opened == "c1"
 
 
 # ── ลำดับคำสั่งเทียบกับ legacy_reference/main.py ────────────────────────────────
@@ -216,3 +206,20 @@ def test_is_current_open_rejects_none_and_closed(cm):
     assert cm.is_current_open(cid)  # ยืนยันแล้วยังส่ง S0 ได้จนกว่าจะปิดรอบ
     cm.on_stop(1)
     assert not cm.is_current_open(cid)
+
+
+# ── AnomalyLimiter ─────────────────────────────────────────────────────────────
+
+def test_limiter_min_interval():
+    lim = AnomalyLimiter(min_interval=30, max_per_hour=20)
+    assert lim.allow(0)
+    assert not lim.allow(29.9)
+    assert lim.allow(30)
+
+
+def test_limiter_max_per_hour_then_window_slides():
+    lim = AnomalyLimiter(min_interval=30, max_per_hour=3)
+    assert [lim.allow(t) for t in (0, 30, 60, 90, 120)] == [True, True, True, False, False]
+    assert not lim.allow(3599)
+    assert lim.allow(3600)  # ภาพแรก (t=0) หลุดออกจากหน้าต่าง 1 ชั่วโมงแล้ว
+    assert not lim.allow(3610)

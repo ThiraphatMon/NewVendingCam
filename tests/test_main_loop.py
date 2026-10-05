@@ -213,25 +213,42 @@ def test_db_failure_no_s0_no_count(make_app, env, monkeypatch):
     assert app.store.count_today() == 0
 
 
-def test_restart_with_open_cycle_enters_recovery_until_stop(make_app, env):
+def test_restart_with_open_cycle_goes_straight_to_wait_start(make_app, env):
+    # เหมือนตัวเก่า: restart แล้วรับ START ใหม่ได้ทันที — รอบค้างเป็น INTERRUPTED, S0 ค้างหมดอายุ
     store = env.open_store()
     store.open_cycle("hanging")
+    store.confirm("hanging", "old.jpg")  # ยืนยันแล้ว แต่ตายก่อนส่ง S0
     store.close()
 
     ctl = FakeController()
     app = make_app(ctl)
-    assert app.cm.state == cyc.RECOVERY_BLOCKED
+    assert app.cm.state == cyc.WAIT_START
     assert app.store.get_cycle("hanging")["outcome"] == "INTERRUPTED"
+    assert app.store.get_response("hanging")["state"] == "EXPIRED"
+    assert app.today_count == 1  # ยอดเดิมไม่หาย
     settle(app, env)
     ctl.push("START")
-    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
-    assert app.cm.state == cyc.RECOVERY_BLOCKED and ctl.s0 == []
-    ctl.push("STOP")
-    run_frames(app, env, empty_frame(), 60)
-    assert app.cm.state == cyc.WAIT_START
-    ctl.push("START")
-    run_frames(app, env, empty_frame(), 1)
+    run_frames(app, env, empty_frame(), 3)
     assert app.cm.state == cyc.ACTIVE
+    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    assert ctl.s0 == [app.cm.cycle_id] and app.today_count == 2  # ไม่มี S0 ของรอบเก่า
+
+
+def test_start_while_blocked_opens_new_cycle(make_app, env):
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, empty_frame(), 3)
+    first = app.cm.cycle_id
+    run_frames(app, env, None, 3)  # กล้องหลุด → BLOCKED
+    settle(app, env)               # กล้องกลับ ถาดว่าง
+    ctl.push("START")
+    run_frames(app, env, empty_frame(), 3)
+    assert app.cm.state == cyc.ACTIVE and app.cm.cycle_id != first
+    assert outcome(app, first) == "UNCERTAIN"
+    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    assert app.cm.state == cyc.CONFIRMED_WAIT_STOP and len(ctl.s0) == 1
 
 
 def test_restart_same_day_continues_count(make_app, env):

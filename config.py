@@ -175,8 +175,13 @@ BG_LEARNING_RATE = _float("BG_LEARNING_RATE", 0.1)
 RESET_GRACE_SEC = _float("RESET_GRACE_SEC", 1.5)
 BG_RELEARN_RATE = _float("BG_RELEARN_RATE", 0.3)
 
-# เก็บภาพ "ช่องรับของว่าง" (clean background) ทุกกี่วินาที ตอน IDLE และไม่มี motion
+# เก็บภาพ "ช่องรับของว่าง" (clean background) ทุกกี่วินาที ตอนไม่มีรอบและ ROI นิ่ง
 CLEAN_BG_INTERVAL = _float("CLEAN_BG_INTERVAL", 0.5)
+# "ROI นิ่ง" = พิกเซลที่เปลี่ยนใน ROI ไม่เกินสัดส่วนนี้ของพื้นที่ ROI (0.002 = 0.2%)
+#   ติดกันกี่เฟรม — ยอม noise ของกล้อง/การบีบอัดภาพ แต่ของที่กำลังตก/มือจะเกินเสมอ
+#   ⚠ log เตือน "fallback: ไม่มี clean_bg" บ่อย → ↑ ratio เล็กน้อย | ของถูกกลืนเข้า clean_bg → ↓
+CLEAN_BG_MAX_MOTION_RATIO = _float("CLEAN_BG_MAX_MOTION_RATIO", 0.002)
+CLEAN_BG_STABLE_FRAMES = _int("CLEAN_BG_STABLE_FRAMES", 5)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
