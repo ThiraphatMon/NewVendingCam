@@ -76,10 +76,19 @@ class CloudServices:
 
     def start(self):
         f = self.features
+        # register / push ROI: เน็ตยังไม่มาตอนบูต → ลองใหม่แบบ backoff จนสำเร็จ (ไม่ busy-loop)
         if f["register"]:
-            self._spawn(lambda: client.register_machine(self.machine_id), "cloud-register")
+            self._spawn(
+                lambda: self._retry_until_ok(lambda: client.register_machine(self.machine_id), "register ตู้"),
+                "cloud-register",
+            )
         if f["roi_sync"]:
-            self._spawn(lambda: client.push_default_roi(self.machine_id, self.roi_path), "cloud-roi-push")
+            self._spawn(
+                lambda: self._retry_until_ok(
+                    lambda: client.push_default_roi(self.machine_id, self.roi_path), "push ROI ตอนเริ่ม"
+                ),
+                "cloud-roi-push",
+            )
             self._spawn(self._roi_poll_loop, "cloud-roi-poll")
         if f["realtime"]:
             self._spawn(self._frame_sender_loop, "cloud-frame-sender")
@@ -93,6 +102,20 @@ class CloudServices:
         self._outbox_wake.set()
         for t in self.threads:
             t.join(timeout)
+
+    def _retry_until_ok(self, fn, what):
+        """เรียก fn จนคืน True — ล้มเหลวรอ backoff_delay (5s, 10s, ... สูงสุด RETRY_INTERVAL) หยุดได้ด้วย stop()"""
+        attempts = 0
+        while not self.stop_event.is_set():
+            if fn():
+                if attempts:
+                    logger.info(f"☁️ {what} สำเร็จ (หลังลองใหม่ {attempts} ครั้ง)")
+                return True
+            attempts += 1
+            delay = backoff_delay(attempts)
+            logger.warning(f"⚠️ {what} ไม่สำเร็จ → ลองใหม่ใน {delay:.0f}s (ครั้งที่ {attempts})")
+            self.stop_event.wait(delay)
+        return False
 
     # ── ROI sync ─────────────────────────────────────────────────────────────
     def _roi_poll_loop(self):

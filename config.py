@@ -89,7 +89,8 @@ REDIS_CONNECT_TIMEOUT_SEC = _float("REDIS_CONNECT_TIMEOUT_SEC", 1.0)
 REDIS_SOCKET_TIMEOUT_SEC = _float("REDIS_SOCKET_TIMEOUT_SEC", 1.0)
 
 # สวิตช์หลักของ cloud: 0 = ไม่มี HTTP เลย (ทำงาน local อย่างเดียว) | 1 = เปิดตามสวิตช์ย่อยด้านล่าง
-#   (register ตู้ทำเสมอเมื่อเปิด cloud — ต้องตั้ง CLOUD_API_URL ด้วย ไม่งั้นถือว่าปิด)
+#   (register ตู้ทำเสมอเมื่อเปิด cloud — ต้องตั้ง CLOUD_API_URL ด้วย ไม่งั้นถือว่าปิด;
+#    เน็ตยังไม่มาตอนบูต → register / push ROI ลองใหม่แบบ backoff จนสำเร็จ)
 CLOUD_ENABLED = _bool("CLOUD_ENABLED", False)
 # สวิตช์ย่อย (มีผลเฉพาะ CLOUD_ENABLED=1) — ปิดแล้วไม่เริ่ม thread และไม่ส่ง HTTP ของฟีเจอร์นั้นเลย
 #   ภาพสดเปิด/ปิดด้วย SEND_INTERVAL (หมวด 5, 0 = ปิด)

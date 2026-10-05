@@ -88,6 +88,7 @@ def register_machine(machine_id: str):
     ลงทะเบียนตู้กับ Server โดยส่ง SYSTEM_ONLINE event ไปที่ POST /api/events
     Server จะ FirstOrCreate machine อัตโนมัติจาก machine_id ที่ส่งไป
     (Server ไม่มี POST /machines — สร้าง machine ผ่าน event endpoint เท่านั้น)
+    คืน True ถ้าสำเร็จ (2xx) — ผู้เรียกลองใหม่เอง (api/cloud.py backoff)
     """
     from datetime import datetime
 
@@ -105,14 +106,15 @@ def register_machine(machine_id: str):
             headers=_headers(),
             timeout=5,
         )
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
             logger.info(f"[{machine_id}] ✅ ลงทะเบียนตู้สำเร็จ (SYSTEM_ONLINE)")
-        else:
-            logger.warning(
-                f"[{machine_id}] ⚠️ register_machine ล้มเหลว: {resp.status_code} - {resp.text}"
-            )
+            return True
+        logger.warning(
+            f"[{machine_id}] ⚠️ register_machine ล้มเหลว: {resp.status_code} - {resp.text[:200]}"
+        )
     except Exception as e:
         logger.warning(f"[{machine_id}] ⚠️ register_machine error: {e}")
+    return False
 
 
 def fetch_remote_roi(machine_id, local_config_path=ROI_CONFIG_PATH):
@@ -135,23 +137,27 @@ def fetch_remote_roi(machine_id, local_config_path=ROI_CONFIG_PATH):
 def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
     """
     ส่ง ROI default ของตู้นี้ขึ้น Server เฉพาะเมื่อ Server ยังไม่มีข้อมูล (no_config)
-    เรียกครั้งเดียวตอน startup เท่านั้น
+    ทำตอน startup — คืน True เมื่อจบงาน (Server มี ROI แล้ว / push สำเร็จ / ไม่มีไฟล์ในเครื่อง)
+    False = เน็ต/Server มีปัญหา → ผู้เรียกลองใหม่ (api/cloud.py backoff)
+    ถาม Server ไม่สำเร็จ (ไม่ใช่ 200) → ไม่ push (กันทับ ROI ที่ Server มีอยู่แล้ว)
     """
     try:
         roi_url = f"{_base_url()}/machines/{machine_id}/roi"
 
         check = requests.get(roi_url, headers=_headers(), timeout=5)
-        if check.status_code == 200:
-            data = check.json()
-            if data.get("status") != "no_config":
-                logger.info(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
-                return
+        if check.status_code != 200:
+            logger.warning(f"[{machine_id}] ⚠️ ถาม ROI จาก Server ไม่สำเร็จ: {check.status_code}")
+            return False
+        data = check.json()
+        if data.get("status") != "no_config":
+            logger.info(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
+            return True
 
         if not os.path.exists(local_config_path):
             logger.warning(
                 f"[{machine_id}] ⚠️ ไม่พบ {local_config_path} ไม่สามารถ push default ROI ได้"
             )
-            return
+            return True
 
         with open(local_config_path, "r", encoding="utf-8") as f:
             roi_data = json.load(f)
@@ -162,12 +168,13 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
             headers={**_headers(), "Content-Type": "application/json"},
             timeout=5,
         )
-        if resp.status_code == 200:
+        if 200 <= resp.status_code < 300:
             logger.info(f"[{machine_id}] ✅ Push default ROI ขึ้น Server สำเร็จ")
-        else:
-            logger.warning(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
+            return True
+        logger.warning(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
     except Exception as e:
         logger.warning(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
+    return False
 
 
 # ─────────────────────────────────────────────

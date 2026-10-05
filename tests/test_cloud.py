@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from urllib.parse import parse_qsl
 
 import cv2
 import numpy as np
@@ -357,3 +358,63 @@ def test_outbox_worker_does_not_create_db(services, tmp_path):
     services(features(events=True), db_path=str(path)).start()
     time.sleep(0.2)
     assert not path.exists()
+
+
+# ── register / push ROI: ลองใหม่แบบ backoff จนสำเร็จ (S13) ─────────────────────
+@pytest.fixture
+def fast_backoff(monkeypatch):
+    monkeypatch.setattr(api.cloud, "BACKOFF_BASE_SEC", 0.05)
+    monkeypatch.setattr(api.cloud, "RETRY_INTERVAL", 0.2)
+
+
+def test_register_retries_until_success(cloud_stub, services, fast_backoff):
+    cloud_stub.fail_next = [500, 502]
+    svc = services(features(register=True)).start()
+    assert _wait(lambda: not svc.threads[0].is_alive(), timeout=3)  # สำเร็จแล้วจบ thread
+    posts = [r for r in cloud_stub.requests if r.path == "/api/events"]
+    assert len(posts) == 3 and dict(parse_qsl(posts[-1].body.decode()))["event"] == "SYSTEM_ONLINE"
+
+
+def test_register_while_server_failing_backs_off_not_busy_loop(cloud_stub, services, fast_backoff):
+    cloud_stub.fail_next = [503] * 1000  # เว็บยังไม่พร้อม
+    svc = services(features(register=True)).start()
+    time.sleep(0.6)
+    with cloud_stub.lock:
+        times = [r for r in cloud_stub.requests]
+    assert 2 <= len(times) <= 8  # backoff 0.05, 0.1, 0.2, 0.2, ... ไม่ใช่ busy-loop
+    # เว็บกลับมา → สำเร็จแล้ว thread จบ ไม่ยิงซ้ำอีก
+    cloud_stub.fail_next = []
+    assert _wait(lambda: not svc.threads[0].is_alive(), timeout=3)
+    n = len(cloud_stub.requests)
+    time.sleep(0.3)
+    assert len(cloud_stub.requests) == n
+
+
+def test_push_roi_retries_and_does_not_overwrite_when_server_errors(cloud_stub, services, fast_backoff):
+    """ถาม ROI จากเว็บไม่สำเร็จ → ห้าม PUT ทับ (เว็บอาจมี ROI อยู่แล้ว) → ลองใหม่จนถามได้ แล้วค่อย push"""
+    cloud_stub.fail_next = [500, 500]
+    svc = services(features())  # ไม่เริ่ม polling (ไม่ให้ GET ของ polling ปน)
+    ok = svc._retry_until_ok(lambda: api.client.push_default_roi("VENDING_01", svc.roi_path), "push ROI")
+    assert ok
+    assert [r.method for r in cloud_stub.requests] == ["GET", "GET", "GET", "PUT"]
+    assert json.loads(cloud_stub.requests[-1].body) == LOCAL_ROI
+
+
+def test_push_roi_done_when_server_has_roi(cloud_stub, services, fast_backoff):
+    cloud_stub.roi = {"frame": {"width": 640, "height": 480}, "roi_type": "rect",
+                      "rect": {"x": 1, "y": 1, "w": 10, "h": 10}}
+    svc = services(features(roi_sync=True)).start()
+    push_thread = [t for t in svc.threads if t.name == "cloud-roi-push"][0]
+    assert _wait(lambda: not push_thread.is_alive())
+    assert "PUT" not in [r.method for r in cloud_stub.requests]
+
+
+def test_stop_interrupts_backoff_wait(services, monkeypatch, cloud_stub):
+    monkeypatch.setattr(api.cloud, "BACKOFF_BASE_SEC", 30.0)
+    monkeypatch.setattr(api.cloud, "RETRY_INTERVAL", 60)
+    cloud_stub.fail_next = [500]
+    svc = services(features(register=True)).start()
+    assert cloud_stub.wait_for(lambda r: r.path == "/api/events")
+    t0 = time.time()
+    svc.stop()
+    assert time.time() - t0 < 1.0 and not svc.threads[0].is_alive()
