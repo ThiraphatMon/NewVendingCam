@@ -32,7 +32,7 @@ from config import (
     DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
-    STATE_DB_PATH, COUNT_TIMEZONE,
+    STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES,
 )
 from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
 from core import cycle as cyc
@@ -155,6 +155,7 @@ class App:
         self._count_checked_at = 0.0
         self.last_send_time = 0.0
         self.frame = None              # เฟรมล่าสุด (ใช้ถ่ายภาพ NO_CONFIRM_AT_CLOSE ตอนปิดรอบ)
+        self.frame_gray = None         # เฟรมล่าสุดแบบ gray (START ใช้เป็นพื้นหลังได้ถ้าไม่มี clean_bg ที่ valid)
         self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
         self.anomaly_limiter = AnomalyLimiter(ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR)
 
@@ -178,6 +179,10 @@ class App:
         frame = self.source.read()
         now = self.clock()
         self.frame = frame
+        # START ใช้เฟรมนี้เป็นพื้นหลังของรอบได้ (ถ้ายังไม่มี clean_bg ที่ valid) → แปลงก่อนรับคำสั่ง
+        self.frame_gray = (
+            None if frame is None else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        )
 
         # คำสั่ง / ผลส่ง S0 ก่อนผลตรวจจับเสมอ (STOP ที่มาระหว่างอ่านเฟรมต้องมีผลก่อนยืนยัน)
         self._handle_inbox(now)
@@ -199,7 +204,7 @@ class App:
             submit_frame(self.machine_id, frame)
             self.last_send_time = now
 
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        frame_gray = self.frame_gray
         self.roi_manager.reload_if_changed()
         roi_mask = self.roi_manager.build_mask(frame_gray.shape)
         idle = self.cm.state == cyc.WAIT_START
@@ -210,6 +215,8 @@ class App:
         fgmask, detected, env_change = detect_objects(diff, self.roi_manager, roi_mask)
         if env_change and self.bg.frozen:
             self.bg.restore_snapshot()
+        if env_change and idle:
+            self.bg.mark_scene_changed()  # [WATCH] clean_bg ก่อน env change ห้ามใช้ตอน START
         tracked = self.tracker.update(detected)
 
         if self.cm.state == cyc.WAIT_START:
@@ -277,15 +284,15 @@ class App:
         # [BG] ใช้พื้นหลังก่อน START ตรึงไว้ทั้งรอบ + ล้าง tracker (ห้ามพาวัตถุจากก่อน START มา)
         self.tracker.clear_all()
         if self.watch_since is not None:
-            # START ระหว่างเฝ้าดูนอกรอบ: bg ถูก freeze ไว้แล้ว (จาก clean_bg ก่อนมี motion) ใช้ต่อได้เลย
-            logger.info("🧊 START ระหว่างเฝ้าดูนอกรอบ → ใช้ bg ที่ freeze ไว้ (ก่อนมี motion) เป็นพื้นหลังของรอบ")
+            # START ระหว่างเฝ้าดูนอกรอบ: ไม่ใช้ bg ที่ freeze ไว้ตอนเริ่มเฝ้า (อาจเป็นฉากก่อนลูกค้าหยิบของ)
+            logger.info("👀 START ระหว่างเฝ้าดูนอกรอบ → เลิกเฝ้า ใช้ clean_bg ล่าสุด / เฟรมปัจจุบันเป็นพื้นหลังของรอบ")
             self.watch_since = None
-        if self.bg.bg is None:
+        if self.bg.bg is None or self.frame_gray is None:
             # ยังไม่มีพื้นหลังเลย (กล้องเพิ่งเริ่ม / หลุด) → ห้ามใช้เฟรมหลัง START เป็นพื้นหลัง
             self.cm.on_camera_lost()
             logger.warning(f"⛔ รอบ {cycle_id[:8]}: ไม่มีพื้นหลังก่อน START → BLOCKED_WAIT_STOP")
         else:
-            self.bg.freeze(now, reason=f"START {cycle_id[:8]}")
+            self.bg.start_cycle(self.frame_gray, now, reason=f"START {cycle_id[:8]}")
         logger.info(f"▶️ เปิดรอบ {cycle_id[:8]} (state={self.cm.state})")
 
     def _on_closed(self, closed, now):
@@ -356,14 +363,17 @@ class App:
     def _watch(self, tracked, now):
         """[WATCH] WAIT_START: มี motion ใน ROI → freeze bg (ใช้ clean_bg ก่อนมี motion)
         เพื่อให้วัตถุที่วางนิ่งไม่ถูกกลืนเข้า bg ก่อนครบเกณฑ์ → ถ่ายภาพ OUTSIDE_CYCLE ได้
-        ปลด freeze เมื่อ tracker ว่าง หรือเฝ้าครบ WATCH_TIMEOUT_SEC (ไม่เปิดรอบ ไม่นับยอด)"""
+        ปลด freeze เมื่อ ROI นิ่ง (เฟรมต่อเฟรม) ครบ CLEAN_BG_STABLE_FRAMES และไม่มีวัตถุค้าง
+        หรือเฝ้าครบ WATCH_TIMEOUT_SEC (ไม่เปิดรอบ ไม่นับยอด)
+        ไม่จบแค่เพราะ tracker ว่างเฟรมเดียว (env change / slat เปิด ทำให้ไม่มีกล่องได้ ทั้งที่ยังหยิบอยู่)
+        ต้องไม่มีวัตถุค้างด้วย ไม่งั้นของที่วางนิ่งจะเลิกเฝ้าก่อนครบเกณฑ์ OUTSIDE_CYCLE"""
         if self.watch_since is None:
             if is_motion_in_roi(tracked) and not self.bg.in_grace(now) and not self.bg.frozen:
                 self.bg.freeze(now, reason="เฝ้าดูนอกรอบ")
                 self.watch_since = now
             return
-        if not tracked:
-            self._end_watch(now, "ROI ว่างแล้ว")
+        if self.bg.roi_still() and not tracked:
+            self._end_watch(now, f"ROI นิ่งครบ {CLEAN_BG_STABLE_FRAMES} เฟรม")
         elif now - self.watch_since >= WATCH_TIMEOUT_SEC:
             self._end_watch(now, f"เฝ้าครบ {WATCH_TIMEOUT_SEC:.0f}s")
 

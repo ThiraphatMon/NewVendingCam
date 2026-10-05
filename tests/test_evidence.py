@@ -70,17 +70,91 @@ def test_outside_cycle_rate_limited(make_app, env):
     assert app.store.count_today() == 0
 
 
-def test_start_during_watch_uses_pre_motion_background(make_app, env):
-    # ของกำลังตกก่อน START เล็กน้อย (ยังไม่ถึงเกณฑ์นอกรอบ) → START → ต้องยืนยันได้ในรอบ
+def falling(n, x=300, y0=130, step=8):
+    """ของกำลังตก: ตำแหน่งเปลี่ยนทุกเฟรม (ROI ไม่นิ่งเฟรมต่อเฟรม)"""
+    return [frame_with((x, y0 + step * i)) for i in range(n)]
+
+
+def run_seq(app, env, frames):
+    for f in frames:
+        run_frames(app, env, f, 1)
+
+
+def test_start_during_watch_while_item_falling_is_confirmed(make_app, env):
+    # ของกำลังตกตอน START (ROI ยังไม่นิ่ง → ไม่มี clean_bg ที่ valid → เฟรมปัจจุบัน) → ตกถึงพื้น → ยืนยันได้
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    seq = falling(15)
+    run_seq(app, env, seq[:8])
+    assert app.watch_since is not None and app.bg.frozen
+    ctl.push("START")
+    run_seq(app, env, seq[8:])
+    run_frames(app, env, seq[-1], FRAMES_TO_CONFIRM)
+    assert app.cm.state == cyc.CONFIRMED_WAIT_STOP and len(ctl.s0) == 1
+    assert kinds(app) == []
+
+
+def test_start_during_watch_uses_latest_still_scene_not_watch_freeze(make_app, env):
+    # [ข้อ 4] watch freeze ไว้ที่ถาดว่าง แต่ของนิ่งครบ 5 เฟรมแล้ว → START ใช้ clean_bg ล่าสุด (มีของ)
+    # → ของที่นิ่งอยู่ก่อน START ไม่ถูกนับ (เหมือนตัวเก่าที่ใช้เฟรมแรกหลัง START) — tradeoff ที่ยอมรับ
     ctl = FakeController()
     app = make_app(ctl)
     settle(app, env)
     run_frames(app, env, ITEM, 10)
-    assert app.watch_since is not None and app.bg.frozen
+    assert app.watch_since is not None
+    ctl.push("START")
+    run_frames(app, env, ITEM, 1)
+    assert app.watch_since is None
+    assert np.array_equal(app.bg.bg, ITEM[:, :, 0].astype(np.float32))
+    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    assert app.cm.state == cyc.ACTIVE and ctl.s0 == []
+
+
+def test_pickup_outside_cycle_then_start_has_no_false_s0(make_app, env):
+    # [redis_e2e ข้อ 8] ซื้อต่อกัน: ยืนยัน → STOP → ลูกค้าหยิบของนอกรอบ (มือ + env change) → ถาดว่างนิ่ง → START
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
     ctl.push("START")
     run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
-    assert app.cm.state == cyc.CONFIRMED_WAIT_STOP and len(ctl.s0) == 1
-    assert kinds(app) == []
+    ctl.push("STOP")
+    run_frames(app, env, ITEM, 60)
+    bright = empty_frame()
+    bright[100:400, 100:500] = 200          # slat เปิด → env change ทั้ง ROI
+    run_frames(app, env, bright, 3)
+    run_seq(app, env, [frame_with((250 + 20 * i, 300), size=80) for i in range(6)])  # มือ
+    run_frames(app, env, empty_frame(), 8)  # ของหายแล้ว ถาดนิ่ง
+    assert app.bg.clean_bg_valid
+    ctl.push("START")
+    run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM * 2)
+    assert len(ctl.s0) == 1 and app.store.count_today() == 1
+    assert app.cm.state == cyc.ACTIVE
+
+
+def test_env_change_in_wait_start_invalidates_clean_bg(make_app, env):
+    # [ข้อ 2] env change (bg ต่างจากเฟรมเกินเกณฑ์) แม้เฟรมต่อเฟรมนิ่ง → clean_bg ห้ามใช้ ต้องนิ่งใหม่ครบ 5 เฟรม
+    app = make_app(FakeController())
+    settle(app, env)
+    assert app.bg.clean_bg_valid
+    app.bg.bg[:] = 200
+    run_frames(app, env, empty_frame(), 1)
+    assert not app.bg.clean_bg_valid and app.bg.quiet_frames == 0
+
+
+def test_watch_not_ended_by_single_empty_tracker_frame(make_app, env):
+    # [ข้อ 4] เฟรม env change ทำให้ tracker ว่าง แต่ ROI ยังไม่นิ่ง → ยังเฝ้าอยู่ จบเมื่อนิ่งครบ 5 เฟรม
+    app = make_app(FakeController())
+    settle(app, env)
+    run_seq(app, env, falling(4))
+    assert app.watch_since is not None
+    bright = empty_frame()
+    bright[100:400, 100:500] = 200
+    run_frames(app, env, bright, 1)
+    run_frames(app, env, empty_frame(), 1)
+    assert app.watch_since is not None
+    run_frames(app, env, empty_frame(), 10)
+    assert app.watch_since is None and not app.bg.frozen
 
 
 # ── b) EXTRA_AFTER_CONFIRM ────────────────────────────────────────────────────
@@ -303,6 +377,82 @@ def test_clean_bg_not_captured_outside_idle():
         bg.update(_noisy(rng, 0), t, idle=False, roi_mask=_roi_mask())
         t += 1 / 30
     assert bg.clean_bg is None
+
+
+def _feed(bg, frames, t, idle=True, mask=None):
+    for f in frames:
+        bg.update(f, t, idle=idle, roi_mask=_roi_mask() if mask is None else mask)
+        t += 1 / 30
+    return t
+
+
+def _gray(v=60):
+    return np.full((480, 640), v, np.float32)
+
+
+def _with_item(v=60):
+    f = _gray(v)
+    f[200:260, 250:310] = 220
+    return f
+
+
+def test_clean_bg_is_current_frame_when_still_frame_to_frame():
+    # [ข้อ 1] bg (เรียนรู้ช้า) ยังต่างจากเฟรม แต่เฟรมต่อเฟรมนิ่ง → clean_bg = เฟรมปัจจุบัน (มีของ)
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()] * 10, 1000.0)
+    t = _feed(bg, [_with_item()] * 6, t + 1)
+    assert bg.clean_bg_valid and np.array_equal(bg.clean_bg, _with_item())
+    assert not np.array_equal(bg.bg, _with_item())
+
+
+def test_clean_bg_captured_while_frozen_and_in_grace():
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()], 1000.0)
+    bg.freeze(t)
+    t = _feed(bg, [_with_item()] * 7, t)
+    assert bg.frozen and bg.clean_bg_valid and np.array_equal(bg.clean_bg, _with_item())
+    bg.unfreeze(t)
+    t = _feed(bg, [_gray()] * 7, t)
+    assert bg.in_grace(t) and bg.clean_bg_valid and np.array_equal(bg.clean_bg, _gray())
+
+
+def test_camera_gap_frames_not_counted_as_still():
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()] * 4, 1000.0)  # นิ่ง 3 เฟรม
+    bg.clear()                            # กล้องหลุด
+    t = _feed(bg, [_gray()] * 5, t + 1)   # เฟรมแรกตั้ง bg + นิ่ง 4 เฟรม → ยังไม่ครบ
+    assert bg.clean_bg is None
+    _feed(bg, [_gray()], t)
+    assert bg.clean_bg_valid
+
+
+def test_roi_change_invalidates_then_recaptures_without_interval_wait():
+    # [ข้อ 2] เปลี่ยนเกินเกณฑ์ → ไม่ valid ทันที (ภาพเดิมยังเก็บไว้ให้ watch) → นิ่งครบ 5 เฟรม → เก็บใหม่ทันที
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()] * 8, 1000.0)
+    assert bg.clean_bg_valid
+    t = _feed(bg, [_with_item()], t)
+    assert not bg.clean_bg_valid and np.array_equal(bg.clean_bg, _gray())
+    t = _feed(bg, [_with_item()] * 5, t)  # < CLEAN_BG_INTERVAL หลังเก็บครั้งก่อน
+    assert bg.clean_bg_valid and np.array_equal(bg.clean_bg, _with_item())
+
+
+def test_start_cycle_uses_valid_clean_bg(caplog):
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()] * 8, 1000.0)
+    assert bg.start_cycle(_with_item(), t, reason="START x") is True
+    assert np.array_equal(bg.bg, _gray()) and bg.frozen
+    assert "ใช้ clean_bg (อายุ" in caplog.text
+
+
+def test_start_cycle_without_valid_clean_bg_uses_current_frame(caplog):
+    # [ข้อ 3] ฉากยังไม่นิ่ง → เฟรมปัจจุบันเป็นพื้นหลังของรอบ + log baseline ไม่แน่นอน
+    bg = BackgroundModel()
+    t = _feed(bg, [_gray()] * 8, 1000.0)
+    t = _feed(bg, [_with_item()], t)
+    assert bg.start_cycle(_with_item(), t, reason="START x") is False
+    assert np.array_equal(bg.bg, _with_item()) and np.array_equal(bg.snapshot, _with_item())
+    assert "baseline ไม่แน่นอน" in caplog.text
 
 
 def test_freeze_reports_source(caplog):

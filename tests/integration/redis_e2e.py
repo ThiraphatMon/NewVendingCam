@@ -8,7 +8,7 @@ tests/integration/redis_e2e.py — integration test ระดับ 3: main.py �
 ความปลอดภัย:
   - ใช้ Redis ใน container ทดสอบ vendingcam-redis-test พอร์ต 6380 เท่านั้น (สร้างเอง ลบเองตอนจบ)
     พอร์ตอื่นปฏิเสธ — ห้ามต่อ Redis ของเครื่องจริง / ของโปรเจกต์อื่น
-  - main.py รันด้วย cwd = โฟลเดอร์ชั่วคราว → DB / evidence_images / logs ไม่ปนกับของจริง
+  - main.py รันด้วย cwd = โฟลเดอร์ชั่วคราวใน .e2e_tmp/ → DB / evidence_images / logs ไม่ปนกับของจริง
   - docker: ใช้ `docker` ถ้ามีใน PATH ไม่งั้นใช้ `wsl -d Ubuntu -- docker` (ตั้งเองได้ด้วย E2E_DOCKER)
 
 สมมติฐานของคลิป big1_pickup_cutted.mp4 (13 วินาที วนซ้ำเมื่อจบ):
@@ -34,6 +34,8 @@ PYTHON = sys.executable
 CONTAINER = "vendingcam-redis-test"
 PORT = 6380
 IMAGE = "redis:7-alpine"
+# โฟลเดอร์ชั่วคราวอยู่ในโปรเจค (.e2e_tmp/ — อยู่ใน .gitignore) ไม่ใช้ Temp ของ Windows
+TMP_BASE = os.path.join(REPO, ".e2e_tmp")
 FIRST_FRAME_RE = re.compile(r"FIRST_FRAME t=(\d+\.\d+)")
 
 
@@ -364,21 +366,47 @@ def sc7(r, m, wd, rep):
               f"S0 {s0s(r)}, ยอด {count(wd)} ({when})", s0s(r) == 0)
 
 
-SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7}
+def sc8(r, m, wd, rep):
+    # ซื้อต่อกัน: ลูกค้าหยิบของ (@7s) นอกรอบ แล้ว START ถัดไปมาทันที — รอบ 2 ไม่มีของตกใหม่
+    m.wait_clip(1.0, loop=1)
+    push(r, "START")
+    wait_s0(r, 1, timeout=8)
+    m.wait_clip(5.0, loop=1)
+    push(r, "STOP")
+    m.poll_log()
+    mark = len(m.lines)
+    m.wait_clip(9.0, loop=1)
+    push(r, "START")
+    m.wait_clip(12.0, loop=1)
+    push(r, "STOP")
+    time.sleep(0.5)
+    m.poll_log()
+    keys = ("FROZEN", "UNFROZEN", "เฝ้าดู", "เปิดรอบ", "ปิดรอบ", "ANOMALY", "ยืนยันสินค้า")
+    for line in m.lines[mark:]:
+        if any(k in line for k in keys):
+            rep.note(f"[8] {line.strip()}")
+    rep.check(8, "START@1→S0→STOP@5 → หยิบ @7 นอกรอบ → START@9 → STOP@12", "S0 1, ยอด 1",
+              f"S0 {s0s(r)}, ยอด {count(wd)}", s0s(r) == 1 and count(wd) == 1)
+    rep.check(8, "outcome ของ 2 รอบ", "CONFIRMED,UNCONFIRMED", ",".join(outcomes(wd)),
+              outcomes(wd) == ["CONFIRMED", "UNCONFIRMED"])
+
+
+SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7, "8": sc8}
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # console Windows (cp1252) พิมพ์ไทยไม่ได้
     ap = argparse.ArgumentParser()
     ap.add_argument("--clip", default=os.environ.get("E2E_CLIP"), required=not os.environ.get("E2E_CLIP"))
-    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7")
+    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,8")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
     args = ap.parse_args()
     if not os.path.isfile(args.clip):
         raise SystemExit(f"❌ ไม่พบคลิป {args.clip}")
 
     rep = Report()
-    root = tempfile.mkdtemp(prefix="vendingcam_e2e_")
+    os.makedirs(TMP_BASE, exist_ok=True)
+    root = tempfile.mkdtemp(prefix="vendingcam_e2e_", dir=TMP_BASE)
     print(f"📁 โฟลเดอร์ชั่วคราว: {root}")
     r = redis_up()
     try:
@@ -392,10 +420,11 @@ def main():
             m.start()
             try:
                 SCENARIOS[sc](r, m, wd, rep)
-                used = len(m.grep("ใช้ clean_bg (อายุ"))
-                fallback = len(m.grep("fallback: ไม่มี clean_bg"))
-                rep.note(f"[{sc}] freeze ใช้ clean_bg {used} ครั้ง / fallback {fallback} ครั้ง; "
-                         f"anomaly={anomaly_kinds(wd)}")
+                starts = []
+                for line in m.grep("FROZEN [START"):
+                    age = re.search(r"อายุ (\d+\.\d+)s", line)
+                    starts.append(f"clean_bg {age.group(1)}s" if age else "เฟรมปัจจุบัน")
+                rep.note(f"[{sc}] พื้นหลังของแต่ละ START: {starts or '-'}; anomaly={anomaly_kinds(wd)}")
                 ff = m.first_frames
                 if len(ff) >= 2:
                     rep.note(f"[{sc}] คาบการวนคลิปที่วัดได้ {ff[1] - ff[0]:.2f}s (คลิป 13.0s + reconnect)")
