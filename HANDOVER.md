@@ -203,7 +203,8 @@ cloud เป็นส่วนเสริม — START/STOP/S0 ไม่รอ�
 |---|---|---|
 | `CLOUD_ENABLED` | 0 | สวิตช์หลัก: 0 = ไม่มี HTTP เลย; 1 = เปิดตามสวิตช์ย่อย + register ตู้ (ต้องตั้ง `CLOUD_API_URL` ไม่งั้นถือว่าปิด) |
 | `CLOUD_ROI_SYNC` | 1 | ดึง ROI จากเว็บทุก `ROI_POLL_INTERVAL` + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่มถ้าเว็บยังไม่มี |
-| `SEND_INTERVAL` | 1 | ภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด) |
+| `SEND_INTERVAL` | 60 | ภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด) |
+| `REALTIME_JPEG_QUALITY` | 80 | คุณภาพ JPEG ของภาพสดเท่านั้น — ขนาดคง 640x480 (เว็บใช้วาด ROI), ภาพหลักฐานไม่เกี่ยว; q80 ≈ 45KB/ภาพ (q95 เดิม ≈ 94KB) → ทุก 60s ≈ 65MB/วัน |
 | `CLOUD_SEND_EVENTS` | 1 | ส่ง event `ITEM_LANDED` + ภาพตอนยืนยันสินค้า |
 | `CLOUD_SEND_ANOMALY` | 0 | เตรียมไว้ ยังไม่ส่งจริง (ยังไม่รู้ว่าเว็บรับ event ชนิดใหม่ได้ไหม) |
 

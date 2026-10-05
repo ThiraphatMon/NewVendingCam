@@ -1,7 +1,7 @@
 import requests
 import os
 import cv2
-from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH
+from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH, REALTIME_JPEG_QUALITY
 import json
 from utils.json_file import read_json, write_json_atomic
 from utils.logger import get_logger, LogThrottle
@@ -154,8 +154,10 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
 # ─────────────────────────────────────────────
 # ภาพ realtime สำหรับ dashboard (เดิมอยู่ใน api/sent_frame.py)
 # ─────────────────────────────────────────────
-def send_frame(machine_id, frame):
-    success, buffer = cv2.imencode(".jpg", frame)
+def send_frame(machine_id, frame, quality=None):
+    """ส่งภาพสดขนาดเดิม (640x480 — เว็บใช้วาด ROI) ที่คุณภาพ REALTIME_JPEG_QUALITY (เฉพาะภาพสด)"""
+    q = REALTIME_JPEG_QUALITY if quality is None else quality
+    success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, int(q)])
 
     if not success:
         logger.warning("⚠️ Failed to encode realtime frame")

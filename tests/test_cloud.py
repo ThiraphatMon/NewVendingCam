@@ -4,12 +4,15 @@ import json
 import threading
 import time
 
+import cv2
+import numpy as np
 import pytest
 
+import api.client
 import api.cloud
 import config
 from api.cloud import CloudServices
-from conftest import FPS, empty_frame, run_frames
+from conftest import FPS, empty_frame, multipart_fields, run_frames
 
 LOCAL_ROI = {"frame": {"width": 640, "height": 480}, "roi_type": "rect",
              "rect": {"x": 100, "y": 100, "w": 400, "h": 300}}
@@ -76,7 +79,7 @@ def test_feature_switches_map_to_features(cloud_cfg):
 def test_summary_lists_each_feature(cloud_cfg):
     cloud_cfg(CLOUD_SEND_EVENTS=False, SEND_INTERVAL=300.0)
     s = config.cloud_summary()
-    assert "register=เปิด" in s and "ROI sync=เปิด" in s and "ภาพสด=เปิด (ทุก 300s)" in s
+    assert "register=เปิด" in s and "ROI sync=เปิด" in s and "ภาพสด=เปิด (ทุก 300s q80)" in s
     assert "ITEM_LANDED=ปิด" in s and "anomaly=ปิด" in s
 
 
@@ -135,3 +138,38 @@ def test_realtime_sends_first_frame_then_every_interval(make_app, env, cloud_stu
     time.sleep(0.3)
     sent = [p for p in cloud_stub.paths("POST") if p == "/api/machines/VENDING_01/realtime-image"]
     assert 1 <= len(sent) <= 3  # sender ถือเฉพาะเฟรมล่าสุด (ส่งไม่ทันถูกทับ ไม่ต่อคิว)
+
+
+# ── ภาพสด: คุณภาพ JPEG เฉพาะภาพสด ขนาดคง 640x480 ─────────────────────────────
+def _textured_frame():
+    rng = np.random.default_rng(0)
+    f = np.full((480, 640, 3), 90, np.uint8)
+    f[100:400, 100:500] = rng.integers(0, 255, (300, 400, 3), dtype=np.uint8)
+    return f
+
+
+def test_realtime_frame_full_size_at_realtime_quality(cloud_stub, monkeypatch):
+    monkeypatch.setattr(api.client, "REALTIME_JPEG_QUALITY", 80)
+    frame = _textured_frame()
+    before = frame.copy()
+    assert api.client.send_frame("VENDING_01", frame) is True
+    req = cloud_stub.wait_for(lambda r: r.path == "/api/machines/VENDING_01/realtime-image")
+    _, files = multipart_fields(req)
+    jpg = files["image"]
+    assert cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR).shape == (480, 640, 3)  # ไม่ย่อ
+    assert len(jpg) == len(cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])[1])
+    assert len(jpg) < len(cv2.imencode(".jpg", frame)[1])  # เล็กกว่า q95 เดิม
+    assert np.array_equal(frame, before)
+
+
+def test_realtime_quality_does_not_change_evidence_image(tmp_path, monkeypatch):
+    """ภาพหลักฐานยังบันทึกแบบเดิม (cv2.imwrite ค่า default) ไม่ใช้ REALTIME_JPEG_QUALITY"""
+    from utils import image_saver
+
+    monkeypatch.setattr(api.client, "REALTIME_JPEG_QUALITY", 10)
+    calls = []
+    real = image_saver.cv2.imwrite
+    monkeypatch.setattr(image_saver.cv2, "imwrite", lambda p, img, *a: calls.append(a) or real(p, img, *a))
+    path = image_saver.save_evidence(_textured_frame(), image_saver.CONFIRMED, "CONFIRMED", "c" * 32,
+                                     base_dir=str(tmp_path))
+    assert path and calls == [()]

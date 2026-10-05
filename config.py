@@ -223,8 +223,13 @@ SCENE_HISTORY_SIZE = _int("SCENE_HISTORY_SIZE", 10)
 # หมวด 5 — ระบบและการดูแลเครื่อง
 # ═════════════════════════════════════════════════════════════════════════════
 
-# ส่งภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด)
-SEND_INTERVAL = _float("SEND_INTERVAL", 1)
+# ส่งภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด) — ภาพ 640x480 ~45KB/ภาพที่ q80 (ทุก 1 วิ ≈ 3.9GB/วัน, ทุก 60 วิ ≈ 65MB/วัน)
+SEND_INTERVAL = _float("SEND_INTERVAL", 60)
+# คุณภาพ JPEG ของภาพสดเท่านั้น (1-100) — ไม่ย่อขนาด (เว็บใช้ภาพ 640x480 วาด ROI) ไม่กระทบภาพหลักฐาน
+#   ↓ ประหยัดเน็ต (q60 ≈ 30KB) | ↑ ภาพชัด (q95 ≈ 94KB)
+REALTIME_JPEG_QUALITY = _int("REALTIME_JPEG_QUALITY", 80)
+if not 1 <= REALTIME_JPEG_QUALITY <= 100:
+    raise SystemExit(f"❌ .env: REALTIME_JPEG_QUALITY={REALTIME_JPEG_QUALITY} ต้องอยู่ระหว่าง 1-100")
 
 # ดึง ROI จาก server ทุกกี่วินาที / เช็คไฟล์ ROI ในเครื่องว่าเปลี่ยนไหมทุกกี่วินาที
 ROI_POLL_INTERVAL = _float("ROI_POLL_INTERVAL", 10)
@@ -284,7 +289,7 @@ _ORDER_ONLY_KEYS = (
 # มีผลเฉพาะ CLOUD_ENABLED=1
 _CLOUD_ONLY_KEYS = (
     "CLOUD_API_URL", "API_KEY", "CLOUD_ROI_SYNC", "CLOUD_SEND_EVENTS", "CLOUD_SEND_ANOMALY",
-    "SEND_INTERVAL", "ROI_POLL_INTERVAL", "RETRY_INTERVAL",
+    "SEND_INTERVAL", "REALTIME_JPEG_QUALITY", "ROI_POLL_INTERVAL", "RETRY_INTERVAL",
 )
 
 
@@ -315,7 +320,7 @@ def cloud_summary(features=None):
         "☁️ Cloud: "
         f"register={onoff('register')}, "
         f"ROI sync={onoff('roi_sync', f' (ทุก {ROI_POLL_INTERVAL:g}s)')}, "
-        f"ภาพสด={onoff('realtime', f' (ทุก {SEND_INTERVAL:g}s)')}, "
+        f"ภาพสด={onoff('realtime', f' (ทุก {SEND_INTERVAL:g}s q{REALTIME_JPEG_QUALITY})')}, "
         f"ITEM_LANDED={onoff('events')}, "
         f"anomaly={'เปิด (ยังไม่ส่งจริง)' if f['anomaly'] else 'ปิด'}"
     )
