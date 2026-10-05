@@ -264,7 +264,7 @@ python tests/integration/redis_e2e.py --clip <big1_pickup_cutted.mp4>   # main.p
 
 1. **หยุดโปรแกรมกล้องตัวเก่าก่อนเสมอ** (ตัวที่ `RPOP CTRL`) — สองตัวพร้อมกันจะแย่งคำสั่งกัน
    ตรวจ: `redis-cli MONITOR` ต้องเห็น `RPOP CTRL` จาก client เดียว
-2. ลง source ด้วย git (ครั้งแรก `git clone <repo-url> ~/MotionDetectionForVendingMachine`) แล้วเตรียม `.env` (หมวด 1)
+2. ลง source ด้วย git (ครั้งแรก `git clone https://github.com/ThiraphatMon/NewVendingCam.git ~/MotionDetectionForVendingMachine`) แล้วเตรียม `.env` (หมวด 1)
    และ `data/roi_config.json` ของตู้นี้ (ไม่มี → โปรแกรม copy จาก `roi_config.example.json` ให้ แล้วรอ ROI จากเว็บ / แก้เอง)
    `.env`, `data/roi_config.json`, `data/*.sqlite3`, `evidence_images/`, `logs/` อยู่ใน `.gitignore` — git ไม่แตะ
 3. `docker compose up -d --build` → `docker compose logs -f vending-cam` ดู `Active config`, `เชื่อม Redis สำเร็จ`

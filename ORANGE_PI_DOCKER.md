@@ -53,7 +53,7 @@ sudo usermod -aG docker "$USER"     # แล้ว logout/login ใหม่
 
 ```bash
 sudo apt install -y git
-git clone <repo-url> ~/MotionDetectionForVendingMachine
+git clone https://github.com/ThiraphatMon/NewVendingCam.git ~/MotionDetectionForVendingMachine
 cd ~/MotionDetectionForVendingMachine
 cp .envexample .env
 nano .env                         # หมวด 1: MACHINE_ID_DEFAULT, CAMERA_INDEX, REDIS_* ให้ตรงกับ controller
