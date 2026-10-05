@@ -1,15 +1,20 @@
 # AUTORUN_REPORT — ความคืบหน้างานต่อเนื่อง (branch `auto/round1-finish`)
 
 > คำสั่งหลัก: `docs/AUTORUN_TASK.md` | review: `git log main..auto/round1-finish`
-> **สถานะ: ครบทุกขั้น S0–S7 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
+> **สถานะ: ครบทุกขั้น S0–S13 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
 
-## สรุปผลล่าสุด (S7 — `CAPTURE_HOLD_SEC` default 1.5 → 1.0)
-- pytest: **133 passed**
-- redis_e2e: **ผ่านทุกข้อ** 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c
-- START→S0: ข้อ 1 = 3.03s, ข้อ 3 = 3.03s / 3.04s (S6 ที่ hold 1.5s: 3.51s / 3.55s, 3.53s — เร็วขึ้น ~0.5s ตาม hold ที่ลดลง)
-- Docker smoke (ผลจาก S6 ที่ hold 1.5s — S7 ไม่ได้รันซ้ำ) (image ใหม่ล่าสุด, `--network host`, Redis ทดสอบ 6380): START→S0 3.55s → PASS
-- ลบ `.e2e_tmp/`, container ทดสอบ `vendingcam-redis-test` / `vendingcam-docker-smoke` และ image `vending-cam:autorun-test` แล้ว
-  (container ของโปรเจคอื่น `wvts-*` ไม่ถูกแตะ)
+## สรุปผลล่าสุด (S9–S13 — cloud/เว็บ)
+- pytest: **166 passed** (+32 ใน `tests/test_cloud.py`, `tests/test_roi_sync.py` — cloud ทดสอบกับ stub HTTP ในเครื่อง ไม่ยิง server จริง)
+- redis_e2e: **ผ่านทุกข้อ** 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c ทุกขั้น S9–S13 (e2e รันด้วย `CLOUD_ENABLED=0`)
+- START→S0 (S13): ข้อ 1 = 3.05s, ข้อ 3 = 3.05s / 3.26s
+  (ข้อ 3 รอบสอง 3.01–3.26s แกว่งตามรอบ — รันซ้ำที่ S13 ได้ 3.22s, 3.01s / ที่ S10 ได้ 3.04s, 3.05s: ไม่ใช่ช้าลงถาวร
+  รอบสองของข้อ 3 START ใช้เฟรมปัจจุบันเป็นพื้นหลังจึงแกว่งได้)
+- ทดสอบ main.py จริง + Redis ทดสอบ + stub HTTP (`CLOUD_ENABLED=1`, ROI_POLL/CHECK 0.5s, RETRY_INTERVAL 4s) 4 รอบ:
+  ปกติ / เว็บเปลี่ยน ROI ระหว่าง ACTIVE / server ค้าง / server ปิด → S0 ทุกรอบ 3.03–3.05s, ยอด 4, CONFIRMED ×4;
+  ITEM_LANDED ส่งหลัง S0 ทันที (field ครบ + landed_image ~106KB), 2 รายการที่ค้างตอน server ค้าง/ปิด ส่งครบ 1.5s หลัง server กลับ;
+  ROI ใหม่ log "รอใช้" แล้วใช้ตอน STOP; ภาพ confirmed ในเครื่องครบ 4 ภาพ
+- บูตตอน server ปิด 12s: register / push ROI ลองใหม่ 5s → 10s แล้วสำเร็จเอง 7.8s หลัง server เปิด
+- Docker smoke: ไม่ได้รันซ้ำตั้งแต่ S6 (S9–S13 ไม่แตะ Dockerfile/compose)
 
 ## สถานะแต่ละขั้น
 
@@ -23,7 +28,12 @@
 | S5 กล้องค้าง | ✅ เสร็จ | `4665040` | 133 passed | ✅ / ✅ | 3.54s / 3.55s, 3.55s |
 | S6 สรุป | ✅ เสร็จ | `552649e` | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) + Docker smoke PASS | 3.51s / 3.55s, 3.53s |
 | S7 CAPTURE_HOLD_SEC 1.0 | ✅ เสร็จ | `b59c9bb` | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) | 3.03s / 3.03s, 3.04s |
-| S8 log การตัดสิน S3 ระดับ INFO | ✅ เสร็จ | autorun S8 | 134 passed | (ไม่ได้รัน — เปลี่ยนแค่ log) | - |
+| S8 log การตัดสิน S3 ระดับ INFO | ✅ เสร็จ | `d42d2fa` | 134 passed | (ไม่ได้รัน — เปลี่ยนแค่ log) | - |
+| S9 สวิตช์ cloud ทีละฟีเจอร์ | ✅ เสร็จ | `3456861` | 144 passed | ✅ ทุกข้อ | 3.05s / 3.05s, 3.01s |
+| S10 ภาพสด 60s q80 | ✅ เสร็จ | `cdb87d4` | 146 passed | ✅ ทุกข้อ | 3.06s / 3.04s, 3.02s |
+| S11 ITEM_LANDED ผ่าน outbox | ✅ เสร็จ | `59d464d` | 157 passed | ✅ ทุกข้อ | 3.02s / 3.04s, 3.24s |
+| S12 ROI จากเว็บรอใช้ตอนจบรอบ | ✅ เสร็จ | `81e3d04` | 161 passed | ✅ ทุกข้อ | 3.01s / 3.05s, 3.25s |
+| S13 register / push ROI backoff | ✅ เสร็จ | `5a3d7d2` | 166 passed | ✅ ทุกข้อ | 3.05s / 3.05s, 3.26s |
 
 ## รายละเอียดผลทดสอบ
 
@@ -132,6 +142,57 @@
   ตัวอย่าง: `🔍 รอบ 8e53bc04: S3=ADDITION candidate เป็นของใส่เข้า (ขอบ ×1.13, ต่างจากพื้นหลังรอบ 46.8, ต่างจากฉากก่อนหน้า 47.3 | เกณฑ์: ขอบ < 0.60 = ขอบลด, ฉากก่อนหน้า < 23.4 (พื้นหลังรอบ ×0.50) = ตรง) → ยืนยัน`
 - pytest 134 passed (+1 `test_addition_verdict_logged_at_info_with_threshold`)
 
+### S9 — สวิตช์ cloud ทีละฟีเจอร์
+- config: `CLOUD_ENABLED` เป็นสวิตช์หลัก (0 = ไม่มี HTTP เลย; 1 แต่ไม่มี `CLOUD_API_URL` = ปิดทั้งหมด),
+  ใหม่ `CLOUD_ROI_SYNC`=1, `CLOUD_SEND_EVENTS`=1, `CLOUD_SEND_ANOMALY`=0 (เตรียมไว้ ยังไม่ส่ง), ภาพสดเปิด/ปิดด้วย `SEND_INTERVAL` (0 = ปิด)
+  — `config.cloud_features()` / `cloud_summary()`; register ตู้ทำเสมอเมื่อเปิด cloud
+- ใหม่ `api/cloud.py` `CloudServices`: เริ่มเฉพาะ thread ของฟีเจอร์ที่เปิด, ทุก thread หยุดได้ (`stop()` ตอนปิดโปรแกรม)
+  ภาพสดย้ายจาก global ใน `client.py` มาเป็นของ CloudServices (main loop แค่ฝากเฟรม)
+- startup log 1 บรรทัด: `☁️ Cloud: register=เปิด, ROI sync=เปิด (ทุก 10s), ภาพสด=เปิด (ทุก 60s q80), ITEM_LANDED=เปิด, anomaly=ปิด`
+- `.envexample` / HANDOVER 7.1: ตารางสวิตช์ + โปรไฟล์ "ช่วงทดสอบ" (`CLOUD_SEND_EVENTS=1`, `SEND_INTERVAL=60`) /
+  "ขายจริง" (`CLOUD_SEND_EVENTS=0`, `CLOUD_ROI_SYNC=1`, `SEND_INTERVAL=300`) + วิธีเปลี่ยนบนตู้
+  (แก้ `.env` → `docker compose up -d --force-recreate` → `docker compose logs vending-cam | grep "Cloud:"`)
+- tests: `tests/test_cloud.py` + fixture `cloud_stub` (stub HTTP 127.0.0.1 port สุ่ม) ใน conftest — ปิดแล้วไม่มี thread/HTTP,
+  ปิดเฉพาะ ROI sync ไม่มี request `/roi`, stop แล้วไม่ยิงต่อ, ภาพสดเฟรมแรกทันทีแล้วตาม interval
+
+### S10 — ภาพสด
+- `SEND_INTERVAL` default 1 → **60**; ใหม่ `REALTIME_JPEG_QUALITY`=80 (1–100) ใช้เฉพาะ `send_frame()` — **ไม่ย่อขนาด** (640x480)
+  ภาพหลักฐานยังบันทึกด้วย `cv2.imwrite` ค่าเดิม (มี test ยืนยัน)
+- ขนาดจากคลิปทดสอบ: q95 เดิม ≈ 94KB/ภาพ → q80 ≈ 45KB → ทุก 60s ≈ 65MB/วัน, ทุก 300s ≈ 13MB/วัน (เดิมทุก 1s ≈ 8.3GB/วัน)
+- test ที่เปลี่ยน: `test_summary_lists_each_feature` (เขียนใน S9) — ข้อความสรุปมี `q80` เพิ่ม (เปลี่ยนรูปแบบ log โดยตั้งใจ)
+
+### S11 — ITEM_LANDED ผ่าน outbox
+- ตาราง `cloud_outbox` (event_id UNIQUE, cycle_id, event, payload JSON, image_path, state PENDING/SENT, attempts, last_error,
+  next_attempt_at, created/updated) สร้างด้วย `CREATE TABLE IF NOT EXISTS` ตอนเปิด DB **ไม่ bump user_version**
+  → DB เดิมใช้ต่อได้ และ rollback image รุ่นก่อนยังเปิด DB ได้
+- main: ยืนยัน → S0 → daily log → `_queue_item_landed()` เขียน outbox **transaction แยก** (ล้มเหลวแค่ log, ไม่ย้อนยอด/S0) → ปลุก worker
+- worker `cloud-outbox` (connection ของตัวเอง, `mode=rw` ไม่สร้าง DB เอง): 2xx → SENT; ไม่สำเร็จ → PENDING + backoff 5s, 10s, 20s ...
+  สูงสุด `RETRY_INTERVAL` (ใช้ wall clock เก็บใน DB → ข้าม restart ได้); ปิด `CLOUD_SEND_EVENTS` → ไม่เริ่ม worker รายการค้างหยุดส่ง ไม่ลบ
+  (startup log จำนวนที่ค้าง)
+- field ที่เว็บเดิมรับ: `machine_id`, `event=ITEM_LANDED`, `transaction_id=TXN-<YYYYMMDD-HHMMSS ไทย>-<cycle8>`, `item_no`=daily_sequence,
+  `obj_id` (tracker id), `land_time` `%H:%M:%S` ไทย, `order_id=""` + ไฟล์ `landed_image` (ภาพ confirmed) — event_id = `ITEM_LANDED:<cycle_id>`
+- `client.send_event()` ใหม่ (ไม่ลบภาพ); `retry_queue` ไม่ถูกเริ่มอีก (เหลือไฟล์ไว้พร้อมคำเตือนห้ามใช้กับภาพหลักฐาน)
+- disk_cleanup: ภาพที่ยัง PENDING ใน outbox ไม่ลบแม้เก่าเกิน; อ่าน DB ไม่ได้ → ข้าม cleanup รอบนั้นทั้งรอบ
+- tests: field ครบ + ภาพตรงไฟล์ + ภาพยังอยู่, retry 500/503 แล้ว SENT, backoff/last_error, ปิด events ไม่มีแถว/HTTP,
+  ค้างข้าม restart + หยุดส่งตอนปิด, server ค้างไม่กระทบ S0/STOP และไม่มี HTTP บน main thread, DB เดิมได้ตารางใหม่โดย version ไม่เปลี่ยน,
+  cleanup เก็บภาพ PENDING, worker ไม่สร้าง DB เอง
+
+### S12 — ROI จากเว็บระหว่างรอบ
+- `ROIManager.reload_if_changed(allow_apply)`: main ส่ง `allow_apply = (state == WAIT_START)` — ไฟล์ ROI เปลี่ยนระหว่างรอบ
+  → log `🕒 พบ ROI ใหม่ระหว่างรอบ → รอใช้ตอนจบรอบ` ครั้งเดียว → ใช้ทันทีเมื่อกลับ WAIT_START (ไม่รอรอบเช็คถัดไป)
+- ใช้ ROI ใหม่ → `_on_roi_changed()`: จบ watch (ถ้ามี), ล้าง tracker, `bg.forget_roi_history()` (clean_bg, นับความนิ่ง, scene history)
+  — log `🗺️ ใช้ ROI ใหม่ (...) → ล้าง ...`; ไฟล์ ROI เสีย → ใช้ ROI เดิมต่อและไม่ล้างอะไร
+- tests `tests/test_roi_sync.py`: ACTIVE รอใช้ (log ครั้งเดียว) แล้วใช้หลัง STOP / CONFIRMED_WAIT_STOP รอใช้และการยืนยันไม่กระทบ /
+  WAIT_START ใช้ทันที + ล้าง watch/clean_bg/scene/tracker / ไฟล์เสียไม่ล้าง
+
+### S13 — register / push ROI ตอนเริ่ม
+- `register_machine()` / `push_default_roi()` คืนผลสำเร็จ; `CloudServices._retry_until_ok()` ลองใหม่ backoff 5s, 10s, ... สูงสุด
+  `RETRY_INTERVAL` จนสำเร็จ (หยุดได้ด้วย stop)
+- `push_default_roi` เดิมถาม ROI ไม่สำเร็จ (ไม่ใช่ 200) แล้ว PUT ROI ในเครื่องทับทันที → เปลี่ยนเป็นถือว่าล้มเหลวแล้วลองใหม่
+  (กันทับ ROI ที่เว็บมีอยู่แล้วตอนเว็บ error ชั่วคราว)
+- tests: register 500/502 แล้วสำเร็จ thread จบ / เว็บ 503 ต่อเนื่องไม่ busy-loop (2–8 ครั้งใน 0.6s ที่ backoff 0.05–0.2s) /
+  push ไม่ PUT ตอนถามไม่สำเร็จ / เว็บมี ROI แล้วไม่ PUT / stop ตัดการรอ backoff
+
 ### S7
 - ผู้ใช้ทดสอบกับของจริงแล้ว → default `CAPTURE_HOLD_SEC` 1.5 → **1.0** (`config.py`, `.envexample`, `HANDOVER.md`)
 - pytest 133 passed โดยไม่ต้องแก้ test (ไม่มี test อิงค่า 1.5 ตรง ๆ ที่ fail; แก้แค่คอมเมนต์ใน `tests/conftest.py`)
@@ -156,6 +217,13 @@
 - S4: `core/tracker.py`, `config.py`, `.envexample`, `tests/test_tracker.py` (ใหม่)
 - S5: `core/frame_source.py`, `main.py`, `config.py`, `.envexample`, `tests/conftest.py`, `tests/test_frame_source.py` (ใหม่)
 - S6: `HANDOVER.md`, `docs/AUTORUN_REPORT.md`
+- S7: `config.py`, `.envexample`, `HANDOVER.md`, `tests/conftest.py` (คอมเมนต์) / S8: `main.py`, `tests/test_removal.py`
+- S9: `config.py`, `api/cloud.py` (ใหม่), `api/client.py`, `main.py`, `.envexample`, `HANDOVER.md`, `tests/conftest.py`, `tests/test_cloud.py` (ใหม่)
+- S10: `config.py`, `api/client.py`, `.envexample`, `HANDOVER.md`, `tests/test_cloud.py`
+- S11: `utils/state_store.py`, `utils/disk_cleanup.py`, `api/cloud.py`, `api/client.py`, `api/retry_queue.py` (คำเตือน), `main.py`,
+  `config.py`, `.envexample`, `HANDOVER.md`, `tests/test_cloud.py`
+- S12: `core/roi.py`, `core/background.py`, `main.py`, `HANDOVER.md`, `tests/test_roi_sync.py` (ใหม่)
+- S13: `api/client.py`, `api/cloud.py`, `config.py`, `HANDOVER.md`, `tests/test_cloud.py`
 
 รวม: `git diff --stat main..auto/round1-finish`
 
@@ -164,10 +232,20 @@
   `test_start_during_watch_while_item_falling_is_confirmed` (ของกำลังตกตอน START ยังนับได้) และ
   `test_start_during_watch_uses_latest_still_scene_not_watch_freeze` (ของนิ่งก่อน START ≥5 เฟรมไม่นับ — เหมือนตัวเก่า,
   ผู้ใช้อนุมัติแล้ว)
-- S1–S5: ไม่มี test เดิมถูกลบหรือเปลี่ยนความหมาย — เพิ่มอย่างเดียว (100 → 133)
+- S1–S13: ไม่มี test เดิมถูกลบหรือเปลี่ยนความหมาย — เพิ่มอย่างเดียว (100 → 166)
+  (S10 แก้ข้อความที่คาดใน `test_summary_lists_each_feature` ซึ่งเพิ่งเขียนใน S9 เพราะ log สรุปมีคุณภาพ JPEG เพิ่ม)
   ข้อยกเว้นเล็ก: S5 ลบ `FakeSource.pace()` ใน conftest (main ไม่เรียกแล้ว) และให้ `FakeSource.read()` คืน `NO_NEW_FRAME` ได้
 
 ## คำถามรอผู้ใช้ (ประเภท A — ทำต่อไปแล้วด้วยทางที่ปลอดภัย)
+- S11: เขียน outbox **หลัง** S0 ใน transaction แยก (ตามโจทย์ "ห้ามกระทบ S0") — ถ้าไฟดับในช่วงไม่กี่ ms ระหว่างยืนยันกับเขียน outbox
+  event ของชิ้นนั้นจะไม่ถูกส่ง (ยอด/S0/ภาพอยู่ครบ) ทางอื่น: เขียนใน transaction เดียวกับการยืนยัน (ไม่หาย แต่ outbox error = ไม่มี S0)
+- S11: `RETRY_INTERVAL` (60) เปลี่ยนความหมายเป็น "รอสูงสุดของ backoff" ใช้ร่วมกับ register/push ROI; BASE 5s เป็นค่าคงที่ใน `api/cloud.py`
+- S11: ส่งไม่สำเร็จลองใหม่ไปเรื่อย ๆ ไม่มีจำนวนครั้งสูงสุด (เว็บตอบ 4xx ถาวรก็ลองทุก RETRY_INTERVAL) และภาพของรายการ PENDING ไม่ถูก cleanup
+  → ถ้าเว็บปฏิเสธนาน ๆ ภาพสะสม (log `เก็บภาพเก่า ... รอส่งขึ้นเว็บ`) ทางอื่น: จำกัดอายุ/จำนวนครั้งแล้วเปลี่ยนเป็นสถานะ GAVE_UP
+- S11: ปิด `CLOUD_SEND_EVENTS` ภายหลัง → รายการค้างอยู่ใน DB ตลอด และภาพของรายการนั้นถูกกันไม่ให้ cleanup ด้วย (ตามโจทย์ "หยุดส่ง ไม่ลบ")
+- S11: ภาพหลักฐานหายไปก่อนส่ง (เช่นลบมือ) → ส่ง event โดยไม่มี `landed_image` + log warning (ไม่รู้ว่าเว็บรับได้ไหม)
+- S12: ใช้ ROI ใหม่แล้ว START ถัดไปต้องรอถาดนิ่งใน ROI ใหม่ 5 เฟรม (~0.2s) ก่อนมี clean_bg — ถ้า START มาทันทีจะใช้เฟรมปัจจุบัน
+- S9: `CLOUD_SEND_ANOMALY=1` ตอนนี้แค่แสดงใน log สรุป ยังไม่ส่งอะไร (รอยืนยันว่าเว็บรับ event ชนิดใหม่ได้)
 - S1: ตั้งพื้นหลังใหม่หลัง env change สงบ ใช้ CLEAN_BG_STABLE_FRAMES (5 เฟรม ≈ 0.17s) ร่วมกัน ไม่แยกค่า
   ทางอื่น: แยกค่า ENV_SETTLE_FRAMES ให้นานกว่า (เช่น 15) → กันการตั้งใหม่ตอน slat ค้างกลางทางได้ดีขึ้น แต่ถาดต้องนิ่งนานขึ้นก่อนเห็นของ
 - S5: `CAMERA_STALL_SEC`=3s (กล้อง USB สะดุดสั้น ๆ ไม่ถือว่าค้าง) — ทางอื่น: 1–2s จับกล้องค้างไวขึ้น
@@ -215,16 +293,15 @@
 
 ## วิธี review / merge
 ```bash
-git log --oneline main..auto/round1-finish      # 7 commit: autorun S0–S6
+git log --oneline main..auto/round1-finish      # 15 commit: autorun S0–S13 + report
 git diff --stat main..auto/round1-finish
 git diff main..auto/round1-finish -- core/ main.py config.py   # โค้ดหลัก
 # ทดสอบซ้ำ
 .venv\Scripts\python.exe -m pytest -q
-.venv\Scripts\python.exe tests\integration
-edis_e2e.py --clip <big1_pickup_cutted.mp4>
+.venv\Scripts\python.exe tests\integration\redis_e2e.py --clip <big1_pickup_cutted.mp4>
 # merge เมื่อพอใจ (ผู้ใช้ทำเอง — autorun ไม่ merge / push)
 git checkout main && git merge --no-ff auto/round1-finish
 ```
 แนะนำ review ทีละ commit (แต่ละขั้นผ่านประตูทดสอบของตัวเองก่อน commit) — ถ้าไม่ต้องการขั้นไหน revert เฉพาะ commit นั้นได้
 (S4 / S5 แยกจาก S3 ได้; S3 ใช้ scene history ใน background.py; S1 ปิดได้ด้วย `ENV_SETTLE_REBASELINE=0`,
-S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0` โดยไม่ต้อง revert)
+S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud ทั้งหมดด้วย `CLOUD_ENABLED=0` หรือทีละฟีเจอร์ (HANDOVER 7.1) โดยไม่ต้อง revert)
