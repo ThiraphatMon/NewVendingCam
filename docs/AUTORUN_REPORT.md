@@ -1,13 +1,13 @@
 # AUTORUN_REPORT — ความคืบหน้างานต่อเนื่อง (branch `auto/round1-finish`)
 
 > คำสั่งหลัก: `docs/AUTORUN_TASK.md` | review: `git log main..auto/round1-finish`
-> **สถานะ: ครบทุกขั้น S0–S6 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
+> **สถานะ: ครบทุกขั้น S0–S7 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
 
-## สรุปผลล่าสุด (S6)
+## สรุปผลล่าสุด (S7 — `CAPTURE_HOLD_SEC` default 1.5 → 1.0)
 - pytest: **133 passed**
-- redis_e2e: **ผ่านทุกข้อ** 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c (ข้อ 7 ที่เดิม known limitation ผ่านแล้ว)
-- START→S0: ข้อ 1 = 3.51s, ข้อ 3 = 3.55s / 3.53s (baseline ก่อนเริ่ม ~3.40s; +0.11–0.15s มาจาก STRICT_STABILITY ใน S4 — อยู่ในเกณฑ์ 0.3s)
-- Docker smoke (image ใหม่ล่าสุด, `--network host`, Redis ทดสอบ 6380): START→S0 3.55s → PASS
+- redis_e2e: **ผ่านทุกข้อ** 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c
+- START→S0: ข้อ 1 = 3.03s, ข้อ 3 = 3.03s / 3.04s (S6 ที่ hold 1.5s: 3.51s / 3.55s, 3.53s — เร็วขึ้น ~0.5s ตาม hold ที่ลดลง)
+- Docker smoke (ผลจาก S6 ที่ hold 1.5s — S7 ไม่ได้รันซ้ำ) (image ใหม่ล่าสุด, `--network host`, Redis ทดสอบ 6380): START→S0 3.55s → PASS
 - ลบ `.e2e_tmp/`, container ทดสอบ `vendingcam-redis-test` / `vendingcam-docker-smoke` และ image `vending-cam:autorun-test` แล้ว
   (container ของโปรเจคอื่น `wvts-*` ไม่ถูกแตะ)
 
@@ -21,7 +21,8 @@
 | S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | `4ccca22` | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
 | S4 ความนิ่งของ tracker | ✅ เสร็จ (default เปิด) | `215105d` | 126 passed (ทั้ง 2 โหมด) | ✅ ทั้ง 2 โหมด | ปิด 3.42s / 3.40s, 3.38s · เปิด 3.54s / 3.56s, 3.56s |
 | S5 กล้องค้าง | ✅ เสร็จ | `4665040` | 133 passed | ✅ / ✅ | 3.54s / 3.55s, 3.55s |
-| S6 สรุป | ✅ เสร็จ | autorun S6 | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) + Docker smoke PASS | 3.51s / 3.55s, 3.53s |
+| S6 สรุป | ✅ เสร็จ | `552649e` | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) + Docker smoke PASS | 3.51s / 3.55s, 3.53s |
+| S7 CAPTURE_HOLD_SEC 1.0 | ✅ เสร็จ | autorun S7 | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) | 3.03s / 3.03s, 3.04s |
 
 ## รายละเอียดผลทดสอบ
 
@@ -123,6 +124,14 @@
   แล้ว None + เปิดใหม่ได้เฟรม / หลุดแล้วกลับมา / ไฟล์วิดีโอเล่นตาม FPS / read() ไม่ block / main ประมวลผล STOP ระหว่าง
   ไม่มีเฟรมใหม่และไม่นับเฟรมซ้ำว่านิ่ง / กล้องค้างระหว่างรอบ → BLOCKED → STOP ปิด UNCERTAIN; รันซ้ำ 5 รอบไม่ flaky
 
+### S7
+- ผู้ใช้ทดสอบกับของจริงแล้ว → default `CAPTURE_HOLD_SEC` 1.5 → **1.0** (`config.py`, `.envexample`, `HANDOVER.md`)
+- pytest 133 passed โดยไม่ต้องแก้ test (ไม่มี test อิงค่า 1.5 ตรง ๆ ที่ fail; แก้แค่คอมเมนต์ใน `tests/conftest.py`)
+- e2e ทุกข้อผ่าน — ข้อ 4 S0 1.10s หลัง Redis กลับ; ข้อ 7 ไม่มี S0; 7b จับได้ว่าหยิบออก (ขอบ ×0.36) → POSSIBLE_REMOVAL
+- S3 กับของตกจริง: ทุกรอบที่ยืนยันใน e2e ถูกจัดเป็น "ใส่เข้า" ขอบ ×1.07–1.14 (เกณฑ์ 0.6)
+  เทียบรันข้อ 1, 3 ด้วย hold 1.5s: ×1.11–1.14 → hold ที่สั้นลงไม่ทำให้ขอบของของตกจริงลดลง
+  (ค่า ×1.52 ที่บันทึกใน S3 มาจากรอบที่พื้นหลังต่างกัน — ในรันเปรียบเทียบนี้ก็พบ ×1.52 ในรอบที่ 3 ของ hold 1.5s)
+
 ### S6
 - `HANDOVER.md`: เพิ่มหัวข้อ 4.3 แยกหยิบออก/ใส่เข้า, 4.4 ความนิ่งแบบเข้ม, 4.5 กล้อง (reader thread), anomaly POSSIBLE_REMOVAL,
   ค่า config ใหม่, e2e 7b + docker_smoke, known limitations ปรับตามจริง (ข้อ 7 ลดเป็น MED + ข้อจำกัดใหม่ของ S3/S5),
@@ -193,7 +202,7 @@
    ระดับ DEBUG ใน logs/vending.log: ถ้าค่าขอบของสินค้าจริงเข้าใกล้ 0.6 ต้องปรับ `REMOVAL_EDGE_RATIO`)
 7. **ถอดสาย USB กล้อง / กล้องค้าง** ระหว่างรอบ → รอบเป็น BLOCKED → STOP ปิดเป็น UNCERTAIN, กล้องกลับมาแล้วรอบถัดไปปกติ
    (เช็คว่าเปิด /dev/video0 ใหม่ได้ขณะ reader เก่ายังค้าง)
-8. **เวลา START→S0 จริง** (คลิป ~3.5s) และ CPU/RAM (`docker stats`) — scene history ใช้ RAM เพิ่ม ~3MB
+8. **เวลา START→S0 จริง** (คลิป ~3.0s ที่ hold 1.0s) และ CPU/RAM (`docker stats`) — scene history ใช้ RAM เพิ่ม ~3MB
 9. **แสงในตู้เปลี่ยนตามเวลา** (กลางวัน/กลางคืน) — log `baseline ไม่แน่นอน` ไม่ควรเกิดบ่อยตอนถาดนิ่ง
 
 ## วิธี review / merge

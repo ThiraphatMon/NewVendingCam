@@ -30,7 +30,7 @@ CLOUD_ENABLED=0
 # API_KEY=
 
 # ── หมวด 2: ความไวและความเร็วในการจับของ (จูนบ่อยที่สุด) ─────────────────────────
-# CAPTURE_HOLD_SEC=1.5
+# CAPTURE_HOLD_SEC=1.0
 # MOT_THRESH=25
 # MIN_AREA=150
 # MAX_BLOB_ROI_RATIO=0.30
