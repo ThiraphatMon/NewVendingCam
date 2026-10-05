@@ -10,7 +10,7 @@
 | S1 ปิดงาน D2 (ตั้งพื้นหลังใหม่หลัง env change สงบ) | ✅ เสร็จ | autorun S1 | 103 passed | ✅ (+8b, 8c) / ✅* | 3.41s / 3.41s, 3.42s |
 | S2 ขั้น E (พร้อมลง Orange Pi) | ✅ เสร็จ | autorun S2 | 107 passed | ✅ (+8b, 8c) / ✅ | 3.40s / 3.43s, 3.39s |
 | S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | autorun S3 | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
-| S4 ความนิ่งของ tracker | รอ | | | | |
+| S4 ความนิ่งของ tracker | ✅ เสร็จ (default เปิด) | autorun S4 | 126 passed (ทั้ง 2 โหมด) | ✅ ทั้ง 2 โหมด | ปิด 3.42s / 3.40s, 3.38s · เปิด 3.54s / 3.56s, 3.56s |
 | S5 กล้องค้าง | รอ | | | | |
 | S6 สรุป | รอ | | | | |
 
@@ -80,6 +80,24 @@
   `วัตถุนิ่งดูเหมือนหยิบออก (ขอบ ×0.40, ต่างจากพื้นหลังรอบ 77.9, ต่างจากฉากก่อนหน้า 11.9)` + anomaly POSSIBLE_REMOVAL
 - เวลา START→S0 ไม่เปลี่ยน (classify ทำเฉพาะตอนมี candidate ครั้งเดียว)
 
+### S4
+- `core/tracker.py` หลัง flag `STRICT_STABILITY`:
+  - F03: ขยับเกิน CENTROID_STABLE_DIST ระหว่าง hold (SHAPE_CONFIRMED) → ถอนเป็น DETECTING, ล้าง stable count และเวลาลงจอด
+    (เดิม: SHAPE_CONFIRMED แล้วไม่เช็คการขยับอีกเลย — ของที่ไถลระหว่าง 1.5s ยังถูกถ่าย)
+  - F04: หาย (ghost) → ล้าง stable count + เวลาลงจอด → กลับมาต้องนิ่งครบ LANDING_STABLE_FRAMES ใหม่
+    (เดิม: count สะสมข้ามช่วงหาย กลับมา 1 เฟรมก็ลงจอดทันที)
+- วัด 2 แบบ (pytest 126 ผ่านทั้งคู่, e2e ทุกข้อผ่านทั้งคู่):
+
+  | โหมด | ข้อ 1 START→S0 | ข้อ 3 | ข้อ 4 S0 หลัง Redis กลับ |
+  |---|---|---|---|
+  | STRICT_STABILITY=0 | 3.42s | 3.40s, 3.38s | 1.05s |
+  | STRICT_STABILITY=1 | 3.54s | 3.56s, 3.56s | 1.64s |
+
+  เปิดแล้วช้าลง +0.12 ถึง +0.18s (< 0.3s) ไม่ถอยหลัง → **default เปิด** ตามกติกา
+  (ช้าลงเพราะในคลิปของมี mask กระพริบ/ขยับเล็กน้อยช่วงแรกหลังตก ทำให้เริ่มนับนิ่งใหม่ 3–5 เฟรม)
+- tests: `tests/test_tracker.py` 6 ข้อ (ขยับระหว่าง hold ทั้ง 2 โหมด / สั่นเล็กน้อยไม่ถอน / ghost แล้วกลับมาทั้ง 2 โหมด /
+  ghost หลังลงจอดต้องนิ่งใหม่ครบ)
+
 ## ไฟล์ที่เปลี่ยน (สะสม)
 - S0: `core/background.py`, `main.py` (D2), `tests/test_evidence.py`, `tests/integration/redis_e2e.py` (ข้อ 8, `.e2e_tmp/`),
   `.gitignore`, `docs/AUTORUN_TASK.md`, `docs/AUTORUN_REPORT.md`
@@ -87,6 +105,7 @@
 - S2: `config.py`, `main.py`, `.envexample`, `requirements*.txt`, `docker-compose.yml`, `Dockerfile`, `.dockerignore`,
   `.gitattributes`, `HANDOVER.md`, `ORANGE_PI_DOCKER.md`, `tests/test_config.py`, `tests/integration/docker_smoke.py`, `redis_e2e.py`
 - S3: `core/removal.py` (ใหม่), `core/background.py`, `main.py`, `config.py`, `.envexample`, `tests/test_removal.py` (ใหม่), `redis_e2e.py` (7b)
+- S4: `core/tracker.py`, `config.py`, `.envexample`, `tests/test_tracker.py` (ใหม่)
 
 ## ความหมายของ test ที่เปลี่ยน
 - S0 (D2): `test_start_during_watch_uses_pre_motion_background` แยกเป็น
@@ -97,6 +116,8 @@
 ## คำถามรอผู้ใช้ (ประเภท A — ทำต่อไปแล้วด้วยทางที่ปลอดภัย)
 - S1: ตั้งพื้นหลังใหม่หลัง env change สงบ ใช้ CLEAN_BG_STABLE_FRAMES (5 เฟรม ≈ 0.17s) ร่วมกัน ไม่แยกค่า
   ทางอื่น: แยกค่า ENV_SETTLE_FRAMES ให้นานกว่า (เช่น 15) → กันการตั้งใหม่ตอน slat ค้างกลางทางได้ดีขึ้น แต่ถาดต้องนิ่งนานขึ้นก่อนเห็นของ
+- S4: STRICT_STABILITY default เปิด (ผ่านเกณฑ์ ≤ +0.3s) — ทางอื่น: ปิดไว้ก่อนจนทดสอบที่ตู้จริง (เร็วกว่า ~0.15s
+  แต่ของที่ไถลระหว่างรอถ่ายยังถูกถ่ายได้) ปรับได้ด้วย `STRICT_STABILITY=0`
 - S3: เมื่อ "ไม่แน่ใจว่าหยิบออก" (ขอบลดแต่ไม่มีฉากก่อนหน้ายืนยัน เช่นเปิดเครื่องตอนมีของในถาด หรือของเรียบกว่าพื้นถาด)
   เลือก **ไม่ส่ง S0** + anomaly POSSIBLE_REMOVAL (`REMOVAL_UNCERTAIN_SEND_S0=0`)
   ทางอื่น: `=1` → ยืนยันตามปกติ — ได้ S0 ของจริงที่เรียบกว่าพื้นถาด แต่กลับไปเสี่ยง S0 ผิดแบบข้อ 7 ตอนไม่มีประวัติฉาก

@@ -119,6 +119,11 @@ LANDING_STABLE_FRAMES = _int("LANDING_STABLE_FRAMES", 4)
 #   ⚠ ถ้า ↓ CAPTURE_HOLD_SEC ต่ำมาก ควร ↓ ค่านี้ด้วย (3-5) กันนับว่านิ่งระหว่างยังตก
 CENTROID_STABLE_DIST = _int("CENTROID_STABLE_DIST", 10)
 
+# ความนิ่งแบบเข้ม (tracker): 1 = ขยับเกิน CENTROID_STABLE_DIST ระหว่างรอถ่าย → เริ่มนับนิ่งใหม่
+#   และวัตถุที่หายไปแล้วกลับมาต้องนิ่งครบ LANDING_STABLE_FRAMES ใหม่ | 0 = แบบเดิม
+#   (คลิปทดสอบ: เปิดแล้ว START→S0 ช้าลง ~0.15s ผลทุกสถานการณ์เหมือนเดิม)
+STRICT_STABILITY = _bool("STRICT_STABILITY", True)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # หมวด 3 — รอบ START–STOP

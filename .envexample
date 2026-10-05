@@ -36,6 +36,8 @@ CLOUD_ENABLED=0
 # MAX_BLOB_ROI_RATIO=0.30
 # LANDING_STABLE_FRAMES=4
 # CENTROID_STABLE_DIST=10
+# ความนิ่งแบบเข้ม: ขยับระหว่างรอถ่าย / หายแล้วกลับมา → เริ่มนับนิ่งใหม่ (0 = แบบเดิม)
+# STRICT_STABILITY=1
 
 # ── หมวด 3: รอบ START–STOP ────────────────────────────────────────────────────
 # ไม่มี STOP ภายในกี่วินาทีหลัง START → ปิดรอบเอง (TIMEOUT ไม่ส่งอะไรกลับ)

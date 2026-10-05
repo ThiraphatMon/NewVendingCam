@@ -7,6 +7,7 @@ from config import (
     LANDING_STABLE_FRAMES,
     CENTROID_STABLE_DIST,
     GHOST_FRAME_TOLERANCE,
+    STRICT_STABILITY,
 )
 
 # การนิ่ง ("ลงจอด") ใช้ config:
@@ -14,6 +15,9 @@ from config import (
 #   CENTROID_STABLE_DIST  : ระยะ px ที่ centroid ขยับได้ต่อเฟรมแล้วยังถือว่านิ่ง
 #   ใช้ centroid แทน area เพราะ noise ข้างใน object ทำให้ box size ขยับ
 #   แต่ centroid ยังนิ่งอยู่กับที่ → stable ได้แม้ box กระพริบเล็กน้อย
+#   STRICT_STABILITY=1 (เข้มขึ้น):
+#     F03 ขยับเกิน CENTROID_STABLE_DIST ระหว่าง hold (SHAPE_CONFIRMED) → ถอนสถานะ เริ่มนับนิ่งใหม่
+#     F04 หายไป (ghost) แล้วกลับมา → เริ่มนับความนิ่งใหม่ ไม่สะสมข้ามช่วงที่หาย
 
 # ── ค่าคงที่ภายใน tracker (ไม่ได้เปิดให้ตั้งใน .env) ──────────────────────────────
 # กล่องหดเหลือน้อยกว่า SHRINK_RATIO ของเดิม และ centroid ขยับไม่เกิน SHRINK_MAX_MOVE px
@@ -87,8 +91,14 @@ class MemoryTracker:
                 obj["ghost_frames"] = 0
 
                 # Shape stability check
-                if obj["state"] != "SHAPE_CONFIRMED":
-                    centroid_dist = math.hypot(cx - px, cy - py)
+                centroid_dist = math.hypot(cx - px, cy - py)
+                if obj["state"] == "SHAPE_CONFIRMED":
+                    if STRICT_STABILITY and centroid_dist > CENTROID_STABLE_DIST:
+                        # [F03] ขยับระหว่าง hold → ยังไม่ลงจอดจริง ถอนสถานะ เริ่มนับนิ่งใหม่
+                        obj["state"] = "DETECTING"
+                        obj["shape_stable_count"] = 0
+                        obj["shape_confirmed_time"] = None
+                else:
                     if centroid_dist <= CENTROID_STABLE_DIST:
                         obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
                     else:
@@ -129,6 +139,10 @@ class MemoryTracker:
 
             obj["ghost_frames"] = ghost_count
             obj["state"] = "DETECTING"
+            if STRICT_STABILITY:
+                # [F04] หายไปแล้วกลับมา → ต้องนิ่งครบ LANDING_STABLE_FRAMES ใหม่ ไม่สะสมข้ามช่วงหาย
+                obj["shape_stable_count"] = 0
+                obj["shape_confirmed_time"] = None
             new_objects[obj_id] = obj
 
         self.objects = new_objects
