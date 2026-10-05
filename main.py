@@ -40,7 +40,7 @@ from core import cycle as cyc
 from core.background import BackgroundModel, find_env_change
 from core.cycle import AnomalyLimiter, CycleMachine
 from core.detect import build_fgmask, contour_boxes, drop_large_boxes, group_close_boxes
-from core.frame_source import FrameSource
+from core.frame_source import NO_NEW_FRAME, FrameSource
 from core import removal
 from core.roi import ROIManager
 from core.tracker import MemoryTracker, is_motion_in_roi
@@ -182,17 +182,24 @@ class App:
         """คืน (frame, fgmask, tracked) สำหรับวาดจอ (frame=None ถ้าไม่มีเฟรม)"""
         frame = self.source.read()
         now = self.clock()
-        self.frame = frame
-        # START ใช้เฟรมนี้เป็นพื้นหลังของรอบได้ (ถ้ายังไม่มี clean_bg ที่ valid) → แปลงก่อนรับคำสั่ง
-        self.frame_gray = (
-            None if frame is None else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        )
+        fresh = frame is not NO_NEW_FRAME
+        if fresh:
+            self.frame = frame
+            # START ใช้เฟรมนี้เป็นพื้นหลังของรอบได้ (ถ้ายังไม่มี clean_bg ที่ valid) → แปลงก่อนรับคำสั่ง
+            self.frame_gray = (
+                None if frame is None else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            )
 
         # คำสั่ง / ผลส่ง S0 ก่อนผลตรวจจับเสมอ (STOP ที่มาระหว่างอ่านเฟรมต้องมีผลก่อนยืนยัน)
+        # ทำทุกรอบแม้ไม่มีเฟรมใหม่ / กล้องค้าง
         self._handle_inbox(now)
         result = self.cm.tick(self.mono())
         if result:
             self._apply(result, now)
+
+        if not fresh:
+            # ยังไม่มีเฟรมใหม่ (ไม่ใช่กล้องค้าง) → ไม่ตรวจจับซ้ำกับเฟรมเดิม
+            return None, None, {}
 
         if frame is None:
             self._on_no_frame()
@@ -481,10 +488,9 @@ class App:
     def run(self):
         while self.running:
             frame, fgmask, tracked = self.step()
-            if frame is not None:
-                if not self.headless:
-                    render_overlay(frame, self.view(), tracked, self.roi_manager, FRAME_W, FRAME_H)
-                self.source.pace()
+            # ไฟล์วิดีโอถูกหน่วงตาม FPS ใน reader thread ของ FrameSource แล้ว
+            if frame is not None and not self.headless:
+                render_overlay(frame, self.view(), tracked, self.roi_manager, FRAME_W, FRAME_H)
 
             if not self.headless:
                 if frame is not None:

@@ -11,7 +11,7 @@
 | S2 ขั้น E (พร้อมลง Orange Pi) | ✅ เสร็จ | autorun S2 | 107 passed | ✅ (+8b, 8c) / ✅ | 3.40s / 3.43s, 3.39s |
 | S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | autorun S3 | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
 | S4 ความนิ่งของ tracker | ✅ เสร็จ (default เปิด) | autorun S4 | 126 passed (ทั้ง 2 โหมด) | ✅ ทั้ง 2 โหมด | ปิด 3.42s / 3.40s, 3.38s · เปิด 3.54s / 3.56s, 3.56s |
-| S5 กล้องค้าง | รอ | | | | |
+| S5 กล้องค้าง | ✅ เสร็จ | autorun S5 | 133 passed | ✅ / ✅ | 3.54s / 3.55s, 3.55s |
 | S6 สรุป | รอ | | | | |
 
 ## รายละเอียดผลทดสอบ
@@ -98,6 +98,22 @@
 - tests: `tests/test_tracker.py` 6 ข้อ (ขยับระหว่าง hold ทั้ง 2 โหมด / สั่นเล็กน้อยไม่ถอน / ghost แล้วกลับมาทั้ง 2 โหมด /
   ghost หลังลงจอดต้องนิ่งใหม่ครบ)
 
+### S5
+- `core/frame_source.py` เขียนใหม่: reader thread อ่านกล้อง/ไฟล์ตลอด ถือเฉพาะเฟรมล่าสุด + เวลา (slot ขนาด 1)
+  - `read()` รอเฟรมใหม่ได้ไม่เกิน 0.1s แล้วคืน: เฟรมใหม่ | `None` (กล้องหลุด / วิดีโอจบกำลังเปิดใหม่ / ไม่มีเฟรมใหม่เกิน
+    `CAMERA_STALL_SEC`=3s) | `NO_NEW_FRAME` (ยังไม่มีเฟรมใหม่แต่ไม่ถือว่าค้าง)
+  - เฟรมเดิมไม่ถูกคืนซ้ำ — สำคัญกับ S0/D2: เฟรมซ้ำจะถูกนับว่า ROI นิ่ง (clean_bg / watch / ตั้งพื้นหลังใหม่) ผิด
+  - กล้องค้าง → log `📷 กล้องค้าง` + reader รุ่นใหม่เปิดกล้องใหม่; thread เก่าที่ค้างใน cap.read() เลิกเองเมื่อคืน
+    (ไม่ release cap ข้าม thread เพราะ OpenCV ไม่ปลอดภัย) — บน V4L2 ถ้าตัวเก่ายังถือ /dev/video0 การเปิดใหม่อาจล้มเหลว
+    แล้ววนลองใหม่ทุก CAMERA_RECONNECT_SEC จนตัวเก่าคืน (ต้องทดสอบที่ตู้จริง)
+  - ไฟล์วิดีโอ: reader หน่วงตาม FPS เอง (`pace()` ใน main ถูกลบ) — e2e วัดคาบวนคลิปได้ 15.07s เท่าเดิม
+- main: `NO_NEW_FRAME` → ประมวลผลคำสั่ง/timeout ตามปกติแต่ไม่ตรวจจับ (ไม่แตะ self.frame) ; `None` → camera gap
+  ตามกติกาเดิม (ACTIVE → BLOCKED, ล้าง bg) — START/STOP ไม่ติดอยู่หลัง cap.read() อีกต่อไป
+- config ใหม่ `CAMERA_STALL_SEC`=3.0
+- tests: `tests/test_frame_source.py` 7 ข้อ (กล้องปลอมที่ค้าง/หลุด): ทุกเฟรมคืนครั้งเดียว / ค้าง → NO_NEW_FRAME ก่อนครบ
+  แล้ว None + เปิดใหม่ได้เฟรม / หลุดแล้วกลับมา / ไฟล์วิดีโอเล่นตาม FPS / read() ไม่ block / main ประมวลผล STOP ระหว่าง
+  ไม่มีเฟรมใหม่และไม่นับเฟรมซ้ำว่านิ่ง / กล้องค้างระหว่างรอบ → BLOCKED → STOP ปิด UNCERTAIN; รันซ้ำ 5 รอบไม่ flaky
+
 ## ไฟล์ที่เปลี่ยน (สะสม)
 - S0: `core/background.py`, `main.py` (D2), `tests/test_evidence.py`, `tests/integration/redis_e2e.py` (ข้อ 8, `.e2e_tmp/`),
   `.gitignore`, `docs/AUTORUN_TASK.md`, `docs/AUTORUN_REPORT.md`
@@ -106,6 +122,7 @@
   `.gitattributes`, `HANDOVER.md`, `ORANGE_PI_DOCKER.md`, `tests/test_config.py`, `tests/integration/docker_smoke.py`, `redis_e2e.py`
 - S3: `core/removal.py` (ใหม่), `core/background.py`, `main.py`, `config.py`, `.envexample`, `tests/test_removal.py` (ใหม่), `redis_e2e.py` (7b)
 - S4: `core/tracker.py`, `config.py`, `.envexample`, `tests/test_tracker.py` (ใหม่)
+- S5: `core/frame_source.py`, `main.py`, `config.py`, `.envexample`, `tests/conftest.py`, `tests/test_frame_source.py` (ใหม่)
 
 ## ความหมายของ test ที่เปลี่ยน
 - S0 (D2): `test_start_during_watch_uses_pre_motion_background` แยกเป็น
@@ -116,6 +133,8 @@
 ## คำถามรอผู้ใช้ (ประเภท A — ทำต่อไปแล้วด้วยทางที่ปลอดภัย)
 - S1: ตั้งพื้นหลังใหม่หลัง env change สงบ ใช้ CLEAN_BG_STABLE_FRAMES (5 เฟรม ≈ 0.17s) ร่วมกัน ไม่แยกค่า
   ทางอื่น: แยกค่า ENV_SETTLE_FRAMES ให้นานกว่า (เช่น 15) → กันการตั้งใหม่ตอน slat ค้างกลางทางได้ดีขึ้น แต่ถาดต้องนิ่งนานขึ้นก่อนเห็นของ
+- S5: `CAMERA_STALL_SEC`=3s (กล้อง USB สะดุดสั้น ๆ ไม่ถือว่าค้าง) — ทางอื่น: 1–2s จับกล้องค้างไวขึ้น
+  แต่เสี่ยงทำรอบเป็น BLOCKED/UNCERTAIN จากการสะดุดชั่วคราว
 - S4: STRICT_STABILITY default เปิด (ผ่านเกณฑ์ ≤ +0.3s) — ทางอื่น: ปิดไว้ก่อนจนทดสอบที่ตู้จริง (เร็วกว่า ~0.15s
   แต่ของที่ไถลระหว่างรอถ่ายยังถูกถ่ายได้) ปรับได้ด้วย `STRICT_STABILITY=0`
 - S3: เมื่อ "ไม่แน่ใจว่าหยิบออก" (ขอบลดแต่ไม่มีฉากก่อนหน้ายืนยัน เช่นเปิดเครื่องตอนมีของในถาด หรือของเรียบกว่าพื้นถาด)

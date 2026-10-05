@@ -8,6 +8,7 @@ import pytest
 
 import core.tracker
 from api.redis_controller import Command, SendResult
+from core.frame_source import NO_NEW_FRAME
 from core.roi import ROIManager
 from utils.state_store import StateStore
 
@@ -31,7 +32,7 @@ class FakeClock:
 
 
 class FakeSource:
-    """กล้องปลอม: คืนเฟรมที่ตั้งไว้ (None = กล้องหลุด) และนับการ open/release"""
+    """กล้องปลอม: คืนเฟรมที่ตั้งไว้ (None = กล้องหลุด/ค้าง, NO_NEW_FRAME = ยังไม่มีเฟรมใหม่) และนับการ open/release"""
 
     def __init__(self):
         self.frame = None
@@ -41,10 +42,9 @@ class FakeSource:
 
     def read(self):
         self.reads += 1
-        return None if self.frame is None else self.frame.copy()
-
-    def pace(self):
-        pass
+        if self.frame is None or self.frame is NO_NEW_FRAME:
+            return self.frame
+        return self.frame.copy()
 
     def release(self):
         self.release_count += 1

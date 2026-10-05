@@ -226,6 +226,8 @@ RETRY_INTERVAL = _int("RETRY_INTERVAL", 60)
 
 # รอกี่วินาทีก่อนต่อใหม่ เมื่อกล้อง / WebSocket หลุด
 CAMERA_RECONNECT_SEC = _float("CAMERA_RECONNECT_SEC", 2)
+# กล้องค้าง: ไม่มีเฟรมใหม่นานเกินกี่วินาที → ถือเป็นกล้องหลุด (รอบ ACTIVE → BLOCKED) แล้วเปิดกล้องใหม่
+CAMERA_STALL_SEC = _float("CAMERA_STALL_SEC", 3.0)
 WS_RECONNECT_SEC = _float("WS_RECONNECT_SEC", 5)
 
 # ลบภาพหลักฐานที่เก่ากว่ากี่วัน / ตรวจลบทุกกี่ชั่วโมง (กัน eMMC เต็ม)
