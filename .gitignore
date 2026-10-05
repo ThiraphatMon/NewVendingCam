@@ -22,3 +22,6 @@ data/*.sqlite3*
 
 # โฟลเดอร์ชั่วคราวของ redis_e2e.py / การทดลอง
 .e2e_tmp/
+
+# ROI ของตู้นี้ (มาจากเว็บ / แก้บนบอร์ด) — ห้าม commit; ตัวอย่างอยู่ที่ data/roi_config.example.json
+data/roi_config.json

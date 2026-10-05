@@ -48,15 +48,19 @@ sudo usermod -aG docker "$USER"     # แล้ว logout/login ใหม่
 
 ## 3. ตั้งค่าโปรเจกต์
 
-คัดลอกเฉพาะ source (ไม่เอา `.venv` ของ Windows, `.env` ของเครื่องอื่น, `data/*.sqlite3`, `evidence_images/`, `logs/`)
-ไฟล์ข้อความใน repo เป็น LF (`.gitattributes`) — ถ้าคัดลอกจาก Windows ด้วยวิธีอื่นที่ไม่ใช่ git ให้ตรวจว่าไม่มี CRLF
+ลง source ด้วย `git clone` (ไฟล์ข้อความเป็น LF ตาม `.gitattributes` อยู่แล้ว)
+ไฟล์ของตู้แต่ละตู้ **ไม่อยู่ใน git** และ `git pull` ไม่แตะ: `.env`, `data/roi_config.json`, `data/*.sqlite3`, `evidence_images/`, `logs/`
 
 ```bash
+sudo apt install -y git
+git clone <repo-url> ~/MotionDetectionForVendingMachine
 cd ~/MotionDetectionForVendingMachine
 cp .envexample .env
 nano .env                         # หมวด 1: MACHINE_ID_DEFAULT, CAMERA_INDEX, REDIS_* ให้ตรงกับ controller
 mkdir -p evidence_images data logs
-ls data/roi_config.json           # ต้องมี ROI ของตู้นี้
+# ROI ของตู้นี้: ถ้ามีไฟล์จากตู้เดิมให้วางที่ data/roi_config.json
+# ถ้าไม่มี โปรแกรมจะ copy จาก data/roi_config.example.json ให้ตอนเริ่ม (log "⚠️ ไม่พบ ...")
+# แล้วรอ ROI จากเว็บ (CLOUD_ROI_SYNC) เขียนทับ หรือแก้ data/roi_config.json เอง (reload อัตโนมัติ)
 ```
 
 ค่าที่ต้องคงไว้บนบอร์ด:
@@ -114,19 +118,32 @@ docker compose logs --tail=50 vending-cam | grep -E "เปิดรอบ|ป�
 ## 6. อัปเดตและ rollback
 
 ```bash
+cd ~/MotionDetectionForVendingMachine
+git status --short                # ต้องว่าง — ห้ามแก้ไฟล์ที่อยู่ใน git บนบอร์ด (ค่าของตู้อยู่ใน .env / data/)
 docker tag vending-cam:latest vending-cam:prev   # เก็บ image ที่ใช้อยู่
-# อัปเดต source แล้ว
+git rev-parse --short HEAD        # จด commit ที่ใช้อยู่ ไว้ rollback source
+git pull --ff-only
 docker compose up -d --build
 
 # มีปัญหา → กลับ image เดิมทันที
 docker tag vending-cam:prev vending-cam:latest
 docker compose up -d --no-build
+git checkout <commit ที่จดไว้>     # ให้ source ตรงกับ image (ก่อน build ครั้งถัดไป); กลับมาใช้ตัวล่าสุด: git checkout main
 
 # กลับไปโปรแกรมตัวเก่าทั้งหมด
 docker compose down               # ต้องหยุดตัวใหม่ก่อนเปิดตัวเก่าเสมอ
 ```
 
-`data/` (ยอด + ROI), `evidence_images/`, `logs/` อยู่นอก container ไม่หายตอน rebuild / rollback
+`data/` (ยอด + ROI), `evidence_images/`, `logs/` อยู่นอก container และนอก git ไม่หายตอน pull / rebuild / rollback
+
+> ⚠ บอร์ดที่ clone ไว้ก่อน S15 (`data/roi_config.json` ยังอยู่ใน git): pull ข้าม S15 จะลบไฟล์ ROI
+> (หรือ pull ไม่ผ่านถ้าเว็บแก้ไฟล์ไว้) — สำรองแล้วคืนหลัง pull:
+> ```bash
+> cp data/roi_config.json ~/roi_backup.json
+> git checkout -- data/roi_config.json
+> git pull --ff-only
+> cp ~/roi_backup.json data/roi_config.json
+> ```
 
 ## 7. คำสั่งดูแลระบบ
 

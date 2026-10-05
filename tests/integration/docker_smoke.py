@@ -14,7 +14,7 @@ REPO = e.REPO
 work = os.path.join(REPO, ".e2e_tmp", "docker")
 shutil.rmtree(work, ignore_errors=True)
 os.makedirs(os.path.join(work, "data")); os.makedirs(os.path.join(work, "logs")); os.makedirs(os.path.join(work, "evidence_images"))
-shutil.copy(os.path.join(REPO, "data", "roi_config.json"), os.path.join(work, "data"))
+shutil.copy(os.path.join(REPO, "data", "roi_config.example.json"), os.path.join(work, "data", "roi_config.json"))
 wsl = lambda p: "/mnt/" + p[0].lower() + p[2:].replace("\\", "/")
 NAME = "vendingcam-docker-smoke"
 CLIP = os.path.abspath(os.environ.get(

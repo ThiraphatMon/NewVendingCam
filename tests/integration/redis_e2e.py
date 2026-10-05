@@ -473,7 +473,7 @@ def main():
         for sc in args.scenarios.split(","):
             wd = os.path.join(root, f"sc{sc}")
             os.makedirs(os.path.join(wd, "data"))
-            shutil.copy(os.path.join(REPO, "data", "roi_config.json"), os.path.join(wd, "data"))
+            shutil.copy(os.path.join(REPO, "data", "roi_config.example.json"), os.path.join(wd, "data", "roi_config.json"))
             reset_keys(r)
             m = MainProc(wd, args.clip, SCENARIO_ENV.get(sc))
             print(f"▶️ สถานการณ์ {sc}")

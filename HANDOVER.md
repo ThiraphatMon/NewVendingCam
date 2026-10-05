@@ -194,6 +194,9 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 
 ค่าระบบ order เดิม (`WS_URL`, `ORDER_WINDOW`, `DROP_TIMEOUT`, ...) ไม่มีผลในโหมด START–STOP
 ROI: `data/roi_config.json` (rect / quad / polygon / multi_polygon บนภาพ 640x480) แก้แล้ว reload เองภายใน `ROI_CHECK_INTERVAL`
+- ไฟล์นี้ **ไม่อยู่ใน git** (`.gitignore`) — เป็นของแต่ละตู้; ใน repo มีแค่ตัวอย่าง `data/roi_config.example.json`
+- เริ่มโปรแกรมแล้วไม่มีไฟล์ → copy จาก `roi_config.example.json` (ไม่มี/อ่านไม่ได้ → สร้าง rect ครึ่งขวา) log `⚠️ ไม่พบ ...`
+  จากนั้น ROI จากเว็บ (`CLOUD_ROI_SYNC`) เขียนทับไฟล์นี้ หรือแก้ไฟล์บนบอร์ดเอง — `git pull` ไม่แตะไฟล์นี้
 - ROI ใหม่ (จากเว็บหรือแก้ไฟล์) ระหว่างรอบ (ACTIVE / CONFIRMED_WAIT_STOP / BLOCKED) → **ยังไม่ใช้** log `พบ ROI ใหม่ระหว่างรอบ → รอใช้`
   แล้วใช้ทันทีที่กลับ WAIT_START (log `ใช้ ROI ใหม่`) พร้อมล้าง tracker / clean_bg / scene history / watch ที่ผูกกับ ROI เดิม
   → START ถัดไปต้องรอถาดนิ่งใน ROI ใหม่ครบ `CLEAN_BG_STABLE_FRAMES` ก่อนจึงใช้ clean_bg ได้
@@ -261,7 +264,9 @@ python tests/integration/redis_e2e.py --clip <big1_pickup_cutted.mp4>   # main.p
 
 1. **หยุดโปรแกรมกล้องตัวเก่าก่อนเสมอ** (ตัวที่ `RPOP CTRL`) — สองตัวพร้อมกันจะแย่งคำสั่งกัน
    ตรวจ: `redis-cli MONITOR` ต้องเห็น `RPOP CTRL` จาก client เดียว
-2. เตรียม `.env` (หมวด 1), `data/roi_config.json`, โฟลเดอร์ `data/ evidence_images/ logs/`
+2. ลง source ด้วย git (ครั้งแรก `git clone <repo-url> ~/MotionDetectionForVendingMachine`) แล้วเตรียม `.env` (หมวด 1)
+   และ `data/roi_config.json` ของตู้นี้ (ไม่มี → โปรแกรม copy จาก `roi_config.example.json` ให้ แล้วรอ ROI จากเว็บ / แก้เอง)
+   `.env`, `data/roi_config.json`, `data/*.sqlite3`, `evidence_images/`, `logs/` อยู่ใน `.gitignore` — git ไม่แตะ
 3. `docker compose up -d --build` → `docker compose logs -f vending-cam` ดู `Active config`, `เชื่อม Redis สำเร็จ`
    และไม่มี `⚠️ .env: ... ไม่มีผล` ที่ไม่ได้ตั้งใจ
 4. **controlled test** (ตู้ไม่ขายจริง): `redis-cli MONITOR` ในอีกหน้าต่าง
@@ -272,13 +277,22 @@ python tests/integration/redis_e2e.py --clip <big1_pickup_cutted.mp4>   # main.p
 
 **อัปเดตแบบ rollback ได้:**
 ```bash
+cd ~/MotionDetectionForVendingMachine
+git status --short                               # ต้องว่าง (ห้ามแก้ไฟล์ที่อยู่ใน git บนบอร์ด)
 docker tag vending-cam:latest vending-cam:prev   # เก็บ image ที่ใช้อยู่
-docker compose up -d --build                     # หลังได้ source ใหม่
+git rev-parse --short HEAD                       # จด commit ที่ใช้อยู่ (ไว้ rollback source)
+git pull --ff-only
+docker compose up -d --build
 # มีปัญหา → กลับ image เดิมทันที (ไม่ต้อง build):
 docker tag vending-cam:prev vending-cam:latest && docker compose up -d --no-build
+# (ถ้าต้อง rebuild ภายหลัง ให้ git checkout <commit ที่จดไว้> ก่อน)
 # กลับไปโปรแกรมตัวเก่า: docker compose down แล้วเปิดโปรแกรมเดิม (อย่าเปิดพร้อมกัน)
 ```
 `data/` อยู่นอก container → rollback image ไม่ทำให้ยอดหาย (schema DB เปลี่ยนเมื่อไรต้องระบุใน release)
+
+> ⚠ บอร์ดที่ clone ไว้ **ก่อน S15** (ตอนที่ `data/roi_config.json` ยังอยู่ใน git): `git pull` ข้าม S15 จะ**ลบ**ไฟล์ ROI
+> (หรือ pull ไม่ผ่านถ้าไฟล์ถูกเว็บแก้ไว้) — สำรองก่อน แล้วคืนหลัง pull:
+> `cp data/roi_config.json ~/roi_backup.json && git checkout -- data/roi_config.json && git pull --ff-only && cp ~/roi_backup.json data/roi_config.json`
 
 ---
 

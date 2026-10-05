@@ -4,7 +4,7 @@ import time
 import cv2
 import numpy as np
 from config import ROI_CHECK_INTERVAL, ROI_CONFIG_PATH
-from utils.json_file import write_json_atomic
+from utils.json_file import read_json, write_json_atomic
 from utils.logger import get_logger
 
 logger = get_logger("roi")
@@ -45,12 +45,25 @@ class ROIManager:
             },
         }
 
+    def _create_missing_config(self):
+        """ไม่มีไฟล์ ROI (เช่น git clone ใหม่ — roi_config.json ไม่อยู่ใน git)
+        → copy จาก roi_config.example.json ข้าง ๆ ถ้ามีและอ่านได้ ไม่งั้นสร้าง default rect
+        ROI จริงของตู้มาจากเว็บ (fetch_remote_roi เขียนทับไฟล์นี้) หรือแก้ไฟล์เองบนบอร์ด"""
+        os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
+        example_path = os.path.splitext(self.config_path)[0] + ".example.json"
+        config = read_json(example_path)
+        if isinstance(config, dict) and "roi_type" in config:
+            logger.warning(f"⚠️ ไม่พบ {self.config_path} → copy จาก {example_path}")
+        else:
+            config = self._default_config()
+            logger.warning(f"⚠️ ไม่พบ {self.config_path} → สร้าง ROI default (rect ครึ่งขวา)")
+        write_json_atomic(self.config_path, config)
+
     def load(self):
-        """โหลด ROI จากไฟล์ (ไม่มีไฟล์ → สร้าง default) คืน True ถ้าใช้ ROI จากไฟล์ได้
+        """โหลด ROI จากไฟล์ (ไม่มีไฟล์ → copy จาก example / สร้าง default) คืน True ถ้าใช้ ROI จากไฟล์ได้
         ไฟล์พัง / เขียนไม่เสร็จ / ค่าผิดรูปแบบ → log warning แล้วใช้ ROI เดิมต่อ (ไม่ทำให้โปรแกรมตาย)"""
         if not os.path.exists(self.config_path):
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            write_json_atomic(self.config_path, self._default_config())
+            self._create_missing_config()
 
         try:
             self.last_mtime = os.path.getmtime(self.config_path)
