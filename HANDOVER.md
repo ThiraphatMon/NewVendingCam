@@ -140,10 +140,10 @@ START ระหว่าง watch → เลิกเฝ้า ใช้พื�
 
 | ที่เก็บ | เนื้อหา | หมายเหตุ |
 |---|---|---|
-| `data/vending_state.sqlite3` | ตาราง `cycles`, `confirmations`, `anomalies`, `responses` | **แหล่งจริงของยอด** ห้ามลบ / ห้ามแก้มือ — DB เสีย = โปรแกรมหยุด ไม่นับต่อ |
+| `data/vending_state.sqlite3` | ตาราง `cycles`, `confirmations`, `anomalies`, `responses`, `cloud_outbox` (event รอส่งขึ้นเว็บ) | **แหล่งจริงของยอด** ห้ามลบ / ห้ามแก้มือ — DB เสีย = โปรแกรมหยุด ไม่นับต่อ |
 | `logs/item_drops/YYYY-MM-DD.log` | `05/10/2026 13:45:12 : item drop : 1` บรรทัดละการยืนยัน | ภาพสะท้อนของ DB, startup สร้างไฟล์ของวันนี้ใหม่จาก DB (ซ่อมหลัง crash) ห้ามใช้กู้ยอด |
 | `logs/vending.log` | operational log (หมุนไฟล์ ~25MB) | ดูการเปิด/ปิดรอบ, พื้นหลังที่ใช้, Redis |
-| `evidence_images/confirmed/` | ภาพตอนยืนยัน 1 ภาพต่อการยืนยัน | ลบอัตโนมัติเกิน `CLEANUP_KEEP_DAYS` |
+| `evidence_images/confirmed/` | ภาพตอนยืนยัน 1 ภาพต่อการยืนยัน | ลบอัตโนมัติเกิน `CLEANUP_KEEP_DAYS` — ยกเว้นภาพที่ยังรอส่งขึ้นเว็บ (outbox PENDING) |
 | `evidence_images/anomaly/` | `OUTSIDE_CYCLE`, `EXTRA_AFTER_CONFIRM` (จำกัดความถี่), `POSSIBLE_REMOVAL` (แถว DB เสมอ ภาพตามโควตา), `NO_CONFIRM_AT_CLOSE` (ทุกรอบที่ไม่ยืนยัน) | ไม่นับยอด, ลบเกิน `ANOMALY_KEEP_DAYS` |
 
 ลำดับการยืนยัน (ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0): บันทึกภาพ → DB (transaction เดียว) → latch รอบ → S0 → daily log
@@ -166,7 +166,8 @@ core/frame_source.py    กล้อง / ไฟล์วิดีโอ ใน 
 api/redis_controller.py RPOP CTRL / LPUSH CAMERA (worker thread)
 api/cloud.py            เริ่ม/หยุด thread ฝั่ง cloud ตามสวิตช์ (ROI sync, ภาพสด, ...) — ดูข้อ 7.1
 api/client.py           HTTP ไปเว็บ (register, ROI, ภาพสด, event)
-api/retry_queue.py, order_listener.py   ของระบบ order เดิม (order listener ไม่ถูกเริ่ม)
+api/retry_queue.py      เลิกใช้ (ลบภาพหลังส่ง + คิวใน memory) — ห้ามนำกลับมาใช้กับภาพหลักฐาน
+api/order_listener.py   ของระบบ order เดิม (ไม่ถูกเริ่ม)
 utils/state_store.py    SQLite (รอบ / ยืนยัน / anomaly / สถานะ S0)
 utils/daily_log.py      log ยอดรายวัน
 utils/image_saver.py    บันทึกภาพหลักฐาน
@@ -215,6 +216,16 @@ cloud เป็นส่วนเสริม — START/STOP/S0 ไม่รอ�
 | ช่วงทดสอบ | `CLOUD_ENABLED=1` `CLOUD_SEND_EVENTS=1` `CLOUD_ROI_SYNC=1` `SEND_INTERVAL=60` | อยากเห็นทุกชิ้นบนเว็บ + ภาพสดทุก 1 นาที |
 | ขายจริง | `CLOUD_ENABLED=1` `CLOUD_SEND_EVENTS=0` `CLOUD_ROI_SYNC=1` `SEND_INTERVAL=300` | ประหยัดเน็ต: ROI จากเว็บยังใช้ได้ ภาพสดทุก 5 นาที |
 | ไม่มีเน็ต | `CLOUD_ENABLED=0` | ทำงาน local อย่างเดียว |
+
+**event `ITEM_LANDED`** (เว็บเดิมรับได้ — field เดียวกับโปรแกรมรุ่น order เดิม): multipart ไปที่ `CLOUD_API_URL`
+`machine_id`, `event=ITEM_LANDED`, `transaction_id=TXN-<YYYYMMDD-HHMMSS เวลาไทยตอนยืนยัน>-<cycle_id 8 ตัวแรก>`,
+`item_no` (= ลำดับยอดของวัน), `obj_id` (id วัตถุใน tracker), `land_time` (`%H:%M:%S` เวลาไทย), `order_id=""` + ไฟล์ `landed_image`
+- main loop ยืนยัน → S0 → daily log → เขียนแถวลง `cloud_outbox` (transaction แยก ล้มเหลวแค่ log ไม่กระทบยอด/S0)
+  → worker thread `cloud-outbox` ส่ง: 2xx = `SENT`, ไม่สำเร็จ = `PENDING` + `attempts`/`last_error` + backoff 5s, 10s, ... สูงสุด `RETRY_INTERVAL`
+- คงอยู่ข้าม restart (อยู่ใน DB); ปิด `CLOUD_SEND_EVENTS` ภายหลัง → รายการค้างหยุดส่ง ไม่ลบ (startup log จำนวนที่ค้าง)
+- **ไม่ลบภาพในเครื่องหลังส่ง** และ disk_cleanup ไม่ลบภาพที่ยัง PENDING (ถ้าค้างนานภาพจะสะสม — ดู log `เก็บภาพเก่า ... รอส่งขึ้นเว็บ`)
+- ดูคิว: `sqlite3 data/vending_state.sqlite3 "SELECT event_id,state,attempts,last_error FROM cloud_outbox ORDER BY id DESC LIMIT 20"`
+- ตาราง `cloud_outbox` สร้างอัตโนมัติตอนเปิด DB (`CREATE TABLE IF NOT EXISTS`, ไม่เปลี่ยน schema version) → rollback image รุ่นก่อนยังเปิด DB ได้
 
 **เปลี่ยนโปรไฟล์บนตู้** (ไม่ต้อง build ใหม่ ยอด/DB ไม่หาย):
 ```bash

@@ -64,6 +64,25 @@ def post_event(payload, image_path=None):
         return False
 
 
+def send_event(payload, image_path=None, timeout=10):
+    """ส่ง event (+ ภาพ landed_image ถ้ามีไฟล์) — คืน None ถ้าสำเร็จ (2xx) ไม่งั้นข้อความ error
+    ไม่ลบภาพในเครื่อง (ภาพหลักฐานเป็นของ local เสมอ)"""
+    try:
+        if image_path and os.path.exists(image_path):
+            with open(image_path, "rb") as f:
+                files = {"landed_image": (os.path.basename(image_path), f, "image/jpeg")}
+                resp = requests.post(CLOUD_API_URL, data=payload, files=files, headers=_headers(), timeout=timeout)
+        else:
+            if image_path:
+                logger.warning(f"⚠️ ไม่พบภาพ {image_path} → ส่ง event {payload.get('event')} โดยไม่มีภาพ")
+            resp = requests.post(CLOUD_API_URL, data=payload, headers=_headers(), timeout=timeout)
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    if 200 <= resp.status_code < 300:
+        return None
+    return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+
 def register_machine(machine_id: str):
     """
     ลงทะเบียนตู้กับ Server โดยส่ง SYSTEM_ONLINE event ไปที่ POST /api/events

@@ -8,6 +8,8 @@ Policy (ตั้งใน config / .env):
   - เรียกทุก CLEANUP_INTERVAL_HOURS ชั่วโมง
   - ลบเฉพาะใน evidence_images เท่านั้น — ไม่แตะไฟล์ DB (data/) และ logs/item_drops
     (ลบรูปเก่าไม่ทำให้ยอดรายวันลด เพราะยอดอยู่ใน DB)
+  - ห้ามลบภาพของ event ที่ยังรอส่งขึ้นเว็บ (cloud_outbox PENDING) แม้เก่าเกินกำหนด
+    อ่านรายการไม่ได้ → ข้าม cleanup รอบนั้นทั้งรอบ (ไม่เสี่ยงลบภาพที่รอส่ง)
 """
 
 import os
@@ -21,8 +23,15 @@ logger = get_logger("disk_cleanup")
 ANOMALY_SUBDIR = "anomaly"
 
 
-def _cleanup_once(image_dir=EVIDENCE_DIR, now=None):
-    """ลบไฟล์ที่เก่าเกินกำหนดออกจาก image_dir คืนจำนวนไฟล์ที่ลบ"""
+def _norm(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _cleanup_once(image_dir=EVIDENCE_DIR, now=None, protected=()):
+    """ลบไฟล์ที่เก่าเกินกำหนดออกจาก image_dir คืนจำนวนไฟล์ที่ลบ
+    protected: path ที่ห้ามลบ (ภาพที่รอส่งขึ้นเว็บ)"""
+    protected = {_norm(p) for p in protected}
+    kept = 0
     if not os.path.isdir(image_dir):
         return 0
     now = time.time() if now is None else now
@@ -38,10 +47,15 @@ def _cleanup_once(image_dir=EVIDENCE_DIR, now=None):
             fpath = os.path.join(root, fname)
             try:
                 if os.path.getmtime(fpath) < cutoff:
+                    if protected and _norm(fpath) in protected:
+                        kept += 1
+                        continue
                     os.remove(fpath)
                     removed += 1
             except Exception as e:
                 logger.warning(f"ลบไฟล์ไม่ได้ {fpath}: {e}")
+    if kept:
+        logger.info(f"🧹 Disk cleanup: เก็บภาพเก่า {kept} ไฟล์ไว้ก่อน (ยังรอส่งขึ้นเว็บ)")
     if removed:
         logger.info(
             f"🧹 Disk cleanup: ลบ {removed} ไฟล์ "
@@ -50,12 +64,18 @@ def _cleanup_once(image_dir=EVIDENCE_DIR, now=None):
     return removed
 
 
-def start_cleanup_thread():
-    """เริ่ม background thread สำหรับ disk cleanup"""
+def start_cleanup_thread(protected_paths=None):
+    """เริ่ม background thread สำหรับ disk cleanup
+    protected_paths: callable คืน path ที่ห้ามลบ (เรียกใหม่ทุกรอบ)"""
 
     def _loop():
         while True:
-            _cleanup_once()
+            try:
+                protected = protected_paths() if protected_paths else ()
+            except Exception as e:
+                logger.warning(f"⚠️ Disk cleanup: อ่านรายการภาพที่รอส่งไม่ได้ ({e}) → ข้ามรอบนี้")
+            else:
+                _cleanup_once(protected=protected)
             time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
 
     t = threading.Thread(target=_loop, daemon=True, name="disk-cleanup")

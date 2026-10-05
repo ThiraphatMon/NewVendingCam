@@ -34,6 +34,7 @@ from config import (
     STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES,
     ENV_SETTLE_REBASELINE, REMOVAL_CHECK, REMOVAL_EDGE_RATIO, REMOVAL_MATCH_RATIO, REMOVAL_UNCERTAIN_SEND_S0,
 )
+from api.cloud import item_landed_event
 from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
 from core import cycle as cyc
 from core.background import BackgroundModel, find_env_change
@@ -46,7 +47,7 @@ from core.tracker import MemoryTracker, is_motion_in_roi
 from utils import daily_log, image_saver
 from utils.disk_cleanup import start_cleanup_thread
 from utils.logger import get_logger
-from utils.state_store import R_EXPIRED, R_FAILED, StateStore, StateStoreError
+from utils.state_store import R_EXPIRED, R_FAILED, StateStore, StateStoreError, pending_image_paths
 from ui.overlay import render_overlay
 
 logger = get_logger("main")
@@ -227,7 +228,7 @@ class App:
                     if self._looks_like_removal(tracked[landed], frame_gray):
                         self._capture_anomaly(POSSIBLE_REMOVAL, frame, frame_gray, now)
                     else:
-                        self._confirm(frame, frame_gray, now)
+                        self._confirm(frame, frame_gray, now, landed)
             elif self.cm.state == cyc.CONFIRMED_WAIT_STOP:
                 self._capture_anomaly(EXTRA_AFTER_CONFIRM, frame, frame_gray, now)
             elif self.cm.state == cyc.WAIT_START and self.watch_since is not None:
@@ -327,8 +328,9 @@ class App:
         self.watch_since = None
 
     # ── การยืนยัน ────────────────────────────────────────────────────────────
-    def _confirm(self, frame, frame_gray, now):
-        """ภาพ → DB (transaction เดียว) → latch → S0 — ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0"""
+    def _confirm(self, frame, frame_gray, now, obj_id=None):
+        """ภาพ → DB (transaction เดียว) → latch → S0 → (cloud outbox) — ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0
+        cloud ทำหลัง S0 และล้มเหลวได้โดยไม่กระทบยอด/S0"""
         cycle_id = self.cm.cycle_id
         t0 = time.perf_counter()
 
@@ -351,6 +353,7 @@ class App:
         self.today_count = conf.daily_sequence
         self.controller.request_s0(cycle_id, self.last_cmd_seq)
         daily_log.append(self.daily_log_dir, conf)
+        self._queue_item_landed(conf, obj_id)
 
         # [RESET MOTION] เฟรมนี้เป็น bg ใหม่ + tracker ลืมของชิ้นนี้ → motion หลังยืนยันเป็นของใหม่
         self.bg.rebaseline(frame_gray, now)
@@ -360,6 +363,19 @@ class App:
             f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — ยอดวันนี้ {conf.daily_sequence} "
             f"(บันทึก {ms:.0f}ms) → ส่ง S0"
         )
+
+    def _queue_item_landed(self, conf, obj_id):
+        """[CLOUD] ITEM_LANDED → cloud_outbox (worker ส่งเอง) — เฉพาะ CLOUD_SEND_EVENTS เปิด
+        เขียน DB ไม่ได้ → แค่ log (ยอดและ S0 ทำไปแล้ว ไม่ย้อนกลับ)"""
+        if self.cloud is None or not self.cloud.features["events"]:
+            return
+        event_id, payload = item_landed_event(self.machine_id, conf, obj_id)
+        try:
+            self.store.enqueue_cloud_event(event_id, conf.cycle_id, "ITEM_LANDED", payload, conf.evidence_path)
+        except sqlite3.Error as e:
+            logger.error(f"❌ บันทึก ITEM_LANDED ลง outbox ไม่ได้ ({e}) → ไม่ส่งขึ้นเว็บ (ยอด/S0 ปกติ)")
+            return
+        self.cloud.notify_outbox()
 
     def _rebaseline_settled_env(self, frame_gray, now):
         """[ENV SETTLED] รอบ ACTIVE: env change ค้าง (พื้นหลังของรอบต่างจากฉากเกิน MAX_BLOB_ROI_RATIO)
@@ -539,7 +555,8 @@ def main():
     )
     source = FrameSource(CAMERA_INDEX)
     roi_manager = ROIManager(FRAME_W, FRAME_H, config_path=ROI_CONFIG_PATH)
-    start_cleanup_thread()
+    # ภาพที่ยังรอส่งขึ้นเว็บ (outbox PENDING) ห้ามลบแม้เก่าเกิน CLEANUP_KEEP_DAYS
+    start_cleanup_thread(protected_paths=lambda: pending_image_paths(STATE_DB_PATH))
     # [CLOUD] เริ่มเฉพาะฟีเจอร์ที่เปิด (ปิดทั้งหมด = ไม่มี thread / HTTP เลย) — โหมด START–STOP ไม่ใช้ order listener
     features = config.cloud_features()
     logger.info(config.cloud_summary(features))
@@ -547,7 +564,12 @@ def main():
     if any(features.values()):
         from api.cloud import CloudServices
 
-        cloud = CloudServices(args.machine, features, roi_path=ROI_CONFIG_PATH).start()
+        cloud = CloudServices(args.machine, features, roi_path=ROI_CONFIG_PATH, db_path=STATE_DB_PATH).start()
+    pending = store.count_pending_cloud_events()
+    if pending and not features["events"]:
+        logger.warning(f"☁️ มี event ค้างใน outbox {pending} รายการ — ITEM_LANDED ปิดอยู่ จึงหยุดส่ง (ไม่ลบ)")
+    elif pending:
+        logger.info(f"☁️ มี event ค้างใน outbox {pending} รายการ → ส่งต่อ")
 
     # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
     if not HEADLESS:

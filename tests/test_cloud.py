@@ -1,6 +1,8 @@
 """tests ฝั่ง cloud (CLOUD_ENABLED=1) กับ stub HTTP server ในเครื่อง (conftest.cloud_stub) — ห้ามยิง server จริง"""
 
 import json
+import os
+import re
 import threading
 import time
 
@@ -12,15 +14,27 @@ import api.client
 import api.cloud
 import config
 from api.cloud import CloudServices
-from conftest import FPS, empty_frame, multipart_fields, run_frames
+from conftest import (
+    FPS, FRAMES_TO_CONFIRM, FakeController, empty_frame, frame_with, multipart_fields, run_frames, settle,
+)
 
 LOCAL_ROI = {"frame": {"width": 640, "height": 480}, "roi_type": "rect",
              "rect": {"x": 100, "y": 100, "w": 400, "h": 300}}
+ITEM = frame_with((300, 250))
 ALL_OFF = {"register": False, "roi_sync": False, "realtime": False, "events": False, "anomaly": False}
 
 
 def features(**on):
     return {**ALL_OFF, **on}
+
+
+def _wait(pred, timeout=3.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 @pytest.fixture
@@ -45,8 +59,9 @@ def services(monkeypatch, tmp_path):
     roi_path = tmp_path / "roi.json"
     roi_path.write_text(json.dumps(LOCAL_ROI))
 
-    def _make(feats):
-        svc = CloudServices("VENDING_01", feats, roi_path=str(roi_path))
+    def _make(feats, db_path=None):
+        svc = CloudServices("VENDING_01", feats, roi_path=str(roi_path),
+                            db_path=db_path or str(tmp_path / "state.sqlite3"))
         made.append(svc)
         return svc
 
@@ -173,3 +188,172 @@ def test_realtime_quality_does_not_change_evidence_image(tmp_path, monkeypatch):
     path = image_saver.save_evidence(_textured_frame(), image_saver.CONFIRMED, "CONFIRMED", "c" * 32,
                                      base_dir=str(tmp_path))
     assert path and calls == [()]
+
+
+# ── ITEM_LANDED ผ่าน outbox (S11) ──────────────────────────────────────────────
+@pytest.fixture
+def events_svc(services, env, monkeypatch):
+    """CloudServices ที่เปิดเฉพาะ event (worker อ่าน DB เดียวกับ App) + backoff เร็วสำหรับ test"""
+    monkeypatch.setattr(api.cloud, "BACKOFF_BASE_SEC", 0.05)
+    monkeypatch.setattr(api.cloud, "RETRY_INTERVAL", 0.2)
+
+    env.open_store().close()  # main เปิด StateStore (สร้าง DB) ก่อนเริ่ม cloud เสมอ
+
+    def _make(on=True):
+        return services(features(events=on), db_path=env.db_path)
+
+    return _make
+
+
+def _confirm_one(make_app, env, cloud):
+    ctl = FakeController()
+    app = make_app(ctl, cloud=cloud)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    assert len(ctl.s0) == 1
+    return app, ctl
+
+
+def _event_posts(stub):
+    return [r for r in stub.requests if r.method == "POST" and r.path == "/api/events"]
+
+
+def test_item_landed_sent_after_s0_with_legacy_fields(make_app, env, cloud_stub, events_svc):
+    svc = events_svc().start()
+    app, ctl = _confirm_one(make_app, env, svc)
+    req = cloud_stub.wait_for(lambda r: r.path == "/api/events")
+    assert req is not None
+    fields, files = multipart_fields(req)
+    cycle = ctl.s0[0]
+    assert set(fields) == {"machine_id", "event", "transaction_id", "item_no", "obj_id", "land_time", "order_id"}
+    assert fields["machine_id"] == "VENDING_01" and fields["event"] == "ITEM_LANDED" and fields["order_id"] == ""
+    # FakeClock เริ่ม 13:45:12 ไทย 05/10/2026 → ยืนยันหลัง settle 1s + ~2s
+    assert re.fullmatch(rf"TXN-20261005-1345\d\d-{cycle[:8]}", fields["transaction_id"])
+    assert re.fullmatch(r"13:45:\d\d", fields["land_time"])
+    assert fields["item_no"] == "1" and fields["obj_id"].isdigit()
+    conf_path = app.store.confirmations_for_date("2026-10-05")[0].evidence_path
+    with open(conf_path, "rb") as f:
+        assert files["landed_image"] == f.read()
+    assert os.path.exists(conf_path)  # ห้ามลบภาพในเครื่องหลังส่งสำเร็จ
+    _wait(lambda: app.store.cloud_events()[0]["state"] == "SENT")
+    row = app.store.cloud_events()[0]
+    assert row["event_id"] == f"ITEM_LANDED:{cycle}" and row["cycle_id"] == cycle and row["attempts"] == 1
+    assert row["image_path"] == conf_path and row["last_error"] is None
+    assert len(_event_posts(cloud_stub)) == 1
+
+
+def test_outbox_retries_with_backoff_then_sends(make_app, env, cloud_stub, events_svc):
+    cloud_stub.fail_next = [500, 503]
+    svc = events_svc().start()
+    app, _ = _confirm_one(make_app, env, svc)
+    assert _wait(lambda: app.store.cloud_events()[0]["state"] == "SENT", timeout=5)
+    row = app.store.cloud_events()[0]
+    assert row["attempts"] == 3 and len(_event_posts(cloud_stub)) == 3
+
+
+def test_outbox_failure_records_error_and_backoff(make_app, env, cloud_stub, events_svc, monkeypatch):
+    monkeypatch.setattr(api.cloud, "BACKOFF_BASE_SEC", 30.0)
+    monkeypatch.setattr(api.cloud, "RETRY_INTERVAL", 60)
+    cloud_stub.fail_next = [500]
+    svc = events_svc().start()
+    app, _ = _confirm_one(make_app, env, svc)
+    assert _wait(lambda: app.store.cloud_events()[0]["attempts"] == 1)
+    row = app.store.cloud_events()[0]
+    assert row["state"] == "PENDING" and row["last_error"].startswith("HTTP 500")
+    assert 25 < row["next_attempt_at"] - time.time() <= 30  # รอ backoff ไม่ยิงซ้ำทันที
+    time.sleep(0.3)
+    assert len(_event_posts(cloud_stub)) == 1
+
+
+def test_backoff_delay_doubles_up_to_retry_interval(monkeypatch):
+    monkeypatch.setattr(api.cloud, "BACKOFF_BASE_SEC", 5.0)
+    monkeypatch.setattr(api.cloud, "RETRY_INTERVAL", 60)
+    assert [api.cloud.backoff_delay(n) for n in range(1, 7)] == [5, 10, 20, 40, 60, 60]
+
+
+def test_events_off_no_outbox_and_no_http(make_app, env, cloud_stub, events_svc):
+    svc = events_svc(on=False).start()
+    app, _ = _confirm_one(make_app, env, svc)
+    time.sleep(0.2)
+    assert app.store.cloud_events() == [] and cloud_stub.requests == []
+    app2, _ = _confirm_one(make_app, env, None)  # cloud ปิดทั้งหมด
+    assert app2.store.cloud_events() == []
+
+
+def test_pending_survives_restart_and_stops_while_events_off(env, cloud_stub, events_svc):
+    store = env.open_store()
+    store.enqueue_cloud_event("ITEM_LANDED:abc", "abc", "ITEM_LANDED", {"event": "ITEM_LANDED"}, None)
+    store.close()
+    # ปิด CLOUD_SEND_EVENTS ภายหลัง → ไม่ส่ง ไม่ลบ
+    events_svc(on=False).start()
+    time.sleep(0.3)
+    store = env.open_store()
+    assert cloud_stub.requests == [] and store.cloud_events()[0]["state"] == "PENDING"
+    # เปิดใหม่ (เหมือน restart) → ส่งรายการที่ค้าง
+    events_svc().start()
+    assert _wait(lambda: store.cloud_events()[0]["state"] == "SENT")
+    assert store.count_pending_cloud_events() == 0
+
+
+def test_cloud_hang_does_not_block_s0_or_main_thread(make_app, env, cloud_stub, events_svc, monkeypatch):
+    import requests
+
+    cloud_stub.hang = True
+    threads = []
+    real_post = requests.post
+    monkeypatch.setattr(requests, "post", lambda *a, **k: threads.append(threading.current_thread().name)
+                        or real_post(*a, **k))
+    svc = events_svc().start()
+    t0 = time.perf_counter()
+    app, ctl = _confirm_one(make_app, env, svc)
+    ctl.push("STOP")
+    run_frames(app, env, ITEM, 3)
+    assert app.store.get_cycle(ctl.s0[0])["outcome"] == "CONFIRMED"
+    assert time.perf_counter() - t0 < 5
+    assert cloud_stub.wait_for(lambda r: r.path == "/api/events")
+    assert threads and "MainThread" not in threads
+
+
+def test_outbox_table_added_to_existing_db_without_version_bump(env):
+    store = env.open_store()
+    store.conn.execute("DROP TABLE cloud_outbox")  # เหมือน DB ที่สร้างจากโปรแกรมรุ่นก่อน
+    store.close()
+    store = env.open_store()
+    assert store.cloud_events() == []
+    assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_cleanup_keeps_images_pending_in_outbox(env):
+    from utils.disk_cleanup import _cleanup_once
+    from utils.state_store import pending_image_paths
+
+    d = os.path.join(env.evidence_dir, "confirmed")
+    os.makedirs(d)
+    paths = [os.path.join(d, n) for n in ("pending.jpg", "sent.jpg", "plain.jpg")]
+    for p in paths:
+        open(p, "wb").close()
+        os.utime(p, (1, 1))  # เก่ามาก
+    store = env.open_store()
+    store.enqueue_cloud_event("e1", "c1", "ITEM_LANDED", {}, paths[0])
+    store.enqueue_cloud_event("e2", "c2", "ITEM_LANDED", {}, paths[1])
+    store.conn.execute("UPDATE cloud_outbox SET state='SENT' WHERE event_id='e2'")
+    assert _cleanup_once(env.evidence_dir, protected=pending_image_paths(env.db_path)) == 2
+    assert [os.path.exists(p) for p in paths] == [True, False, False]
+
+
+def test_pending_image_paths_without_db_or_table(tmp_path):
+    from utils.state_store import pending_image_paths
+    import sqlite3
+
+    assert pending_image_paths(str(tmp_path / "none.sqlite3")) == set()
+    db = tmp_path / "old.sqlite3"
+    sqlite3.connect(db).close()
+    assert pending_image_paths(str(db)) == set()
+
+
+def test_outbox_worker_does_not_create_db(services, tmp_path):
+    path = tmp_path / "missing" / "state.sqlite3"
+    services(features(events=True), db_path=str(path)).start()
+    time.sleep(0.2)
+    assert not path.exists()

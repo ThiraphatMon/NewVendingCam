@@ -95,7 +95,7 @@ CLOUD_ENABLED = _bool("CLOUD_ENABLED", False)
 #   ภาพสดเปิด/ปิดด้วย SEND_INTERVAL (หมวด 5, 0 = ปิด)
 # ดึง ROI จากเว็บเป็นระยะ + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่ม (ถ้าเว็บยังไม่มี)
 CLOUD_ROI_SYNC = _bool("CLOUD_ROI_SYNC", True)
-# ส่ง event ITEM_LANDED + ภาพตอนยืนยันสินค้า (หลัง S0, ผ่าน outbox ใน DB)
+# ส่ง event ITEM_LANDED + ภาพตอนยืนยันสินค้า (หลัง S0, ผ่าน outbox ใน DB — ปิดภายหลัง: รายการค้างหยุดส่ง ไม่ลบ)
 CLOUD_SEND_EVENTS = _bool("CLOUD_SEND_EVENTS", True)
 # ส่ง event anomaly — เตรียมไว้ ยังไม่ส่งจริง (ยังไม่รู้ว่าเว็บรับ event ชนิดใหม่ได้ไหม)
 CLOUD_SEND_ANOMALY = _bool("CLOUD_SEND_ANOMALY", False)
@@ -235,7 +235,7 @@ if not 1 <= REALTIME_JPEG_QUALITY <= 100:
 ROI_POLL_INTERVAL = _float("ROI_POLL_INTERVAL", 10)
 ROI_CHECK_INTERVAL = _float("ROI_CHECK_INTERVAL", 5)
 
-# ส่ง event ที่ค้าง (เน็ตหลุด) ซ้ำทุกกี่วินาที
+# ส่งซ้ำเมื่อเน็ตหลุด (event ใน outbox / register / push ROI): backoff 5s, 10s, 20s, ... รอสูงสุดกี่วินาที
 RETRY_INTERVAL = _int("RETRY_INTERVAL", 60)
 
 # รอกี่วินาทีก่อนต่อใหม่ เมื่อกล้อง / WebSocket หลุด

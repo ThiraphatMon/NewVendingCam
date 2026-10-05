@@ -31,7 +31,7 @@ CLOUD_ENABLED=0
 # API_KEY=
 # ดึง ROI จากเว็บเป็นระยะ + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่ม (ถ้าเว็บยังไม่มี)
 # CLOUD_ROI_SYNC=1
-# ส่ง event ITEM_LANDED + ภาพ ตอนยืนยันสินค้า (หลัง S0)
+# ส่ง event ITEM_LANDED + ภาพ ตอนยืนยันสินค้า (หลัง S0, คิวใน DB ส่งซ้ำได้ข้าม restart, ภาพในเครื่องไม่ถูกลบ)
 # CLOUD_SEND_EVENTS=1
 # ส่ง event anomaly — เตรียมไว้ ยังไม่ส่งจริง
 # CLOUD_SEND_ANOMALY=0
@@ -111,7 +111,7 @@ CLEANUP_INTERVAL_HOURS=1
 # ANOMALY_MAX_PER_HOUR=20
 # ANOMALY_KEEP_DAYS=3
 
-# ใช้เฉพาะ CLOUD_ENABLED=1: ดึง ROI จากเว็บทุกกี่วินาที / ส่ง event ที่ค้างซ้ำทุกกี่วินาที
+# ใช้เฉพาะ CLOUD_ENABLED=1: ดึง ROI จากเว็บทุกกี่วินาที / เวลารอสูงสุดระหว่างลองส่งซ้ำ (backoff 5s, 10s, ... ไม่เกินค่านี้)
 # ROI_POLL_INTERVAL=10
 # RETRY_INTERVAL=60
 
