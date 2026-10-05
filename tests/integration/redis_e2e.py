@@ -51,7 +51,7 @@ def docker_cmd():
 
 
 def docker(*args, check=True):
-    r = subprocess.run(docker_cmd() + list(args), capture_output=True, text=True)
+    r = subprocess.run(docker_cmd() + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and r.returncode != 0:
         raise RuntimeError(f"docker {' '.join(args)} ล้มเหลว: {r.stderr.strip()}")
     return r.stdout.strip()

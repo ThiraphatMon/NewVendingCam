@@ -128,6 +128,7 @@ CENTROID_STABLE_DIST = _int("CENTROID_STABLE_DIST", 10)
 CYCLE_TIMEOUT_SEC = _float("CYCLE_TIMEOUT_SEC", 300)
 
 # ── ค่าของระบบ order เดิม: ไม่มีผลในโหมด START–STOP (เก็บไว้ให้ .env เก่ายังอ่านได้) ──
+#   ตั้งไว้ใน .env → ตอน startup จะ log เตือน (ดู inactive_warnings ท้ายไฟล์)
 
 # รอของตกนานแค่ไหนหลังได้ order (วินาที) — เริ่มนับใหม่ทุกครั้งที่จับของได้ 1 ชิ้น
 # หมดเวลา → สรุปผล completed / anomaly / no_drop ส่งขึ้น server
@@ -175,11 +176,14 @@ BG_LEARNING_RATE = _float("BG_LEARNING_RATE", 0.1)
 RESET_GRACE_SEC = _float("RESET_GRACE_SEC", 1.5)
 BG_RELEARN_RATE = _float("BG_RELEARN_RATE", 0.3)
 
-# เก็บภาพ "ช่องรับของว่าง" (clean background) ทุกกี่วินาที ตอนไม่มีรอบและ ROI นิ่ง
+# เก็บภาพ "ช่องรับของว่าง" (clean_bg = เฟรมปัจจุบัน) ทุกกี่วินาที ตอนไม่มีรอบและ ROI นิ่ง
+#   START ใช้ clean_bg ที่เก็บหลังการเปลี่ยนแปลงครั้งล่าสุดเป็นพื้นหลังของรอบ (ไม่มี → เฟรมปัจจุบัน)
 CLEAN_BG_INTERVAL = _float("CLEAN_BG_INTERVAL", 0.5)
-# "ROI นิ่ง" = พิกเซลที่เปลี่ยนใน ROI ไม่เกินสัดส่วนนี้ของพื้นที่ ROI (0.002 = 0.2%)
+# "ROI นิ่ง" = พิกเซลใน ROI ที่เปลี่ยนจากเฟรมก่อนหน้า ไม่เกินสัดส่วนนี้ของพื้นที่ ROI (0.002 = 0.2%)
 #   ติดกันกี่เฟรม — ยอม noise ของกล้อง/การบีบอัดภาพ แต่ของที่กำลังตก/มือจะเกินเสมอ
-#   ⚠ log เตือน "fallback: ไม่มี clean_bg" บ่อย → ↑ ratio เล็กน้อย | ของถูกกลืนเข้า clean_bg → ↓
+#   ใช้ร่วมกับ: watch mode จบ, ตั้งพื้นหลังรอบใหม่หลัง env change สงบ
+#   (คลิปทดสอบ: ถาดนิ่งเปลี่ยนสูงสุด 42 px จาก ROI 34,112 px = 0.12%)
+#   ⚠ log "baseline ไม่แน่นอน" ตอน START ทั้งที่ถาดนิ่ง → ↑ ratio เล็กน้อย | มือขยับช้าถูกนับว่านิ่ง → ↓
 CLEAN_BG_MAX_MOTION_RATIO = _float("CLEAN_BG_MAX_MOTION_RATIO", 0.002)
 CLEAN_BG_STABLE_FRAMES = _int("CLEAN_BG_STABLE_FRAMES", 5)
 
@@ -236,6 +240,39 @@ FRAME_W = 640
 FRAME_H = 480
 ROI_CONFIG_PATH = "data/roi_config.json"
 EVIDENCE_DIR = "evidence_images"
+
+
+# ── ค่าที่ตั้งใน .env แต่ไม่มีผล (main log เตือนตอน startup) ──────────────────────
+# ระบบ order เดิม (WebSocket) ไม่ถูกเริ่มในโหมด START–STOP เลย
+_ORDER_ONLY_KEYS = (
+    "WS_URL", "WS_RECONNECT_SEC", "ORDER_WINDOW", "CONFIRMED_HOLD_TIMEOUT", "DROP_TIMEOUT",
+    "CAP_COUNT_TO_ORDER_QTY",
+)
+# มีผลเฉพาะ CLOUD_ENABLED=1
+_CLOUD_ONLY_KEYS = ("CLOUD_API_URL", "API_KEY", "SEND_INTERVAL", "ROI_POLL_INTERVAL", "RETRY_INTERVAL")
+# มีผลเฉพาะ CONTROL_MODE=redis
+_REDIS_ONLY_KEYS = (
+    "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_PASSWORD", "REDIS_CTRL_KEY", "REDIS_RESPONSE_KEY",
+    "REDIS_CONNECT_TIMEOUT_SEC", "REDIS_SOCKET_TIMEOUT_SEC",
+)
+
+
+def inactive_warnings(environ=None):
+    """รายการข้อความเตือน: ค่าที่ admin ตั้งไว้ใน .env (ไม่ว่าง) แต่ไม่มีผลกับโหมดที่รันอยู่"""
+    env = os.environ if environ is None else environ
+    cloud = env.get("CLOUD_ENABLED", "0").strip().strip('"').strip("'") in ("1", "true", "True", "yes")
+    mode = (env.get("CONTROL_MODE") or "redis").strip().strip('"').strip("'").lower()
+    groups = [(_ORDER_ONLY_KEYS, "ระบบ order เดิม ไม่ใช้ในโหมด START–STOP")]
+    if not cloud:
+        groups.append((_CLOUD_ONLY_KEYS, "มีผลเฉพาะ CLOUD_ENABLED=1"))
+    if mode != "redis":
+        groups.append((_REDIS_ONLY_KEYS, "มีผลเฉพาะ CONTROL_MODE=redis"))
+    out = []
+    for keys, why in groups:
+        found = [k for k in keys if env.get(k, "").strip()]
+        if found:
+            out.append(f"⚠️ .env: {', '.join(found)} ไม่มีผล ({why}) — ลบออกหรือใส่ # ได้")
+    return out
 
 
 # ── สรุปค่าที่ใช้งานจริง (main เรียกตอน startup) ──────────────────────────────

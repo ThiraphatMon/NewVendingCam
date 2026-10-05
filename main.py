@@ -486,6 +486,8 @@ def main():
     logger.info(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
     logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'} / คำสั่งจาก {CONTROL_MODE}")
     logger.info(config.summary())
+    for warning in config.inactive_warnings():
+        logger.warning(warning)
 
     try:
         store = StateStore(STATE_DB_PATH, args.machine, COUNT_TIMEZONE)

@@ -8,14 +8,21 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 10s
+    # Redis ของ controller อยู่บนบอร์ดเดียวกัน (127.0.0.1:6379) → ใช้ network ของ host
+    # ไม่มี Redis service ในไฟล์นี้ — ห้ามเพิ่ม (ต้องใช้ Redis ตัวเดียวกับ controller)
+    network_mode: host
     env_file:
       - .env
+    environment:
+      # เวลาใน log / ชื่อไฟล์ภาพเป็นเวลาไทย (ยอดรายวันใช้ COUNT_TIMEZONE แยกอยู่แล้ว)
+      - TZ=Asia/Bangkok
     devices:
       # ค่าเริ่มต้นสำหรับกล้อง USB/UVC; ตรวจด้วย v4l2-ctl --list-devices บนบอร์ด
       - /dev/video0:/dev/video0
     volumes:
       # เก็บข้อมูลไว้นอก container เพื่อไม่ให้หายตอน rebuild/recreate
       - ./evidence_images:/app/evidence_images
+      # data/ = roi_config.json + vending_state.sqlite3 (ยอด/รอบ) — ห้ามลบ
       - ./data:/app/data
       - ./logs:/app/logs
     logging:

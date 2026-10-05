@@ -17,6 +17,13 @@ __pycache__
 evidence_images
 logs
 *.log
+data
+.e2e_tmp
+
+# ไม่ใช้ใน image
+tests
+docs
+legacy_reference
 
 # ไฟล์ทดสอบขนาดใหญ่และไฟล์จาก editor/OS
 *.mp4

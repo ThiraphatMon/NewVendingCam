@@ -5,3 +5,6 @@ requests==2.32.3
 python-dotenv==1.0.1
 # อัพเดทใหม่สำหรับลง Orange Pi: ล็อกเวอร์ชันเพื่อให้ทุกบอร์ด build ได้เหมือนกัน
 websocket-client==1.8.0
+# START–STOP ผ่าน Redis ของ controller / timezone ของยอดรายวัน (zoneinfo ต้องมี tzdata)
+redis==5.2.1
+tzdata==2025.2

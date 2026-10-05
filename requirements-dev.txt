@@ -1,0 +1,4 @@
+# For running tests on PC (ASCII-only: pip on Windows reads this file as cp1252)
+#   pip install -r requirements-pc.txt -r requirements-dev.txt
+pytest==8.3.4
+fakeredis==2.26.2

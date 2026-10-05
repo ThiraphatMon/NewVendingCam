@@ -1,0 +1,10 @@
+# ไฟล์ข้อความใช้ LF เสมอ (ไฟล์ที่รันบน Orange Pi / ใน Docker ต้องไม่มี CRLF)
+* text=auto eol=lf
+
+# ไฟล์ binary — ห้ามแปลง
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.mp4 binary
+*.avi binary
+*.sqlite3 binary

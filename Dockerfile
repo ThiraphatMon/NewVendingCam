@@ -27,12 +27,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. copy เฉพาะ source ที่ต้องใช้
 # ไม่ใช้ COPY . . เพื่อป้องกัน .env, .venv ของ Windows และไฟล์ทดสอบหลุดเข้า image
+# ไม่ copy data/ (roi_config.json + ฐานข้อมูลยอด) — มาจาก volume ./data บนบอร์ดเท่านั้น
+# (ถ้า bake ไว้ ROI / DB ใน image จะถูก volume บังอยู่ดี และเสี่ยงฝัง DB ของเครื่องที่ build)
 COPY main.py config.py ./
 COPY api ./api
 COPY core ./core
 COPY utils ./utils
 COPY ui ./ui
-COPY data ./data
 
 # 6. สร้างโฟลเดอร์ runtime ซึ่ง docker-compose จะ bind mount จาก host
 RUN mkdir -p evidence_images data logs

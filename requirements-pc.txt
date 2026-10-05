@@ -7,3 +7,6 @@ numpy==1.26.4
 requests==2.32.3
 python-dotenv==1.0.1
 websocket-client==1.8.0
+# START-STOP via controller Redis / timezone data for daily counts
+redis==5.2.1
+tzdata==2025.2
