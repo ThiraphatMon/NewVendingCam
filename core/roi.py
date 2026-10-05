@@ -19,6 +19,7 @@ class ROIManager:
         self.config_path = config_path
         self.last_mtime = None
         self._last_check_time = 0.0  # timestamp ที่เช็ค mtime ล่าสุด
+        self._pending_mtime = None   # ไฟล์ ROI เปลี่ยนระหว่างรอบ (ยังไม่ใช้) — mtime ของไฟล์ที่รอใช้
         self.roi_type = "rect"
         self.config_frame_w = self.frame_w
         self.config_frame_h = self.frame_h
@@ -45,7 +46,7 @@ class ROIManager:
         }
 
     def load(self):
-        """โหลด ROI จากไฟล์ (ไม่มีไฟล์ → สร้าง default)
+        """โหลด ROI จากไฟล์ (ไม่มีไฟล์ → สร้าง default) คืน True ถ้าใช้ ROI จากไฟล์ได้
         ไฟล์พัง / เขียนไม่เสร็จ / ค่าผิดรูปแบบ → log warning แล้วใช้ ROI เดิมต่อ (ไม่ทำให้โปรแกรมตาย)"""
         if not os.path.exists(self.config_path):
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
@@ -72,7 +73,7 @@ class ROIManager:
             logger.warning(
                 f"⚠️ อ่าน ROI จาก {self.config_path} ไม่ได้ ({e}) → ใช้ ROI เดิมต่อ ({self.roi_type})"
             )
-            return
+            return False
 
         self.config_frame_w, self.config_frame_h = config_frame_w, config_frame_h
         self.roi_type = roi_type
@@ -88,20 +89,33 @@ class ROIManager:
             logger.warning(f"⚠️ Unknown roi_type: {self.roi_type}. Fallback to default rect.")
             self.roi_type = "rect"
             self.rect = self._default_config()["rect"]
+        return True
 
-    def reload_if_changed(self):
-        """เช็คและ reload config — แต่จะทำ syscall getmtime แค่ทุก ROI_CHECK_INTERVAL วินาที
-        แทนที่จะเรียกทุก frame เพื่อลด I/O load บน eMMC ของ Pi"""
+    def reload_if_changed(self, allow_apply=True):
+        """เช็คและ reload config — คืน True เมื่อใช้ ROI ใหม่แล้ว (ผู้เรียกต้องล้างสิ่งที่ผูกกับ ROI เดิม)
+        ทำ syscall getmtime แค่ทุก ROI_CHECK_INTERVAL วินาที แทนที่จะเรียกทุก frame (ลด I/O บน eMMC)
+
+        allow_apply=False (มีรอบเปิดอยู่): ไฟล์เปลี่ยน → ยังไม่ใช้ ROI ใหม่ (log ว่ารอใช้ ครั้งเดียว)
+          แล้วใช้ทันทีที่เรียกด้วย allow_apply=True (ไม่รอรอบเช็คถัดไป)"""
         now = time.time()
-        if now - self._last_check_time < ROI_CHECK_INTERVAL:
-            return  # ยังไม่ถึงเวลาเช็ค ข้ามไปก่อน
+        apply_pending = allow_apply and self._pending_mtime is not None
+        if not apply_pending and now - self._last_check_time < ROI_CHECK_INTERVAL:
+            return False  # ยังไม่ถึงเวลาเช็ค ข้ามไปก่อน
         self._last_check_time = now
 
         if not os.path.exists(self.config_path):
-            return
+            return False
         mtime = os.path.getmtime(self.config_path)
-        if self.last_mtime is None or mtime != self.last_mtime:
-            self.load()
+        if self.last_mtime is not None and mtime == self.last_mtime:
+            self._pending_mtime = None
+            return False
+        if not allow_apply:
+            if mtime != self._pending_mtime:
+                self._pending_mtime = mtime
+                logger.info("🕒 พบ ROI ใหม่ระหว่างรอบ → รอใช้ตอนจบรอบ (กลับ WAIT_START)")
+            return False
+        self._pending_mtime = None
+        return self.load()
 
     def _scale_point(self, point):
         scale_x = self.frame_w / max(1, self.config_frame_w)

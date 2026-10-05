@@ -211,6 +211,14 @@ class BackgroundModel:
         self.clean_bg = None
         self.clean_bg_valid = False
 
+    def forget_roi_history(self):
+        """ROI เปลี่ยน → ทิ้งสิ่งที่วัดใน ROI เดิม: clean_bg, การนับความนิ่ง, scene history
+        (clean_bg ใหม่ / ฉากใหม่ต้องนิ่งครบ CLEAN_BG_STABLE_FRAMES ใน ROI ใหม่ก่อน)"""
+        self.invalidate_clean_bg()
+        self.quiet_frames = 0
+        self.scenes.clear()
+        self.scene_last_update = 0.0
+
     def rebaseline(self, frame_gray, now):
         """[RESET MOTION] หลัง capture สำเร็จ: เอาเฟรมปัจจุบัน "ทั้งภาพ" เป็น bg ใหม่
         → motion mask ว่างทันที ของชิ้นถัดไป (แม้ตกทับที่เดิม) เป็น motion ใหม่ → นับเป็นชิ้นใหม่ได้

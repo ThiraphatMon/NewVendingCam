@@ -201,9 +201,11 @@ class App:
             self.cloud.submit_frame(frame, now)
 
         frame_gray = self.frame_gray
-        self.roi_manager.reload_if_changed()
-        roi_mask = self.roi_manager.build_mask(frame_gray.shape)
         idle = self.cm.state == cyc.WAIT_START
+        # [ROI] ROI ใหม่ (จากเว็บ/แก้ไฟล์) ระหว่างรอบ → รอใช้ตอนกลับ WAIT_START (ไม่เปลี่ยนเกณฑ์กลางรอบ)
+        if self.roi_manager.reload_if_changed(allow_apply=idle):
+            self._on_roi_changed(now)
+        roi_mask = self.roi_manager.build_mask(frame_gray.shape)
         diff = self.bg.update(frame_gray, now, idle=idle, roi_mask=roi_mask)
         if diff is None:
             return frame, None, {}
@@ -376,6 +378,16 @@ class App:
             logger.error(f"❌ บันทึก ITEM_LANDED ลง outbox ไม่ได้ ({e}) → ไม่ส่งขึ้นเว็บ (ยอด/S0 ปกติ)")
             return
         self.cloud.notify_outbox()
+
+    def _on_roi_changed(self, now):
+        """ใช้ ROI ใหม่แล้ว (WAIT_START เท่านั้น) → ล้าง tracker / clean_bg / scene history ที่ผูกกับ ROI เดิม"""
+        if self.watch_since is not None:
+            self._end_watch(now, "ROI เปลี่ยน")
+        self.tracker.clear_all()
+        self.bg.forget_roi_history()
+        logger.info(
+            f"🗺️ ใช้ ROI ใหม่ ({self.roi_manager.roi_type}) → ล้าง tracker / clean_bg / scene history ของ ROI เดิม"
+        )
 
     def _rebaseline_settled_env(self, frame_gray, now):
         """[ENV SETTLED] รอบ ACTIVE: env change ค้าง (พื้นหลังของรอบต่างจากฉากเกิน MAX_BLOB_ROI_RATIO)

@@ -194,6 +194,9 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 
 ค่าระบบ order เดิม (`WS_URL`, `ORDER_WINDOW`, `DROP_TIMEOUT`, ...) ไม่มีผลในโหมด START–STOP
 ROI: `data/roi_config.json` (rect / quad / polygon / multi_polygon บนภาพ 640x480) แก้แล้ว reload เองภายใน `ROI_CHECK_INTERVAL`
+- ROI ใหม่ (จากเว็บหรือแก้ไฟล์) ระหว่างรอบ (ACTIVE / CONFIRMED_WAIT_STOP / BLOCKED) → **ยังไม่ใช้** log `พบ ROI ใหม่ระหว่างรอบ → รอใช้`
+  แล้วใช้ทันทีที่กลับ WAIT_START (log `ใช้ ROI ใหม่`) พร้อมล้าง tracker / clean_bg / scene history / watch ที่ผูกกับ ROI เดิม
+  → START ถัดไปต้องรอถาดนิ่งใน ROI ใหม่ครบ `CLEAN_BG_STABLE_FRAMES` ก่อนจึงใช้ clean_bg ได้
 
 ### 7.1 Cloud / เว็บ (เปิด-ปิดทีละฟีเจอร์)
 
@@ -203,7 +206,7 @@ cloud เป็นส่วนเสริม — START/STOP/S0 ไม่รอ�
 | ค่า | default | ผล |
 |---|---|---|
 | `CLOUD_ENABLED` | 0 | สวิตช์หลัก: 0 = ไม่มี HTTP เลย; 1 = เปิดตามสวิตช์ย่อย + register ตู้ (ต้องตั้ง `CLOUD_API_URL` ไม่งั้นถือว่าปิด) |
-| `CLOUD_ROI_SYNC` | 1 | ดึง ROI จากเว็บทุก `ROI_POLL_INTERVAL` + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่มถ้าเว็บยังไม่มี |
+| `CLOUD_ROI_SYNC` | 1 | ดึง ROI จากเว็บทุก `ROI_POLL_INTERVAL` + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่มถ้าเว็บยังไม่มี (ROI ใหม่ระหว่างรอบรอใช้ตอนจบรอบ — ข้อ 7) |
 | `SEND_INTERVAL` | 60 | ภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด) |
 | `REALTIME_JPEG_QUALITY` | 80 | คุณภาพ JPEG ของภาพสดเท่านั้น — ขนาดคง 640x480 (เว็บใช้วาด ROI), ภาพหลักฐานไม่เกี่ยว; q80 ≈ 45KB/ภาพ (q95 เดิม ≈ 94KB) → ทุก 60s ≈ 65MB/วัน |
 | `CLOUD_SEND_EVENTS` | 1 | ส่ง event `ITEM_LANDED` + ภาพตอนยืนยันสินค้า |
