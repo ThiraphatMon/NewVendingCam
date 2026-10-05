@@ -404,14 +404,22 @@ class App:
             REMOVAL_EDGE_RATIO, REMOVAL_MATCH_RATIO, MOT_THRESH,
         )
         cycle = self.cm.cycle_id[:8]
+        # log 1 บรรทัดทุกการตัดสิน (INFO ขึ้นไป) — เก็บค่าขอบ/เกณฑ์ตอนทดสอบสินค้าจริง
+        detail = (
+            f"{v.describe()} | เกณฑ์: ขอบ < {REMOVAL_EDGE_RATIO:.2f} = ขอบลด, "
+            f"ฉากก่อนหน้า < {v.diff_base * REMOVAL_MATCH_RATIO:.1f} (พื้นหลังรอบ ×{REMOVAL_MATCH_RATIO:.2f}) = ตรง"
+        )
         if v.kind == removal.ADDITION:
-            logger.debug(f"🔍 รอบ {cycle}: candidate เป็นของใส่เข้า ({v.describe()})")
+            logger.info(f"🔍 รอบ {cycle}: S3={v.kind} candidate เป็นของใส่เข้า ({detail}) → ยืนยัน")
             return False
         if v.kind == removal.UNCERTAIN and REMOVAL_UNCERTAIN_SEND_S0:
-            logger.warning(f"🔍 รอบ {cycle}: ดูเหมือนหยิบออกแต่ไม่แน่ใจ ({v.describe()}) → ยืนยันตาม REMOVAL_UNCERTAIN_SEND_S0=1")
+            logger.warning(
+                f"🔍 รอบ {cycle}: S3={v.kind} ดูเหมือนหยิบออกแต่ไม่แน่ใจ ({detail}) "
+                f"→ ยืนยันตาม REMOVAL_UNCERTAIN_SEND_S0=1"
+            )
             return False
         why = "หยิบออก" if v.kind == removal.REMOVAL else "ไม่แน่ใจว่าหยิบออก (ไม่มีฉากก่อนหน้ายืนยัน)"
-        logger.warning(f"🔍 รอบ {cycle}: วัตถุนิ่งดูเหมือน{why} ({v.describe()}) → ไม่ยืนยัน ไม่ส่ง S0")
+        logger.warning(f"🔍 รอบ {cycle}: S3={v.kind} วัตถุนิ่งดูเหมือน{why} ({detail}) → ไม่ยืนยัน ไม่ส่ง S0")
         return True
 
     # ── เฝ้าดูนอกรอบ / anomaly ───────────────────────────────────────────────

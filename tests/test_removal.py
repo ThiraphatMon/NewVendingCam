@@ -1,5 +1,7 @@
 """tests S3: แยก "ของหายไป" (ลูกค้าหยิบออก) กับ "ของใส่เข้า" (สินค้าตก) — core/removal.py + main"""
 
+import logging
+
 import numpy as np
 
 import main
@@ -180,6 +182,21 @@ def test_removal_check_can_be_disabled(make_app, env, monkeypatch):
     _run_seq(app, env, _remove_item_by_hand())
     run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM * 2)
     assert len(ctl.s0) == 1  # พฤติกรรมเดิม (known limitation)
+
+
+def test_addition_verdict_logged_at_info_with_threshold(make_app, env, caplog):
+    # เก็บข้อมูลตอนทดสอบสินค้าจริง: ทุกการตัดสินของ S3 ต้องมี log INFO 1 บรรทัด (ค่าขอบ + เกณฑ์ + ผล)
+    caplog.set_level(logging.INFO, logger="vending")
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, frame_with(ITEM_POS), FRAMES_TO_CONFIRM)
+    assert len(ctl.s0) == 1
+    lines = [r for r in caplog.records if "S3=ADDITION" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    msg = lines[0].getMessage()
+    assert "ขอบ ×" in msg and f"ขอบ < {main.REMOVAL_EDGE_RATIO:.2f}" in msg and "→ ยืนยัน" in msg
 
 
 def test_rebuy_same_spot_after_pickup_outside_cycle_is_confirmed(make_app, env):
