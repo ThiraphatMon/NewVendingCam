@@ -1,6 +1,7 @@
 """fixtures ร่วม: นาฬิกาปลอม, กล้องปลอม, controller ปลอม, เฟรมสังเคราะห์ และตัวสร้าง App"""
 
 import json
+import time
 import types
 
 import numpy as np
@@ -124,12 +125,12 @@ def env(tmp_path, clock):
 def make_app(env):
     from main import App
 
-    def _make(controller=None, store=None):
+    def _make(controller=None, store=None, cloud=None):
         app = App(
             "VENDING_01", env.source, env.roi, store or env.open_store(),
             controller or FakeController(),
             headless=True, evidence_dir=env.evidence_dir, daily_log_dir=env.daily_dir,
-            clock=env.clock, mono=env.clock,
+            clock=env.clock, mono=env.clock, cloud=cloud,
         )
         return app
 
@@ -151,3 +152,105 @@ def settle(app, env, sec=1.0):
 
 # วัตถุนิ่งจนผ่านเกณฑ์ยืนยัน: 4 เฟรมจน SHAPE_CONFIRMED + CAPTURE_HOLD_SEC (default 1.0s) + เผื่อ
 FRAMES_TO_CONFIRM = int(2.0 * FPS)
+
+
+# ── stub HTTP server ของ cloud (127.0.0.1 port สุ่ม — ห้ามยิง server จริง) ────────────
+class CloudStub:
+    """จำทุก request ที่ได้รับ; ตั้งผลตอบได้ต่อ path:
+      roi        : dict ที่ GET .../roi คืน (None = {"status": "no_config"})
+      fail_next  : list ของ status code ที่จะตอบก่อน (ใช้ทีละตัว) เช่น [500, 500] แล้วค่อย 200
+      hang       : True = รับ request แล้วไม่ตอบ (จำลองเน็ตค้าง)"""
+
+    def __init__(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.requests = []
+        self.roi = None
+        self.fail_next = []
+        self.hang = False
+        self.lock = threading.Lock()
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _handle(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                with stub.lock:
+                    stub.requests.append(types.SimpleNamespace(
+                        method=self.command, path=self.path, headers=dict(self.headers), body=body,
+                    ))
+                    status = stub.fail_next.pop(0) if stub.fail_next else 200
+                if stub.hang:
+                    time.sleep(5)
+                    return
+                if self.command == "GET":
+                    out = json.dumps(stub.roi or {"status": "no_config"}).encode()
+                else:
+                    out = b"ok"
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            do_GET = do_POST = do_PUT = _handle
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def events_url(self):
+        return f"http://127.0.0.1:{self.port}/api/events"
+
+    def paths(self, method=None):
+        with self.lock:
+            return [r.path for r in self.requests if method is None or r.method == method]
+
+    def wait_for(self, pred, timeout=3.0):
+        """รอจนมี request ที่ pred(r) เป็นจริง คืน request นั้น (ไม่มี → None)"""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self.lock:
+                for r in self.requests:
+                    if pred(r):
+                        return r
+            time.sleep(0.01)
+        return None
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def multipart_fields(req):
+    """แยก multipart/form-data → ({field: str}, {file field: bytes})"""
+    ctype = req.headers.get("Content-Type", "")
+    boundary = ctype.split("boundary=", 1)[1].encode()
+    fields, files = {}, {}
+    for part in req.body.split(b"--" + boundary):
+        if b"\r\n\r\n" not in part:
+            continue
+        head, data = part.split(b"\r\n\r\n", 1)
+        data = data[:-2] if data.endswith(b"\r\n") else data
+        name = head.split(b'name="', 1)[1].split(b'"', 1)[0].decode()
+        if b"filename=" in head:
+            files[name] = data
+        else:
+            fields[name] = data.decode()
+    return fields, files
+
+
+@pytest.fixture
+def cloud_stub(monkeypatch):
+    import api.client
+
+    stub = CloudStub()
+    monkeypatch.setattr(api.client, "CLOUD_API_URL", stub.events_url)
+    monkeypatch.setattr(api.client, "API_KEY", "test-key")
+    yield stub
+    stub.close()

@@ -18,17 +18,16 @@ import argparse
 import os
 import signal
 import sqlite3
-import threading
 import time
 import cv2
 import numpy as np
 import config
 from config import (
-    FRAME_W, FRAME_H, CAMERA_INDEX, MACHINE_ID, HEADLESS, SEND_INTERVAL, ROI_CONFIG_PATH,
+    FRAME_W, FRAME_H, CAMERA_INDEX, MACHINE_ID, HEADLESS, ROI_CONFIG_PATH,
     MOT_THRESH, MIN_AREA, MAX_BLOB_ROI_RATIO,
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD,
-    CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, CLOUD_ENABLED, EVIDENCE_DIR,
+    CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, EVIDENCE_DIR,
     DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
@@ -69,19 +68,6 @@ _ANOMALY_LABELS = {
     NO_CONFIRM_AT_CLOSE: "NO CONFIRM AT CLOSE",
     POSSIBLE_REMOVAL: "POSSIBLE REMOVAL (not counted)",
 }
-
-
-def start_cloud_services(machine_id):
-    """เริ่ม thread ฝั่ง cloud (เฉพาะ CLOUD_ENABLED=1) — โหมด START–STOP ไม่ใช้ order listener"""
-    from api.client import push_default_roi, register_machine, start_roi_polling
-    from api.retry_queue import start_retry_thread
-
-    start_retry_thread()
-    threading.Thread(target=register_machine, args=(machine_id,), daemon=True).start()
-    threading.Thread(
-        target=push_default_roi, args=(machine_id, ROI_CONFIG_PATH), daemon=True
-    ).start()
-    start_roi_polling(machine_id)
 
 
 def detect_objects(diff, roi_manager, roi_mask):
@@ -129,12 +115,13 @@ class App:
 
     clock : wall clock สำหรับการตรวจจับ (tracker ใช้ time.time ภายใน จึงต้องเป็นนาฬิกาเดียวกัน)
     mono  : monotonic สำหรับ timeout ของรอบ
+    cloud : api.cloud.CloudServices หรือ None (cloud ปิด) — main loop แค่ฝากเฟรม/งาน ไม่รอ network
     """
 
     def __init__(
         self, machine_id, source, roi_manager, store, controller,
         headless=True, evidence_dir=EVIDENCE_DIR, daily_log_dir=DAILY_LOG_DIR,
-        clock=time.time, mono=time.monotonic,
+        clock=time.time, mono=time.monotonic, cloud=None,
     ):
         self.machine_id = machine_id
         self.source = source
@@ -146,6 +133,7 @@ class App:
         self.daily_log_dir = daily_log_dir
         self.clock = clock
         self.mono = mono
+        self.cloud = cloud
 
         self.cm = CycleMachine(CYCLE_TIMEOUT_SEC)
         self.tracker = MemoryTracker()
@@ -157,7 +145,6 @@ class App:
         self.redis_up = None
         self.today_count = store.count_today()
         self._count_checked_at = 0.0
-        self.last_send_time = 0.0
         self.frame = None              # เฟรมล่าสุด (ใช้ถ่ายภาพ NO_CONFIRM_AT_CLOSE ตอนปิดรอบ)
         self.frame_gray = None         # เฟรมล่าสุดแบบ gray (START ใช้เป็นพื้นหลังได้ถ้าไม่มี clean_bg ที่ valid)
         self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
@@ -209,11 +196,8 @@ class App:
                 logger.info("📷 กล้องกลับมาแล้ว")
             self.camera_ok = True
 
-        if CLOUD_ENABLED and SEND_INTERVAL > 0 and now - self.last_send_time >= SEND_INTERVAL:
-            from api.client import submit_frame
-
-            submit_frame(self.machine_id, frame)
-            self.last_send_time = now
+        if self.cloud is not None and self.cloud.realtime_due(now):
+            self.cloud.submit_frame(frame, now)
 
         frame_gray = self.frame_gray
         self.roi_manager.reload_if_changed()
@@ -556,10 +540,14 @@ def main():
     source = FrameSource(CAMERA_INDEX)
     roi_manager = ROIManager(FRAME_W, FRAME_H, config_path=ROI_CONFIG_PATH)
     start_cleanup_thread()
-    if CLOUD_ENABLED:
-        start_cloud_services(args.machine)
-    else:
-        logger.info("☁️ CLOUD_ENABLED=0 — ไม่เริ่ม register / ROI polling / ภาพสด / retry queue")
+    # [CLOUD] เริ่มเฉพาะฟีเจอร์ที่เปิด (ปิดทั้งหมด = ไม่มี thread / HTTP เลย) — โหมด START–STOP ไม่ใช้ order listener
+    features = config.cloud_features()
+    logger.info(config.cloud_summary(features))
+    cloud = None
+    if any(features.values()):
+        from api.cloud import CloudServices
+
+        cloud = CloudServices(args.machine, features, roi_path=ROI_CONFIG_PATH).start()
 
     # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
     if not HEADLESS:
@@ -567,7 +555,7 @@ def main():
             cv2.namedWindow(name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(name, FRAME_W, FRAME_H)
 
-    app = App(args.machine, source, roi_manager, store, controller, headless=HEADLESS)
+    app = App(args.machine, source, roi_manager, store, controller, headless=HEADLESS, cloud=cloud)
 
     def _shutdown(signum, _frame):
         logger.info(f"🛑 ได้รับ signal {signum} → ปิดโปรแกรม")
@@ -581,6 +569,8 @@ def main():
         app.run()
     finally:
         controller.stop()
+        if cloud is not None:
+            cloud.stop()
         source.release()
         store.close()
         if not HEADLESS:

@@ -23,11 +23,34 @@ REDIS_PASSWORD=
 # REDIS_CONNECT_TIMEOUT_SEC=1.0
 # REDIS_SOCKET_TIMEOUT_SEC=1.0
 
-# 1 = ส่งข้อมูลขึ้น cloud (register, ROI polling, ภาพสด, retry queue) | 0 = local อย่างเดียว
+# ── cloud / เว็บ ──
+# สวิตช์หลัก: 0 = ไม่มี HTTP เลย (local อย่างเดียว) | 1 = เปิดตามสวิตช์ย่อยด้านล่าง (register ตู้ทำเสมอเมื่อเปิด)
 CLOUD_ENABLED=0
-# ใช้เฉพาะ CLOUD_ENABLED=1
+# ค่าด้านล่างใช้เฉพาะ CLOUD_ENABLED=1 (ตั้งไว้ตอน CLOUD_ENABLED=0 จะมี log เตือน "ไม่มีผล")
 # CLOUD_API_URL=https://your-server.example/api/events
 # API_KEY=
+# ดึง ROI จากเว็บเป็นระยะ + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่ม (ถ้าเว็บยังไม่มี)
+# CLOUD_ROI_SYNC=1
+# ส่ง event ITEM_LANDED + ภาพ ตอนยืนยันสินค้า (หลัง S0)
+# CLOUD_SEND_EVENTS=1
+# ส่ง event anomaly — เตรียมไว้ ยังไม่ส่งจริง
+# CLOUD_SEND_ANOMALY=0
+# ภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิดภาพสด)
+# SEND_INTERVAL=1
+#
+# ตัวอย่างโปรไฟล์ (เอา # ออกเฉพาะชุดที่ใช้ + ตั้ง CLOUD_API_URL / API_KEY):
+#   ช่วงทดสอบ (เห็น event ทุกชิ้น + ภาพสดทุก 1 นาที):
+#     CLOUD_ENABLED=1
+#     CLOUD_SEND_EVENTS=1
+#     CLOUD_ROI_SYNC=1
+#     SEND_INTERVAL=60
+#   ขายจริง (ประหยัดเน็ต: ไม่ส่ง event, ROI จากเว็บยังใช้ได้, ภาพสดทุก 5 นาที):
+#     CLOUD_ENABLED=1
+#     CLOUD_SEND_EVENTS=0
+#     CLOUD_ROI_SYNC=1
+#     SEND_INTERVAL=300
+# เปลี่ยนบนตู้: แก้ .env แล้ว `docker compose up -d --force-recreate` (ไม่ต้อง build ใหม่)
+#   → ตรวจ `docker compose logs vending-cam | grep "Cloud:"` ว่าฟีเจอร์ไหนเปิด/ปิด
 
 # ── หมวด 2: ความไวและความเร็วในการจับของ (จูนบ่อยที่สุด) ─────────────────────────
 # CAPTURE_HOLD_SEC=1.0
@@ -86,8 +109,7 @@ CLEANUP_INTERVAL_HOURS=1
 # ANOMALY_MAX_PER_HOUR=20
 # ANOMALY_KEEP_DAYS=3
 
-# ใช้เฉพาะ CLOUD_ENABLED=1
-# SEND_INTERVAL=1
+# ใช้เฉพาะ CLOUD_ENABLED=1: ดึง ROI จากเว็บทุกกี่วินาที / ส่ง event ที่ค้างซ้ำทุกกี่วินาที
 # ROI_POLL_INTERVAL=10
 # RETRY_INTERVAL=60
 

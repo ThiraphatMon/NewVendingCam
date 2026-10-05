@@ -1,9 +1,7 @@
 import requests
 import os
-import threading
-import time
 import cv2
-from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH, ROI_POLL_INTERVAL
+from config import CLOUD_API_URL, API_KEY, ROI_CONFIG_PATH
 import json
 from utils.json_file import read_json, write_json_atomic
 from utils.logger import get_logger, LogThrottle
@@ -98,7 +96,7 @@ def register_machine(machine_id: str):
         logger.warning(f"[{machine_id}] ⚠️ register_machine error: {e}")
 
 
-def fetch_remote_roi(machine_id):
+def fetch_remote_roi(machine_id, local_config_path=ROI_CONFIG_PATH):
     """ดึง ROI จาก Server แล้วเขียนทับ local file — เฉพาะเมื่อข้อมูลต่างจากไฟล์เดิม
     (ลดการเขียน eMMC ทุก 10 วิ และ ROIManager จะ reload เฉพาะตอนเปลี่ยนจริง)"""
     try:
@@ -108,9 +106,9 @@ def fetch_remote_roi(machine_id):
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") != "no_config" and "roi_type" in data:
-                if read_json(ROI_CONFIG_PATH) != data:
-                    write_json_atomic(ROI_CONFIG_PATH, data)
-                    logger.info(f"[{machine_id}] ☁️ ได้ ROI ใหม่จาก Server → อัปเดต {ROI_CONFIG_PATH}")
+                if read_json(local_config_path) != data:
+                    write_json_atomic(local_config_path, data)
+                    logger.info(f"[{machine_id}] ☁️ ได้ ROI ใหม่จาก Server → อัปเดต {local_config_path}")
     except Exception:
         pass
 
@@ -153,20 +151,6 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
         logger.warning(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
 
 
-def start_roi_polling(machine_id):
-    """เริ่ม background thread ดึง ROI จาก server ทุก ROI_POLL_INTERVAL วินาที"""
-
-    def _loop():
-        while True:
-            try:
-                fetch_remote_roi(machine_id)
-            except Exception as e:
-                logger.warning(f"⚠️ roi_polling_task error: {e}")
-            time.sleep(ROI_POLL_INTERVAL)
-
-    threading.Thread(target=_loop, daemon=True).start()
-
-
 # ─────────────────────────────────────────────
 # ภาพ realtime สำหรับ dashboard (เดิมอยู่ใน api/sent_frame.py)
 # ─────────────────────────────────────────────
@@ -200,35 +184,3 @@ def send_frame(machine_id, frame):
     except Exception as e:
         _frame_err_log(logger.warning, f"⚠️ Send realtime frame error: {e}")
         return False
-
-
-# ── ส่งภาพสดใน background thread ─────────────────────────────────────────────
-# main loop แค่ฝากเฟรมไว้ (submit_frame) แล้วไปต่อทันที — ไม่รอ network
-# thread ส่งถือเฉพาะเฟรม "ล่าสุด" ถ้าส่งไม่ทัน เฟรมเก่าที่ยังไม่ได้ส่งจะถูกทับทิ้ง (ไม่ต่อคิว)
-_frame_lock = threading.Lock()
-_frame_ready = threading.Event()
-_latest_frame = None  # (machine_id, frame) ที่รอส่ง
-_sender_started = False
-
-
-def _frame_sender_loop():
-    global _latest_frame
-    while True:
-        _frame_ready.wait()
-        with _frame_lock:
-            item = _latest_frame
-            _latest_frame = None
-            _frame_ready.clear()
-        if item is not None:
-            send_frame(*item)
-
-
-def submit_frame(machine_id, frame):
-    """ฝากเฟรมให้ thread ส่งขึ้น dashboard (copy เฟรม เพราะ main loop จะวาด overlay ทับต่อ)"""
-    global _latest_frame, _sender_started
-    with _frame_lock:
-        _latest_frame = (machine_id, frame.copy())
-        _frame_ready.set()
-        if not _sender_started:
-            threading.Thread(target=_frame_sender_loop, daemon=True, name="frame-sender").start()
-            _sender_started = True

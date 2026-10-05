@@ -164,7 +164,9 @@ core/removal.py         แยกหยิบออก / ใส่เข้า �
 core/roi.py             ROI จาก data/roi_config.json (reload อัตโนมัติ)
 core/frame_source.py    กล้อง / ไฟล์วิดีโอ ใน reader thread (เฟรมล่าสุด, ตรวจกล้องค้าง, เล่นวิดีโอตามเวลาจริง)
 api/redis_controller.py RPOP CTRL / LPUSH CAMERA (worker thread)
-api/client.py, retry_queue.py, order_listener.py   ฝั่ง cloud/order เดิม (ใช้เฉพาะ CLOUD_ENABLED=1; order listener ไม่ถูกเริ่ม)
+api/cloud.py            เริ่ม/หยุด thread ฝั่ง cloud ตามสวิตช์ (ROI sync, ภาพสด, ...) — ดูข้อ 7.1
+api/client.py           HTTP ไปเว็บ (register, ROI, ภาพสด, event)
+api/retry_queue.py, order_listener.py   ของระบบ order เดิม (order listener ไม่ถูกเริ่ม)
 utils/state_store.py    SQLite (รอบ / ยืนยัน / anomaly / สถานะ S0)
 utils/daily_log.py      log ยอดรายวัน
 utils/image_saver.py    บันทึกภาพหลักฐาน
@@ -183,7 +185,7 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 
 | หมวด | ค่าที่สำคัญ |
 |---|---|
-| 1 ตู้/การเชื่อมต่อ | `MACHINE_ID_DEFAULT`, `CAMERA_INDEX`, `HEADLESS`, `CONTROL_MODE` (redis/keyboard), `REDIS_*`, `CLOUD_ENABLED` |
+| 1 ตู้/การเชื่อมต่อ | `MACHINE_ID_DEFAULT`, `CAMERA_INDEX`, `HEADLESS`, `CONTROL_MODE` (redis/keyboard), `REDIS_*`, `CLOUD_*` (ข้อ 7.1) |
 | 2 ความไว | `CAPTURE_HOLD_SEC` 1.0, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
 | 3 รอบ | `CYCLE_TIMEOUT_SEC` 300 |
 | 4 ขั้นสูง | `GROUP_*`, `MORPH_*`, `BG_*`, `RESET_GRACE_SEC`, `CLEAN_BG_INTERVAL` 0.5, `CLEAN_BG_MAX_MOTION_RATIO` 0.002, `CLEAN_BG_STABLE_FRAMES` 5, `ENV_SETTLE_REBASELINE` 1, `REMOVAL_CHECK` 1, `REMOVAL_EDGE_RATIO` 0.6, `REMOVAL_MATCH_RATIO` 0.5, `REMOVAL_UNCERTAIN_SEND_S0` 0, `SCENE_HISTORY_SIZE` 10 |
@@ -191,6 +193,34 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 
 ค่าระบบ order เดิม (`WS_URL`, `ORDER_WINDOW`, `DROP_TIMEOUT`, ...) ไม่มีผลในโหมด START–STOP
 ROI: `data/roi_config.json` (rect / quad / polygon / multi_polygon บนภาพ 640x480) แก้แล้ว reload เองภายใน `ROI_CHECK_INTERVAL`
+
+### 7.1 Cloud / เว็บ (เปิด-ปิดทีละฟีเจอร์)
+
+cloud เป็นส่วนเสริม — START/STOP/S0 ไม่รอและไม่พึ่ง cloud (เน็ตหลุด/เว็บค้างไม่กระทบ)
+ฟีเจอร์ที่ปิด **ไม่เริ่ม thread และไม่ส่ง HTTP เลย**; ตอนเริ่มโปรแกรม log 1 บรรทัด `☁️ Cloud: register=..., ROI sync=..., ภาพสด=..., ITEM_LANDED=..., anomaly=...`
+
+| ค่า | default | ผล |
+|---|---|---|
+| `CLOUD_ENABLED` | 0 | สวิตช์หลัก: 0 = ไม่มี HTTP เลย; 1 = เปิดตามสวิตช์ย่อย + register ตู้ (ต้องตั้ง `CLOUD_API_URL` ไม่งั้นถือว่าปิด) |
+| `CLOUD_ROI_SYNC` | 1 | ดึง ROI จากเว็บทุก `ROI_POLL_INTERVAL` + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่มถ้าเว็บยังไม่มี |
+| `SEND_INTERVAL` | 1 | ภาพสดขึ้น dashboard ทุกกี่วินาที (0 = ปิด) |
+| `CLOUD_SEND_EVENTS` | 1 | ส่ง event `ITEM_LANDED` + ภาพตอนยืนยันสินค้า |
+| `CLOUD_SEND_ANOMALY` | 0 | เตรียมไว้ ยังไม่ส่งจริง (ยังไม่รู้ว่าเว็บรับ event ชนิดใหม่ได้ไหม) |
+
+ตัวอย่างโปรไฟล์ (ใส่ใน `.env` พร้อม `CLOUD_API_URL` / `API_KEY`):
+
+| โปรไฟล์ | ค่า | ใช้เมื่อ |
+|---|---|---|
+| ช่วงทดสอบ | `CLOUD_ENABLED=1` `CLOUD_SEND_EVENTS=1` `CLOUD_ROI_SYNC=1` `SEND_INTERVAL=60` | อยากเห็นทุกชิ้นบนเว็บ + ภาพสดทุก 1 นาที |
+| ขายจริง | `CLOUD_ENABLED=1` `CLOUD_SEND_EVENTS=0` `CLOUD_ROI_SYNC=1` `SEND_INTERVAL=300` | ประหยัดเน็ต: ROI จากเว็บยังใช้ได้ ภาพสดทุก 5 นาที |
+| ไม่มีเน็ต | `CLOUD_ENABLED=0` | ทำงาน local อย่างเดียว |
+
+**เปลี่ยนโปรไฟล์บนตู้** (ไม่ต้อง build ใหม่ ยอด/DB ไม่หาย):
+```bash
+nano .env                                   # แก้ค่าตามตาราง
+docker compose up -d --force-recreate       # .env อ่านตอนสร้าง container เท่านั้น → ต้อง recreate
+docker compose logs vending-cam | grep "Cloud:"   # ตรวจว่าฟีเจอร์ที่ต้องการเปิด/ปิดจริง
+```
 
 ---
 

@@ -88,8 +88,17 @@ REDIS_RESPONSE_KEY = _str("REDIS_RESPONSE_KEY", "CAMERA")  # ส่ง S0 (LPUSH
 REDIS_CONNECT_TIMEOUT_SEC = _float("REDIS_CONNECT_TIMEOUT_SEC", 1.0)
 REDIS_SOCKET_TIMEOUT_SEC = _float("REDIS_SOCKET_TIMEOUT_SEC", 1.0)
 
-# 1 = เปิดส่งข้อมูลขึ้น cloud (register, ROI polling, ภาพสด, retry queue) | 0 = ทำงาน local อย่างเดียว
+# สวิตช์หลักของ cloud: 0 = ไม่มี HTTP เลย (ทำงาน local อย่างเดียว) | 1 = เปิดตามสวิตช์ย่อยด้านล่าง
+#   (register ตู้ทำเสมอเมื่อเปิด cloud — ต้องตั้ง CLOUD_API_URL ด้วย ไม่งั้นถือว่าปิด)
 CLOUD_ENABLED = _bool("CLOUD_ENABLED", False)
+# สวิตช์ย่อย (มีผลเฉพาะ CLOUD_ENABLED=1) — ปิดแล้วไม่เริ่ม thread และไม่ส่ง HTTP ของฟีเจอร์นั้นเลย
+#   ภาพสดเปิด/ปิดด้วย SEND_INTERVAL (หมวด 5, 0 = ปิด)
+# ดึง ROI จากเว็บเป็นระยะ + ส่ง ROI ในเครื่องขึ้นเว็บตอนเริ่ม (ถ้าเว็บยังไม่มี)
+CLOUD_ROI_SYNC = _bool("CLOUD_ROI_SYNC", True)
+# ส่ง event ITEM_LANDED + ภาพตอนยืนยันสินค้า (หลัง S0, ผ่าน outbox ใน DB)
+CLOUD_SEND_EVENTS = _bool("CLOUD_SEND_EVENTS", True)
+# ส่ง event anomaly — เตรียมไว้ ยังไม่ส่งจริง (ยังไม่รู้ว่าเว็บรับ event ชนิดใหม่ได้ไหม)
+CLOUD_SEND_ANOMALY = _bool("CLOUD_SEND_ANOMALY", False)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -273,7 +282,43 @@ _ORDER_ONLY_KEYS = (
     "CAP_COUNT_TO_ORDER_QTY",
 )
 # มีผลเฉพาะ CLOUD_ENABLED=1
-_CLOUD_ONLY_KEYS = ("CLOUD_API_URL", "API_KEY", "SEND_INTERVAL", "ROI_POLL_INTERVAL", "RETRY_INTERVAL")
+_CLOUD_ONLY_KEYS = (
+    "CLOUD_API_URL", "API_KEY", "CLOUD_ROI_SYNC", "CLOUD_SEND_EVENTS", "CLOUD_SEND_ANOMALY",
+    "SEND_INTERVAL", "ROI_POLL_INTERVAL", "RETRY_INTERVAL",
+)
+
+
+def cloud_features():
+    """ฟีเจอร์ cloud ที่เปิดจริง (อ่านค่าตอนเรียก) — CLOUD_ENABLED=0 หรือไม่มี CLOUD_API_URL = ปิดทั้งหมด"""
+    on = CLOUD_ENABLED and bool(CLOUD_API_URL)
+    return {
+        "register": on,
+        "roi_sync": on and CLOUD_ROI_SYNC,
+        "realtime": on and SEND_INTERVAL > 0,
+        "events": on and CLOUD_SEND_EVENTS,
+        "anomaly": on and CLOUD_SEND_ANOMALY,
+    }
+
+
+def cloud_summary(features=None):
+    """1 บรรทัดสรุปฟีเจอร์ cloud ที่เปิด/ปิด (log ตอน startup)"""
+    f = cloud_features() if features is None else features
+    if not CLOUD_ENABLED:
+        return "☁️ Cloud: ปิดทั้งหมด (CLOUD_ENABLED=0) — ไม่มี HTTP"
+    if not CLOUD_API_URL:
+        return "☁️ Cloud: ปิดทั้งหมด — CLOUD_ENABLED=1 แต่ไม่ได้ตั้ง CLOUD_API_URL"
+
+    def onoff(key, detail=""):
+        return f"เปิด{detail}" if f[key] else "ปิด"
+
+    return (
+        "☁️ Cloud: "
+        f"register={onoff('register')}, "
+        f"ROI sync={onoff('roi_sync', f' (ทุก {ROI_POLL_INTERVAL:g}s)')}, "
+        f"ภาพสด={onoff('realtime', f' (ทุก {SEND_INTERVAL:g}s)')}, "
+        f"ITEM_LANDED={onoff('events')}, "
+        f"anomaly={'เปิด (ยังไม่ส่งจริง)' if f['anomaly'] else 'ปิด'}"
+    )
 # มีผลเฉพาะ CONTROL_MODE=redis
 _REDIS_ONLY_KEYS = (
     "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_PASSWORD", "REDIS_CTRL_KEY", "REDIS_RESPONSE_KEY",
