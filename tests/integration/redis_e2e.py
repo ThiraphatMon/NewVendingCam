@@ -391,14 +391,59 @@ def sc8(r, m, wd, rep):
               outcomes(wd) == ["CONFIRMED", "UNCONFIRMED"])
 
 
-SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7, "8": sc8}
+def _buy_again(r, m, wd, rep, sc, t_start2):
+    """รอบ 1 ปกติ (START@1→S0→STOP@5) → ลูกค้าหยิบนอกรอบ (7.2–10.6s) → START @t_start2 → STOP @12.5
+    คืน (บรรทัด log พื้นหลังของ START รอบ 2, เวลาคลิปที่เห็น log ตั้งพื้นหลังใหม่ครั้งแรก หรือ None)"""
+    m.wait_clip(1.0, loop=1)
+    push(r, "START")
+    wait_s0(r, 1, timeout=8)
+    m.wait_clip(5.0, loop=1)
+    push(r, "STOP")
+    m.wait_clip(t_start2, loop=1)
+    push(r, "START")
+    seen = None
+    while True:
+        ct = m.wait_clip(m.clip_time() + 0.02, loop=1)
+        if seen is None and m.grep("env change สงบแล้ว"):
+            seen = ct
+        if ct >= 12.5:
+            break
+    push(r, "STOP")
+    time.sleep(0.5)
+    starts = m.grep("FROZEN [START")
+    bg2 = starts[1].split("—", 1)[-1].strip() if len(starts) > 1 else "-"
+    rep.note(f"[{sc}] START รอบ 2 @{t_start2}: {bg2[:60]}; ตั้งพื้นหลังใหม่ครั้งแรกที่ clip "
+             + (f"{seen:.2f}s" if seen else "- (ไม่มี)"))
+    rep.check(sc, f"ซื้อต่อ: START รอบ 2 @{t_start2} → STOP @12.5", "S0 1, ยอด 1, CONFIRMED,UNCONFIRMED",
+              f"S0 {s0s(r)}, ยอด {count(wd)}, {','.join(outcomes(wd))}",
+              s0s(r) == 1 and count(wd) == 1 and outcomes(wd) == ["CONFIRMED", "UNCONFIRMED"])
+    return bg2, seen
+
+
+def sc8b(r, m, wd, rep):
+    # START ตอน slat ยังเปิด → พื้นหลัง = เฟรมปัจจุบัน → slat ปิด (~10.6s) → ตั้งพื้นหลังใหม่
+    bg2, seen = _buy_again(r, m, wd, rep, "8b", 9.0)
+    rep.check("8b", "พื้นหลังรอบ 2 + ตั้งพื้นหลังใหม่หลัง slat ปิด", "เฟรมปัจจุบัน, ตั้งใหม่ ≥10.0s",
+              f"{'เฟรมปัจจุบัน' if 'เฟรมปัจจุบัน' in bg2 else bg2[:30]}, "
+              + (f"ตั้งใหม่ที่ {seen:.2f}s" if seen else "ไม่ตั้งใหม่"),
+              "เฟรมปัจจุบัน" in bg2 and seen is not None and seen >= 10.0)
+
+
+def sc8c(r, m, wd, rep):
+    # START หลังถาดนิ่งแล้ว → ใช้ clean_bg (ถาดว่าง)
+    bg2, _ = _buy_again(r, m, wd, rep, "8c", 11.0)
+    rep.check("8c", "พื้นหลังรอบ 2", "clean_bg", bg2[:40], "ใช้ clean_bg" in bg2)
+
+
+SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7, "8": sc8,
+             "8b": sc8b, "8c": sc8c}
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # console Windows (cp1252) พิมพ์ไทยไม่ได้
     ap = argparse.ArgumentParser()
     ap.add_argument("--clip", default=os.environ.get("E2E_CLIP"), required=not os.environ.get("E2E_CLIP"))
-    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,8")
+    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,8,8b,8c")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
     args = ap.parse_args()
     if not os.path.isfile(args.clip):

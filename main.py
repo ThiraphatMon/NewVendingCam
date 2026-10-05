@@ -217,6 +217,9 @@ class App:
             self.bg.restore_snapshot()
         if env_change and idle:
             self.bg.mark_scene_changed()  # [WATCH] clean_bg ก่อน env change ห้ามใช้ตอน START
+        if env_change and self.cm.can_confirm() and self.bg.roi_still():
+            self._rebaseline_settled_env(frame_gray, now)
+            return frame, fgmask, {}
         tracked = self.tracker.update(detected)
 
         if self.cm.state == cyc.WAIT_START:
@@ -357,6 +360,19 @@ class App:
         logger.info(
             f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — ยอดวันนี้ {conf.daily_sequence} "
             f"(บันทึก {ms:.0f}ms) → ส่ง S0"
+        )
+
+    def _rebaseline_settled_env(self, frame_gray, now):
+        """[ENV SETTLED] รอบ ACTIVE: env change ค้าง (พื้นหลังของรอบต่างจากฉากเกิน MAX_BLOB_ROI_RATIO)
+        แต่ ROI นิ่งเฟรมต่อเฟรมครบ CLEAN_BG_STABLE_FRAMES แล้ว → ฉากใหม่สงบแล้ว ตั้งเป็นพื้นหลังของรอบ
+        เช่น START ตอน slat ยังเปิด (เฟรมปัจจุบันเป็นพื้นหลัง) แล้ว slat ปิด → ไม่งั้นมองไม่เห็นอะไรทั้งรอบ
+        ต้องเป็น env change ที่ "ยังค้าง" ตอนนิ่ง (ของตกที่ก้อน motion ใหญ่ชั่วขณะ พอตกถึงพื้นก้อนเล็กลง → ไม่เข้าเงื่อนไข)
+        ทำได้หลายครั้งต่อรอบ แต่ต้องนิ่งก่อนทุกครั้ง"""
+        self.bg.rebaseline(frame_gray, now)
+        self.tracker.clear_all()
+        logger.info(
+            f"🔄 รอบ {self.cm.cycle_id[:8]}: env change สงบแล้ว (ROI นิ่ง {CLEAN_BG_STABLE_FRAMES} เฟรม) "
+            f"→ ตั้งพื้นหลังของรอบใหม่เป็นเฟรมนี้"
         )
 
     # ── เฝ้าดูนอกรอบ / anomaly ───────────────────────────────────────────────

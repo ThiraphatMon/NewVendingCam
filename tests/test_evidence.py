@@ -461,3 +461,57 @@ def test_freeze_reports_source(caplog):
     bg.update(f, 0.0, idle=True)
     assert bg.freeze(0.0, reason="START") is False  # ไม่มี clean_bg → fallback
     assert "fallback" in caplog.text
+
+
+# ── S1: ตั้งพื้นหลังของรอบใหม่หลัง env change สงบ ─────────────────────────────
+
+def _slat(i):
+    """slat กำลังเปิด/ปิด: ROI สว่างทั้งแผ่น และเปลี่ยนทุกเฟรม (ไม่นิ่ง)"""
+    f = empty_frame()
+    f[100:400, 100:500] = 150 + 40 * (i % 2)
+    return f
+
+
+def test_start_while_slat_open_rebaselines_after_settle_then_confirms(make_app, env, caplog):
+    # START ตอน slat ยังเปิด (เฟรมปัจจุบันเป็นพื้นหลัง) → slat ปิด ถาดนิ่ง → env change ค้าง
+    # → นิ่งครบ 5 เฟรม → ตั้งพื้นหลังใหม่ → ของตกหลังจากนั้นยังยืนยันได้
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    run_seq(app, env, [_slat(i) for i in range(6)])
+    ctl.push("START")
+    run_seq(app, env, [_slat(i) for i in range(6, 9)])
+    assert "baseline ไม่แน่นอน" in caplog.text
+    run_frames(app, env, empty_frame(), 10)
+    assert "env change สงบแล้ว" in caplog.text
+    assert np.array_equal(app.bg.bg, empty_frame()[:, :, 0].astype(np.float32))
+    run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM)
+    assert ctl.s0 == []                     # ถาดว่างหลัง slat ปิด ไม่ใช่ของ
+    run_seq(app, env, falling(6))
+    run_frames(app, env, falling(6)[-1], FRAMES_TO_CONFIRM)
+    assert len(ctl.s0) == 1 and app.cm.state == cyc.CONFIRMED_WAIT_STOP
+
+
+def test_no_rebaseline_while_env_change_still_moving(make_app, env, caplog):
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, empty_frame(), 2)
+    base = app.bg.bg.copy()
+    run_seq(app, env, [_slat(i) for i in range(30)])
+    assert "env change สงบแล้ว" not in caplog.text
+    assert np.array_equal(app.bg.bg, base)
+
+
+def test_no_rebaseline_after_confirm(make_app, env, caplog):
+    # ยืนยันแล้ว (CONFIRMED_WAIT_STOP) ไม่ตั้งพื้นหลังรอบใหม่จาก env change
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    bright = empty_frame()
+    bright[100:400, 100:500] = 200
+    run_frames(app, env, bright, 20)
+    assert "env change สงบแล้ว" not in caplog.text
