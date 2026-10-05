@@ -5,7 +5,7 @@ core/background.py — background model สำหรับหา motion (รว�
   IDLE         → bg เรียนรู้ตามแสงช้า ๆ (BG_LEARNING_RATE)
                  + เก็บ clean_bg (ช่องรับของว่าง ไม่มี motion) ไว้ทุก CLEAN_BG_INTERVAL วินาที
   เจอ motion   → freeze(): หยุดเรียนรู้ และดึง bg กลับไปที่ clean_bg (ก่อนมือ/ของเข้ามา)
-  capture ได้  → rebaseline(): เอาเฟรมปัจจุบันทั้งภาพเป็น bg ใหม่ → ของชิ้นถัดไปเป็น motion ใหม่
+  capture ได้  → rebaseline(): เอาเฟรมปัจจุบันทั้งภาพเป็น bg ใหม่ (และ clean_bg) → ของชิ้นถัดไปเป็น motion ใหม่
   env change   → restore_snapshot(): ดึง bg ตอน freeze กลับมา
   reset        → unfreeze(): กลับมาเรียนรู้ + grace period (ดูดมือที่ค้างในเฟรมเข้า bg ก่อน)
   กล้องหลุด    → clear(): เริ่มใหม่หมด
@@ -110,13 +110,22 @@ class BackgroundModel:
         self.grace_until = now + RESET_GRACE_SEC
         logger.info(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_SEC}s")
 
-    def rebaseline(self, frame_gray):
+    def invalidate_clean_bg(self):
+        """ปิดรอบ: clean_bg เก่า (ก่อนรอบ) ไม่ตรงกับถาดตอนนี้แล้ว (อาจมีของค้าง) → ทิ้ง
+        START ถัดไปก่อนเก็บ clean_bg ใหม่ได้จะใช้ bg ปัจจุบัน (ที่กำลังเรียนรู้ฉากใหม่) แทน"""
+        self.clean_bg = None
+
+    def rebaseline(self, frame_gray, now):
         """[RESET MOTION] หลัง capture สำเร็จ: เอาเฟรมปัจจุบัน "ทั้งภาพ" เป็น bg ใหม่
         → motion mask ว่างทันที ของชิ้นถัดไป (แม้ตกทับที่เดิม) เป็น motion ใหม่ → นับเป็นชิ้นใหม่ได้
         env ที่เปลี่ยนจากการกระแทก (แม้ก้อนที่ไม่เชื่อมกับตัววัตถุ) ก็ถูกกลืนหมด"""
         self.bg = frame_gray.copy()
         # อัปเดต snapshot ด้วย (กันกรณี env change restore ดึง bg เก่ากลับมา)
         self.snapshot = frame_gray.copy()
+        # อัปเดต clean_bg ด้วย: ฉากนี้ (รวมของที่เพิ่งยืนยันซึ่งยังค้างในถาด) คือพื้นหลังที่ยอมรับแล้ว
+        # → START ถัดไป freeze() จะไม่ดึง clean_bg ก่อนรอบเก่ากลับมา จนของรอบก่อนถูกยืนยันซ้ำ
+        self.clean_bg = frame_gray.copy()
+        self.clean_bg_last_update = now
 
     def restore_snapshot(self):
         """env change ระหว่างจับของ → ดึง bg ตอน freeze กลับมา คืน True ถ้า restore ได้"""

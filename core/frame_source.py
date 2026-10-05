@@ -2,6 +2,7 @@
 core/frame_source.py — อ่านเฟรมจากกล้องหรือไฟล์วิดีโอ
 
   - บังคับขนาดเฟรมเป็น FRAME_W x FRAME_H เสมอ (พิกัด ROI และการวาดทั้งหมดอ้างอิงขนาดนี้)
+  - เปิดครั้งเดียวตอนเริ่มโปรแกรม — START/STOP ไม่เปิด/ปิดกล้อง
   - กล้องหลุด / วิดีโอจบ → ปิดแล้วเปิดใหม่ (ไฟล์วิดีโอจะวนเล่นซ้ำ)
   - ไฟล์วิดีโอ: หน่วงให้เล่นตาม FPS จริง (pace) ไม่ให้ timer ที่อิงเวลาจริงเพี้ยน
 """
@@ -22,8 +23,8 @@ class FrameSource:
         # ── Playback pacing (เฉพาะไฟล์วิดีโอ) ─────────────────────────────────
         # อ่านไฟล์วิดีโอด้วย OpenCV จะได้เฟรมเร็วสุดเท่าที่ลูปไหว (ไม่ผูกกับ FPS คลิป)
         # ทำให้คลิปเล่นเร็วผิดปกติ และ timer ที่อิงเวลาจริงเพี้ยน จึงต้องหน่วงตาม FPS จริง
-        # กล้องจริง (source เป็นตัวเลข) ไม่ต้องหน่วง เพราะมันส่งเฟรมตามอัตราของมันเอง
-        self.is_video_file = isinstance(source, str)
+        # กล้องจริง (ตัวเลข หรือ /dev/videoN) ไม่ต้องหน่วง เพราะมันส่งเฟรมตามอัตราของมันเอง
+        self.is_video_file = isinstance(source, str) and not source.startswith("/dev/")
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         if not fps or fps <= 0 or fps != fps:  # 0 / ค่าผิด / NaN
             fps = 30.0
@@ -33,6 +34,7 @@ class FrameSource:
         self._next_deadline = None  # ตั้งตอนอ่านเฟรมแรก
 
     def _open(self):
+        self._first_frame_pending = True  # log เวลาเฟรมแรกหลังเปิด (ใช้ sync เวลาคลิปใน integration test)
         cap = cv2.VideoCapture(self.source)
         # หมายเหตุ: สำหรับไฟล์วิดีโอ cap.set(WIDTH/HEIGHT) จะไม่มีผล (ใช้ได้เฉพาะกล้องจริง)
         # จึง resize ทุกเฟรมใน read() อีกชั้น
@@ -53,6 +55,10 @@ class FrameSource:
             time.sleep(CAMERA_RECONNECT_SEC)
             self.cap = self._open()
             return None
+
+        if self._first_frame_pending:
+            self._first_frame_pending = False
+            logger.debug(f"🎬 เฟรมแรกหลังเปิด source FIRST_FRAME t={time.time():.3f}")
 
         if frame.shape[1] != FRAME_W or frame.shape[0] != FRAME_H:
             frame = cv2.resize(frame, (FRAME_W, FRAME_H))

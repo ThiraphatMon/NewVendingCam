@@ -1,58 +1,63 @@
-import cv2
+"""
+utils/image_saver.py — บันทึกภาพหลักฐานแบบ atomic
+
+  evidence_images/confirmed/  ภาพของรอบที่ยืนยันสินค้าได้ (1 ภาพต่อรอบ)
+  evidence_images/anomaly/    ภาพความผิดปกติ (นอกรอบ / ของเพิ่มหลังยืนยัน / ปิดรอบโดยไม่ยืนยัน)
+
+เขียนไฟล์ .tmp.jpg ให้เสร็จ (ตรวจผล imwrite + fsync) แล้วค่อย os.replace เป็นชื่อจริง
+→ ไฟดับกลางคันจะไม่มีไฟล์ภาพครึ่ง ๆ ที่ชื่อจริง (อาจเหลือ .tmp.jpg ซึ่ง disk_cleanup ลบตามอายุ)
+"""
+
 import os
 from datetime import datetime
 
-# ── Phase 3+4: แยก 2 folder ────────────────────────────────────────────────
-# WITH_ORDER    = ภาพที่จับได้ขณะมี order อยู่ (ของที่ลูกค้าสั่ง)
-# WITHOUT_ORDER = ภาพที่จับได้โดยไม่มี order (motion ปกติ / สิ่งแปลกปลอม)
-# ผู้ดูแลระบบสามารถเปิด folder WITHOUT_ORDER เพื่อตรวจสอบสิ่งผิดปกติได้
-WITH_ORDER_DIR = "evidence_images/with_order"
-WITHOUT_ORDER_DIR = "evidence_images/without_order"
+import cv2
 
-os.makedirs(WITH_ORDER_DIR, exist_ok=True)
-os.makedirs(WITHOUT_ORDER_DIR, exist_ok=True)
+from config import EVIDENCE_DIR
+from utils.logger import get_logger
+
+logger = get_logger("image_saver")
+
+CONFIRMED = "confirmed"
+ANOMALY = "anomaly"
 
 
-def save_evidence_image(frame, event_name, transaction_id, has_order: bool = False):
+def save_evidence(frame, folder, kind, cycle_id, base_dir=EVIDENCE_DIR, label=None):
+    """บันทึกภาพ คืน path ของไฟล์ หรือ None ถ้าบันทึกไม่สำเร็จ (log สาเหตุให้แล้ว)
+
+    folder   : CONFIRMED / ANOMALY
+    kind     : ชนิดภาพ เช่น CONFIRMED, OUTSIDE_CYCLE (อยู่ในชื่อไฟล์และป้ายบนภาพ)
+    cycle_id : รอบที่ภาพนี้เป็นของ (None = ไม่มีรอบ)
     """
-    บันทึกภาพหลักฐาน
+    now = datetime.now()
+    save_dir = os.path.join(base_dir, folder)
+    stem = f"{now.strftime('%Y%m%d_%H%M%S_%f')[:-3]}_{kind}_{cycle_id or 'nocycle'}"
+    path = os.path.join(save_dir, stem + ".jpg")
+    # กันชื่อชน (เวลาเดียวกันถึงระดับ ms + รอบเดียวกัน — เช่น anomaly ถี่ ๆ)
+    n = 1
+    while os.path.exists(path):
+        path = os.path.join(save_dir, f"{stem}_{n}.jpg")
+        n += 1
+    tmp = path[:-4] + ".tmp.jpg"  # ต้องลงท้าย .jpg ให้ OpenCV เลือก encoder ได้
 
-    Parameters
-    ----------
-    frame          : numpy array — frame ที่จะบันทึก
-    event_name     : str — ชื่อ event เช่น LANDED_item1, ORDER_SUMMARY, NO_DROP
-    transaction_id : str — TXN-YYYYMMDD-HHMMSS
-    has_order      : bool
-        True  → บันทึกลง evidence_images/with_order/
-        False → บันทึกลง evidence_images/without_order/
+    image = frame.copy()
+    text = f"{label or kind}: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    if cycle_id:
+        text += f" [{cycle_id[:8]}]"
+    cv2.putText(image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-    Returns
-    -------
-    filepath : str — path ของไฟล์ที่บันทึก
-    """
-    save_dir = WITH_ORDER_DIR if has_order else WITHOUT_ORDER_DIR
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{transaction_id}_{event_name}_{ts}.jpg"
-    filepath = os.path.join(save_dir, filename)
-
-    display_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    image_to_save = frame.copy()
-
-    # ── label บนภาพ ──────────────────────────────────────────────────────────
-    label = f"{event_name}: {display_time}"
-    if has_order:
-        label += " [ORDER]"
-
-    cv2.putText(
-        image_to_save,
-        label,
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 255, 255),
-        2,
-    )
-
-    cv2.imwrite(filepath, image_to_save)
-    return filepath
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        if not cv2.imwrite(tmp, image):
+            raise OSError("cv2.imwrite คืน False")
+        with open(tmp, "rb+") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except (OSError, cv2.error) as e:
+        logger.error(f"❌ บันทึกภาพ {kind} ไม่สำเร็จ ({path}): {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None
+    return path

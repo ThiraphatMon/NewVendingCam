@@ -58,12 +58,38 @@ WS_URL = _str("WS_URL", "ws://localhost:5100/ws")
 # key ยืนยันตัวตนกับ server (เว้นว่างถ้า server ไม่ใช้)
 API_KEY = _str("API_KEY", "")
 
-# แหล่งภาพ: เลขกล้อง (0, 1, ...) หรือ path ไฟล์วิดีโอสำหรับทดสอบ
+# แหล่งภาพ: เลขกล้อง (0, 1, ...), อุปกรณ์กล้อง (/dev/video0) หรือ path ไฟล์วิดีโอสำหรับทดสอบ
+#   ตัวเลข / /dev/... = กล้องจริง | อย่างอื่น = ไฟล์วิดีโอ (เล่นตาม FPS จริงและวนซ้ำ)
 _cam = _str("CAMERA_INDEX", "0")
 CAMERA_INDEX = int(_cam) if _cam.isdigit() else _cam
 
 # 1 = ไม่มีจอ (Orange Pi / Docker) | 0 = เปิดหน้าต่าง debug (PC)
 HEADLESS = _bool("HEADLESS", True)
+
+# แหล่งคำสั่ง START/STOP
+#   redis    = รับจาก Redis (ใช้งานจริง)
+#   keyboard = ทดสอบบน PC ไม่ต่อ Redis: กด s = START, x = STOP บนหน้าต่าง (ต้อง HEADLESS=0)
+#   (โหมด redis + HEADLESS=0 ก็กด s/x ได้เช่นกัน)
+CONTROL_MODE = _str("CONTROL_MODE", "redis").lower()
+if CONTROL_MODE not in ("redis", "keyboard"):
+    raise SystemExit(f"❌ .env: CONTROL_MODE={CONTROL_MODE!r} ต้องเป็น redis หรือ keyboard")
+if CONTROL_MODE == "keyboard" and HEADLESS:
+    raise SystemExit("❌ .env: CONTROL_MODE=keyboard ต้องใช้คู่กับ HEADLESS=0 (ต้องมีหน้าต่างให้กดปุ่ม)")
+
+# Redis ของ controller (อยู่บนบอร์ดเดียวกัน) — ชื่อ key / DB ต้องตรงกับโปรแกรมเก่า
+#   Docker ใช้ network_mode: host จึงใช้ 127.0.0.1 ได้เหมือนรันตรง
+REDIS_HOST = _str("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = _int("REDIS_PORT", 6379)
+REDIS_DB = _int("REDIS_DB", 0)
+REDIS_PASSWORD = _str("REDIS_PASSWORD", "")
+REDIS_CTRL_KEY = _str("REDIS_CTRL_KEY", "CTRL")          # รับ START/STOP (RPOP)
+REDIS_RESPONSE_KEY = _str("REDIS_RESPONSE_KEY", "CAMERA")  # ส่ง S0 (LPUSH)
+# timeout ต่อ Redis (วินาที) — Redis ค้างต้องไม่ทำให้กล้อง/STOP ค้าง
+REDIS_CONNECT_TIMEOUT_SEC = _float("REDIS_CONNECT_TIMEOUT_SEC", 1.0)
+REDIS_SOCKET_TIMEOUT_SEC = _float("REDIS_SOCKET_TIMEOUT_SEC", 1.0)
+
+# 1 = เปิดส่งข้อมูลขึ้น cloud (register, ROI polling, ภาพสด, retry queue) | 0 = ทำงาน local อย่างเดียว
+CLOUD_ENABLED = _bool("CLOUD_ENABLED", False)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -95,8 +121,13 @@ CENTROID_STABLE_DIST = _int("CENTROID_STABLE_DIST", 10)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# หมวด 3 — จังหวะเวลาของ order และการ reset
+# หมวด 3 — รอบ START–STOP
 # ═════════════════════════════════════════════════════════════════════════════
+
+# ไม่มี STOP ภายในกี่วินาทีหลัง START → ปิดรอบเอง (outcome TIMEOUT ไม่ส่งอะไรกลับ เหมือนตัวเก่า)
+CYCLE_TIMEOUT_SEC = _float("CYCLE_TIMEOUT_SEC", 300)
+
+# ── ค่าของระบบ order เดิม: ไม่มีผลในโหมด START–STOP (เก็บไว้ให้ .env เก่ายังอ่านได้) ──
 
 # รอของตกนานแค่ไหนหลังได้ order (วินาที) — เริ่มนับใหม่ทุกครั้งที่จับของได้ 1 ชิ้น
 # หมดเวลา → สรุปผล completed / anomaly / no_drop ส่งขึ้น server
@@ -170,6 +201,27 @@ WS_RECONNECT_SEC = _float("WS_RECONNECT_SEC", 5)
 CLEANUP_KEEP_DAYS = _int("CLEANUP_KEEP_DAYS", 3)
 CLEANUP_INTERVAL_HOURS = _int("CLEANUP_INTERVAL_HOURS", 1)
 
+# ฐานข้อมูลรอบ / การยืนยัน / ยอดรายวัน (ต้องอยู่ใน volume ที่คงอยู่ ห้ามลบ)
+STATE_DB_PATH = _str("STATE_DB_PATH", "data/vending_state.sqlite3")
+
+# timezone ของยอดรายวันและ log item drop (ไม่ขึ้นกับเวลาของเครื่อง)
+COUNT_TIMEZONE = _str("COUNT_TIMEZONE", "Asia/Bangkok")
+try:
+    from zoneinfo import ZoneInfo
+
+    ZoneInfo(COUNT_TIMEZONE)
+except Exception:
+    raise SystemExit(f"❌ .env: COUNT_TIMEZONE={COUNT_TIMEZONE!r} ไม่รู้จัก (ต้องติดตั้ง tzdata)")
+
+# โฟลเดอร์ log ยอดรายวัน (1 ไฟล์ต่อวัน: YYYY-MM-DD.log)
+DAILY_LOG_DIR = _str("DAILY_LOG_DIR", "logs/item_drops")
+
+# ภาพหลักฐานความผิดปกติ (นอกรอบ / ของเพิ่มหลังยืนยัน): ถ่ายได้ไม่เกิน 1 ภาพต่อกี่วินาที / ต่อชั่วโมง
+ANOMALY_MIN_INTERVAL_SEC = _float("ANOMALY_MIN_INTERVAL_SEC", 30)
+ANOMALY_MAX_PER_HOUR = _int("ANOMALY_MAX_PER_HOUR", 20)
+# เก็บภาพความผิดปกติกี่วัน (แยกจาก CLEANUP_KEEP_DAYS ของภาพที่ยืนยัน)
+ANOMALY_KEEP_DAYS = _int("ANOMALY_KEEP_DAYS", 3)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # หมวด 6 — ค่าคงที่ (ห้ามแก้ — พิกัด ROI ทั้งหมดอ้างอิงขนาดนี้)
@@ -178,10 +230,11 @@ CLEANUP_INTERVAL_HOURS = _int("CLEANUP_INTERVAL_HOURS", 1)
 FRAME_W = 640
 FRAME_H = 480
 ROI_CONFIG_PATH = "data/roi_config.json"
+EVIDENCE_DIR = "evidence_images"
 
 
 # ── สรุปค่าที่ใช้งานจริง (main เรียกตอน startup) ──────────────────────────────
-_SECRET_KEYS = {"API_KEY"}
+_SECRET_KEYS = {"API_KEY", "REDIS_PASSWORD"}
 
 
 def summary() -> str:

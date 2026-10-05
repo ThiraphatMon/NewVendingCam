@@ -1,11 +1,20 @@
 """
-main.py — main loop ของ VendingCam
+main.py — main loop ของ VendingCam (ยืนยันสินค้า 1 ชิ้นต่อรอบ START–STOP ผ่าน Redis)
 
-ลำดับต่อเฟรม: อ่านเฟรม → background/diff → mask → ก้อน → tracker → ตัดสินใจ (state) → วาด
-รายละเอียดแต่ละขั้นอยู่ใน core/ (frame_source, background, detect, tracker, reset_policy)
+ลำดับต่อ iteration (App.step):
+  อ่านเฟรม → ประมวลคำสั่ง START/STOP + ผลส่ง S0 (ก่อนดูผลตรวจจับเสมอ) → timeout รอบ
+  → (มีเฟรม) background/diff → mask → ก้อน → tracker → ยืนยัน (เฉพาะ ACTIVE)
+
+  - main loop เป็นเจ้าของ state ของรอบตัวเดียว (core/cycle.py) — Redis worker แค่ส่งเหตุการณ์มา
+  - กล้องเปิดครั้งเดียวตอนเริ่ม START/STOP ไม่เปิด/ปิดกล้อง
+  - ไม่มีเฟรม (กล้องหลุด) ก็ยังประมวลผล STOP / timeout ได้
+รายละเอียดการตรวจจับอยู่ใน core/ (frame_source, background, detect, tracker) — ไม่เปลี่ยนจากเดิม
 """
 
 import argparse
+import os
+import signal
+import sqlite3
 import threading
 import time
 import cv2
@@ -16,31 +25,37 @@ from config import (
     MOT_THRESH, MIN_AREA, MAX_BLOB_ROI_RATIO,
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD,
-    CAPTURE_HOLD_SEC, CONFIRMED_HOLD_TIMEOUT,
+    CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, CLOUD_ENABLED, EVIDENCE_DIR,
+    REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
+    REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
+    STATE_DB_PATH, COUNT_TIMEZONE,
 )
-from api.client import push_default_roi, register_machine, start_roi_polling, submit_frame
-from api.order_listener import start_order_listener, get_pending_order, clear_pending_order
-from api.retry_queue import start_retry_thread
+from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
+from core import cycle as cyc
 from core.background import BackgroundModel, find_env_change
+from core.cycle import CycleMachine
 from core.detect import build_fgmask, contour_boxes, drop_large_boxes, group_close_boxes
 from core.frame_source import FrameSource
-from core.reset_policy import decide_reset
 from core.roi import ROIManager
-from core.state_machine import VendingStateMachine
-from core.tracker import MemoryTracker, is_motion_in_roi
+from core.tracker import MemoryTracker
+from utils import image_saver
 from utils.disk_cleanup import start_cleanup_thread
-from ui.overlay import render_overlay
 from utils.logger import get_logger
+from utils.state_store import R_EXPIRED, R_FAILED, StateStore, StateStoreError
+from ui.overlay import render_overlay
 
 logger = get_logger("main")
 
+# บันทึกภาพ/DB ล้มเหลว → รอกี่วินาทีก่อนลองยืนยันใหม่ (ของยังนิ่งอยู่) กันเขียนดิสก์ทุกเฟรม
+CONFIRM_RETRY_SEC = 1.0
 
-def start_services(machine_id):
-    """เริ่ม background thread ทั้งหมด
-    (ต้องเรียกหลังสร้าง ROIManager — มันสร้างไฟล์ ROI default ให้ก่อน push ขึ้น server)"""
-    start_cleanup_thread()
+
+def start_cloud_services(machine_id):
+    """เริ่ม thread ฝั่ง cloud (เฉพาะ CLOUD_ENABLED=1) — โหมด START–STOP ไม่ใช้ order listener"""
+    from api.client import push_default_roi, register_machine, start_roi_polling
+    from api.retry_queue import start_retry_thread
+
     start_retry_thread()
-    start_order_listener()
     threading.Thread(target=register_machine, args=(machine_id,), daemon=True).start()
     threading.Thread(
         target=push_default_roi, args=(machine_id, ROI_CONFIG_PATH), daemon=True
@@ -67,7 +82,6 @@ def detect_objects(diff, roi_manager):
         raw_boxes = drop_large_boxes(raw_boxes, roi_areas, MAX_BLOB_ROI_RATIO)
 
     # [MULTI-ITEM] รวมกล่องที่ใกล้กัน (ของชิ้นเดียวแตกหลาย contour)
-    # แต่กลุ่มที่ห่างกันยังแยกเป็นหลายชิ้น
     merged = group_close_boxes(
         raw_boxes, max_dist=GROUP_DIST, overlap_pad=GROUP_OVERLAP_PAD, mode=GROUP_MODE
     )
@@ -75,55 +89,278 @@ def detect_objects(diff, roi_manager):
     return fgmask, detected, env_change
 
 
-def capture_landed(sm, tracked, tracker, bg, frame, frame_gray, now):
-    """[CAPTURE-ON-LANDING] จับของที่ลงจอดแล้ว (นิ่ง) ครบ CAPTURE_HOLD_SEC — สูงสุด 1 ชิ้นต่อเฟรม
+def find_landed(tracked, now):
+    """[CAPTURE-ON-LANDING] วัตถุที่ลงจอดแล้ว (นิ่ง) ครบ CAPTURE_HOLD_SEC — คืน obj_id ตัวแรก หรือ None
 
     ของที่กำลังตกจะขยับ (MOVING/DETECTING) → ยังไม่จับ
-    นิ่งครบ LANDING_STABLE_FRAMES → SHAPE_CONFIRMED → นิ่งต่ออีก CAPTURE_HOLD_SEC → capture
+    นิ่งครบ LANDING_STABLE_FRAMES → SHAPE_CONFIRMED → นิ่งต่ออีก CAPTURE_HOLD_SEC → ผ่านเกณฑ์
     """
     for obj_id, obj in tracked.items():
-        if sm.is_obj_captured(obj_id):
-            continue
         if (
             obj["state"] == "SHAPE_CONFIRMED"
             and (now - obj.get("shape_confirmed_time", now)) >= CAPTURE_HOLD_SEC
         ):
-            # capture + นับเพิ่ม (ตกที่เดิม = ชิ้นใหม่ ไม่ต้องกันนับซ้ำ)
-            sm.trigger(
-                "still_in_ROI", obj_id=obj_id, frame=frame,
-                centroid=obj["centroid"], shape=obj["shape"],
+            return obj_id
+    return None
+
+
+class App:
+    """เจ้าของ state ทั้งหมดของ main loop (test สร้างตรง ๆ ด้วย fake source / controller / clock ได้)
+
+    clock : wall clock สำหรับการตรวจจับ (tracker ใช้ time.time ภายใน จึงต้องเป็นนาฬิกาเดียวกัน)
+    mono  : monotonic สำหรับ timeout ของรอบ
+    """
+
+    def __init__(
+        self, machine_id, source, roi_manager, store, controller,
+        headless=True, evidence_dir=EVIDENCE_DIR, clock=time.time, mono=time.monotonic,
+    ):
+        self.machine_id = machine_id
+        self.source = source
+        self.roi_manager = roi_manager
+        self.store = store
+        self.controller = controller
+        self.headless = headless
+        self.evidence_dir = evidence_dir
+        self.clock = clock
+        self.mono = mono
+
+        self.cm = CycleMachine(CYCLE_TIMEOUT_SEC)
+        self.tracker = MemoryTracker()
+        self.bg = BackgroundModel()
+        self.running = True
+        self.last_cmd_seq = 0          # seq ของคำสั่งล่าสุดที่ประมวลผลแล้ว
+        self.confirm_retry_at = 0.0    # หลังบันทึกล้มเหลว ห้ามลองใหม่ก่อนเวลานี้
+        self.camera_ok = None
+        self.redis_up = None
+        self.today_count = store.count_today()
+        self.last_send_time = 0.0
+
+        # [RECOVERY] process ก่อนหน้าตายกลางรอบ → ปิดเป็น INTERRUPTED แล้ว block จน STOP / timeout
+        interrupted = store.recover_open_cycles()
+        if interrupted:
+            short = ", ".join(c[:8] for c in interrupted)
+            logger.warning(
+                f"♻️ พบรอบค้างจากก่อน restart ({short}) → บันทึกเป็น INTERRUPTED "
+                f"เข้า RECOVERY_BLOCKED (STOP ถัดไป หรือ {CYCLE_TIMEOUT_SEC:.0f}s จึงรับ START ใหม่)"
             )
-            if sm.is_obj_captured(obj_id):
-                # [RESET MOTION] เฟรมนี้เป็น bg ใหม่ + tracker ลืมของชิ้นนี้ทันที
-                # → ของชิ้นถัดไป (แม้ตกทับที่เดิม) เป็น motion ใหม่ในเฟรมสะอาด
-                # กรอบ COUNTED ยังวาดได้จากพิกัดใน captured_items
-                bg.rebaseline(frame_gray)
-                tracker.clear_all()
-                break
+            self.cm.enter_recovery(self.mono())
+        logger.info(f"📊 ยอดวันนี้ ({store.today()}) = {self.today_count}")
 
+    # ── 1 iteration ─────────────────────────────────────────────────────────
+    def step(self):
+        """คืน (frame, fgmask, tracked) สำหรับวาดจอ (frame=None ถ้าไม่มีเฟรม)"""
+        frame = self.source.read()
+        now = self.clock()
 
-def reset_all(sm, tracker, bg, now):
-    """reset กลับ IDLE: state machine + tracker + ปลด freeze bg แล้วเข้า grace period"""
-    sm.reset()
-    tracker.clear_all()
-    bg.unfreeze(now)
+        # คำสั่ง / ผลส่ง S0 ก่อนผลตรวจจับเสมอ (STOP ที่มาระหว่างอ่านเฟรมต้องมีผลก่อนยืนยัน)
+        self._handle_inbox(now)
+        result = self.cm.tick(self.mono())
+        if result:
+            self._apply(result, now)
 
+        if frame is None:
+            self._on_no_frame()
+            return None, None, {}
+        if self.camera_ok is not True:
+            if self.camera_ok is False:
+                logger.info("📷 กล้องกลับมาแล้ว")
+            self.camera_ok = True
 
-def apply_reset(reason, sm, tracker, bg, frame, now):
-    """ทำงานตามเหตุผลจาก decide_reset() แล้ว reset ทั้งระบบ"""
-    if reason == "order_done":
-        sm.finalize_order(frame=frame)
-        clear_pending_order()
-    elif reason == "drop_timeout":
-        sm.trigger("timeout")  # ส่ง NO_DROP
-    elif reason == "empty_frame":
-        logger.info("🔄 Frame ว่าง — ไม่มีของค้างใน ROI → reset กลับ IDLE")
-    elif reason == "hold_timeout":
-        logger.info(
-            f"⏰ ครบ {CONFIRMED_HOLD_TIMEOUT}s ไม่มีของตกเพิ่ม → "
-            f"RESET (จับได้ {sm.item_count()} ชิ้น, txn={sm.transaction_id})"
+        if CLOUD_ENABLED and SEND_INTERVAL > 0 and now - self.last_send_time >= SEND_INTERVAL:
+            from api.client import submit_frame
+
+            submit_frame(self.machine_id, frame)
+            self.last_send_time = now
+
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        idle = self.cm.state in (cyc.WAIT_START, cyc.RECOVERY_BLOCKED)
+        diff = self.bg.update(frame_gray, now, idle=idle)
+        if diff is None:
+            return frame, None, {}
+
+        fgmask, detected, env_change = detect_objects(diff, self.roi_manager)
+        if env_change and self.bg.frozen:
+            self.bg.restore_snapshot()
+        tracked = self.tracker.update(detected)
+
+        obj_id = find_landed(tracked, now)
+        if obj_id is not None and self.cm.can_confirm() and now >= self.confirm_retry_at:
+            self._confirm(frame, frame_gray, now)
+        return frame, fgmask, tracked
+
+    # ── คำสั่งและผลจาก Redis worker ─────────────────────────────────────────
+    def _handle_inbox(self, now):
+        for ev in self.controller.drain():
+            if isinstance(ev, Command):
+                self.last_cmd_seq = ev.seq
+                mono = self.mono()
+                if ev.text == "START":
+                    result = self.cm.on_start(mono)
+                else:
+                    result = self.cm.on_stop(mono)
+                logger.info(f"📥 {ev.text} (#{ev.seq} จาก {ev.source})")
+                self._apply(result, now)
+            elif isinstance(ev, LinkStatus):
+                self.redis_up = ev.up
+                if not ev.up and self.cm.is_open():
+                    self.cm.on_redis_gap()
+                    logger.warning(f"⚠️ Redis ขาดระหว่างรอบ {self.cm.cycle_id[:8]} ({ev.error})")
+            elif isinstance(ev, SendResult):
+                self._on_send_result(ev)
+
+    def _on_send_result(self, ev):
+        state = ev.state
+        if state == R_FAILED and not self.cm.is_current_open(ev.cycle_id):
+            state = R_EXPIRED
+        try:
+            self.store.set_response_state(ev.cycle_id, state, ev.error or None)
+        except sqlite3.Error as e:
+            logger.error(f"❌ บันทึกสถานะ S0 ({state}) ไม่ได้: {e}")
+        if state != "ENQUEUED":
+            logger.warning(f"📤 S0 ของรอบ {ev.cycle_id[:8]} → {state} {ev.error}")
+
+    def _apply(self, result, now):
+        """ทำ I/O ตามผลของ CycleMachine (ปิดรอบก่อนเปิดรอบใหม่เสมอ)"""
+        if result.anomaly:
+            logger.warning(f"⚠️ [{result.anomaly}] {result.note}")
+        elif result.note:
+            logger.info(f"🔁 {result.note}")
+        if result.closed:
+            self._on_closed(result.closed, now)
+        if result.opened:
+            self._on_opened(result.opened, now)
+
+    def _on_opened(self, cycle_id, now):
+        try:
+            self.store.open_cycle(cycle_id)
+        except sqlite3.Error as e:
+            # รอบนี้ยืนยันไม่ได้ (confirm จะหา cycle ใน DB ไม่เจอ) แต่ยังรับ STOP ได้ตามปกติ
+            logger.critical(f"❌ บันทึกรอบใหม่ลง DB ไม่ได้: {e}")
+
+        # [BG] ใช้พื้นหลังก่อน START ตรึงไว้ทั้งรอบ + ล้าง tracker (ห้ามพาวัตถุจากก่อน START มา)
+        self.tracker.clear_all()
+        if self.bg.bg is None:
+            # ยังไม่มีพื้นหลังเลย (กล้องเพิ่งเริ่ม / หลุด) → ห้ามใช้เฟรมหลัง START เป็นพื้นหลัง
+            self.cm.on_camera_lost()
+            logger.warning(f"⛔ รอบ {cycle_id[:8]}: ไม่มีพื้นหลังก่อน START → BLOCKED_WAIT_STOP")
+        elif not self.bg.frozen:
+            if self.bg.clean_bg is None:
+                logger.warning(
+                    "⚠️ ยังไม่มี clean_bg (เพิ่งเริ่มระบบ / เพิ่งปิดรอบ) → ใช้ bg ปัจจุบันเป็นพื้นหลังของรอบ "
+                    "(ถ้ามีมือ/ของที่ยังไม่ถูกกลืนเข้า bg อาจถูกตรวจในรอบนี้)"
+                )
+            else:
+                age = now - self.bg.clean_bg_last_update
+                logger.info(f"🧊 ใช้ clean_bg (อายุ {age:.1f}s) เป็นพื้นหลังของรอบ")
+            self.bg.freeze()
+        logger.info(f"▶️ เปิดรอบ {cycle_id[:8]} (state={self.cm.state})")
+
+    def _on_closed(self, closed, now):
+        try:
+            self.store.close_cycle(closed.cycle_id, closed.outcome, closed.reason)
+        except sqlite3.Error as e:
+            logger.critical(f"❌ บันทึกการปิดรอบลง DB ไม่ได้: {e}")
+        # S0 ที่ยังไม่ได้ส่งของรอบนี้ห้ามส่งอีก
+        self.controller.revoke(closed.cycle_id)
+        # [RESET] ล้าง tracker → ปลด freeze + grace (ดูดมือที่ค้างในเฟรมเข้า bg ก่อน)
+        self.tracker.clear_all()
+        if self.bg.frozen:
+            self.bg.unfreeze(now)
+        self.bg.invalidate_clean_bg()
+        logger.info(f"⏹️ ปิดรอบ {closed.cycle_id[:8]} → {closed.outcome} ({closed.reason})")
+
+    def _on_no_frame(self):
+        if self.camera_ok is not False:
+            logger.warning("📷 ไม่มีเฟรมจากกล้อง")
+        self.camera_ok = False
+        if self.cm.on_camera_lost():
+            logger.warning(
+                f"⛔ กล้องหลุดระหว่างรอบ {self.cm.cycle_id[:8]} → BLOCKED_WAIT_STOP (ไม่ยืนยันจนปิดรอบ)"
+            )
+        self.bg.clear()  # กล้องหลุด → เริ่ม background ใหม่
+        self.tracker.clear_all()
+
+    # ── การยืนยัน ────────────────────────────────────────────────────────────
+    def _confirm(self, frame, frame_gray, now):
+        """ภาพ → DB (transaction เดียว) → latch → S0 — ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0"""
+        cycle_id = self.cm.cycle_id
+        t0 = time.perf_counter()
+
+        path = image_saver.save_evidence(
+            frame, image_saver.CONFIRMED, "CONFIRMED", cycle_id, base_dir=self.evidence_dir,
         )
-    reset_all(sm, tracker, bg, now)
+        if path is None:
+            logger.error(f"❌ [EVIDENCE FAULT] รอบ {cycle_id[:8]}: บันทึกภาพไม่ได้ → ไม่ยืนยัน (ลองใหม่ถ้าของยังนิ่ง)")
+            self.confirm_retry_at = now + CONFIRM_RETRY_SEC
+            return
+        try:
+            conf = self.store.confirm(cycle_id, path)
+        except sqlite3.Error as e:
+            logger.error(f"❌ [STORAGE FAULT] รอบ {cycle_id[:8]}: บันทึก DB ไม่ได้ ({e}) → ไม่ยืนยัน")
+            self.confirm_retry_at = now + CONFIRM_RETRY_SEC
+            _remove_quietly(path)  # ภาพที่ไม่มี confirmation อ้างถึง
+            return
+
+        self.cm.mark_confirmed()
+        self.today_count = conf.daily_sequence
+        self.controller.request_s0(cycle_id, self.last_cmd_seq)
+
+        # [RESET MOTION] เฟรมนี้เป็น bg ใหม่ + tracker ลืมของชิ้นนี้ → motion หลังยืนยันเป็นของใหม่
+        self.bg.rebaseline(frame_gray, now)
+        self.tracker.clear_all()
+        ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — ยอดวันนี้ {conf.daily_sequence} "
+            f"(บันทึก {ms:.0f}ms) → ส่ง S0"
+        )
+
+    def view(self):
+        """ข้อมูลสำหรับ overlay"""
+        return {
+            "state": self.cm.state,
+            "cycle_id": self.cm.cycle_id,
+            "today_count": self.today_count,
+            "redis_up": self.redis_up,
+            "camera_ok": self.camera_ok,
+            "bg_frozen": self.bg.frozen,
+            "keyboard": not self.controller.enabled,
+        }
+
+    # ── loop หลัก ────────────────────────────────────────────────────────────
+    def run(self):
+        while self.running:
+            frame, fgmask, tracked = self.step()
+            if frame is not None:
+                if not self.headless:
+                    render_overlay(frame, self.view(), tracked, self.roi_manager, FRAME_W, FRAME_H)
+                self.source.pace()
+
+            if not self.headless:
+                if frame is not None:
+                    cv2.imshow("Vending System", frame)
+                    if fgmask is not None:
+                        cv2.imshow("Motion Mask", fgmask)
+                self._handle_key(cv2.waitKey(1) & 0xFF)
+
+    def _handle_key(self, key):
+        if key == ord("q"):
+            self.running = False
+        elif key == ord("s"):
+            self.controller.inject("START")
+        elif key == ord("x"):
+            self.controller.inject("STOP")
+        elif key == ord("r"):
+            # ล้างพื้นหลัง + tracker ด้วยมือ (เหมือนกล้องหลุด) — ไม่แตะรอบ / ยอด
+            self.tracker.clear_all()
+            self.bg.clear()
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def main():
@@ -132,12 +369,31 @@ def main():
     args = parser.parse_args()
 
     logger.info(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
-    logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'}")
+    logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'} / คำสั่งจาก {CONTROL_MODE}")
     logger.info(config.summary())
 
+    try:
+        store = StateStore(STATE_DB_PATH, args.machine, COUNT_TIMEZONE)
+    except StateStoreError as e:
+        logger.critical(str(e))
+        raise SystemExit(f"{e}\n   → ห้ามลบไฟล์ DB เพื่อให้บูตผ่าน: สำรองไฟล์แล้วแจ้งผู้ดูแล")
+
+    controller = RedisController(
+        lambda: make_client(
+            REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD,
+            REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
+        ),
+        ctrl_key=REDIS_CTRL_KEY,
+        response_key=REDIS_RESPONSE_KEY,
+        enabled=(CONTROL_MODE == "redis"),
+    )
     source = FrameSource(CAMERA_INDEX)
     roi_manager = ROIManager(FRAME_W, FRAME_H, config_path=ROI_CONFIG_PATH)
-    start_services(args.machine)
+    start_cleanup_thread()
+    if CLOUD_ENABLED:
+        start_cloud_services(args.machine)
+    else:
+        logger.info("☁️ CLOUD_ENABLED=0 — ไม่เริ่ม register / ROI polling / ภาพสด / retry queue")
 
     # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
     if not HEADLESS:
@@ -145,89 +401,25 @@ def main():
             cv2.namedWindow(name, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(name, FRAME_W, FRAME_H)
 
-    tracker = MemoryTracker()
-    sm = VendingStateMachine(args.machine)
-    bg = BackgroundModel()
-    last_send_time = 0
+    app = App(args.machine, source, roi_manager, store, controller, headless=HEADLESS)
 
-    while True:
-        # ── 1) อ่านเฟรม ─────────────────────────────────────────────────────
-        frame = source.read()
-        if frame is None:
-            bg.clear()  # กล้องหลุด → เริ่ม background ใหม่
-            continue
-        now = time.time()
+    def _shutdown(signum, _frame):
+        logger.info(f"🛑 ได้รับ signal {signum} → ปิดโปรแกรม")
+        app.running = False
 
-        # ส่งภาพสดขึ้น dashboard ผ่าน background thread ไม่ block loop (SEND_INTERVAL=0 = ปิด)
-        if SEND_INTERVAL > 0 and now - last_send_time >= SEND_INTERVAL:
-            submit_frame(sm.machine_id, frame)
-            last_send_time = now
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
-        # ── 2) background → diff ────────────────────────────────────────────
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        diff = bg.update(frame_gray, now, idle=(sm.state == "IDLE"))
-        if diff is None:
-            continue
-
-        # ── 3) mask → ก้อน → tracker ─────────────────────────────────────────
-        fgmask, detected, env_change = detect_objects(diff, roi_manager)
-        if env_change and sm.state != "IDLE" and bg.restore_snapshot():
-            # รีเซ็ต hold timeout ของของที่นับแล้ว (กันตัดระหว่างจัดการ env change)
-            for item_info in sm.captured_items.values():
-                item_info["land_time"] = now
-        tracked = tracker.update(detected)
-
-        # ── 4) ตัดสินใจ ──────────────────────────────────────────────────────
-        # IDLE: รับ order จาก server (ถ้ามี)
-        if sm.state == "IDLE" and not sm.has_order():
-            pending = get_pending_order()
-            if pending is not None:
-                sm.set_order(pending)
-
-        # IDLE: มี order แต่หมดเวลาโดยไม่มีของตกเลย → no_drop
-        # (reset เฉพาะ state machine — bg ยังไม่ถูก freeze จึงไม่ต้องเข้า grace)
-        if sm.state == "IDLE" and sm.has_order() and sm.is_order_window_expired(now):
-            logger.info(f"[{sm.machine_id}] ⏰ order window หมด — ไม่มีของตกเลย → no_drop")
-            if sm.transaction_id is None:
-                sm.transaction_id = sm.new_transaction_id()
-            sm.finalize_order(frame=frame)
-            clear_pending_order()
-            sm.reset()
-
-        # IDLE: เริ่มมีของตก → freeze bg แล้วเข้า DROP_DETECTED
-        # (ระหว่าง grace period หลัง reset ห้าม trigger — มือที่ถอยออกอาจถูกนับเป็น motion)
-        if sm.state == "IDLE" and is_motion_in_roi(tracked) and not bg.in_grace(now):
-            bg.freeze()
-            sm.trigger("motion_in_ROI")
-
-        # กำลังรับของ: จับของที่ลงจอด แล้วดูว่าถึงเวลา reset หรือยัง
-        if sm.state in ("DROP_DETECTED", "EVIDENCE_CAPTURED"):
-            capture_landed(sm, tracked, tracker, bg, frame, frame_gray, now)
-            reason = decide_reset(sm, tracked, now)
-            if reason:
-                apply_reset(reason, sm, tracker, bg, frame, now)
-
-        # ── 5) วาด / แสดงผล (เฉพาะโหมด DISPLAY) ──────────────────────────────
+    controller.start()
+    try:
+        app.run()
+    finally:
+        controller.stop()
+        source.release()
+        store.close()
         if not HEADLESS:
-            render_overlay(frame, sm, tracked, roi_manager, bg.frozen, now, FRAME_W, FRAME_H)
-
-        source.pace()
-
-        if not HEADLESS:
-            cv2.imshow("Vending System", frame)
-            cv2.imshow("Motion Mask", fgmask)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-            elif key == ord("r"):
-                # reset ด้วยมือ: ล้าง state + tracker + background ทั้งหมด (เหมือนกล้องหลุด)
-                sm.reset()
-                tracker.clear_all()
-                bg.clear()
-
-    source.release()
-    if not HEADLESS:
-        cv2.destroyAllWindows()
+            cv2.destroyAllWindows()
+        logger.info("👋 ปิดโปรแกรมแล้ว")
 
 
 if __name__ == "__main__":
