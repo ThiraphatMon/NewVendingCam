@@ -1,18 +1,27 @@
 # AUTORUN_REPORT — ความคืบหน้างานต่อเนื่อง (branch `auto/round1-finish`)
 
 > คำสั่งหลัก: `docs/AUTORUN_TASK.md` | review: `git log main..auto/round1-finish`
+> **สถานะ: ครบทุกขั้น S0–S6 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
+
+## สรุปผลล่าสุด (S6)
+- pytest: **133 passed**
+- redis_e2e: **ผ่านทุกข้อ** 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c (ข้อ 7 ที่เดิม known limitation ผ่านแล้ว)
+- START→S0: ข้อ 1 = 3.51s, ข้อ 3 = 3.55s / 3.53s (baseline ก่อนเริ่ม ~3.40s; +0.11–0.15s มาจาก STRICT_STABILITY ใน S4 — อยู่ในเกณฑ์ 0.3s)
+- Docker smoke (image ใหม่ล่าสุด, `--network host`, Redis ทดสอบ 6380): START→S0 3.55s → PASS
+- ลบ `.e2e_tmp/`, container ทดสอบ `vendingcam-redis-test` / `vendingcam-docker-smoke` และ image `vending-cam:autorun-test` แล้ว
+  (container ของโปรเจคอื่น `wvts-*` ไม่ถูกแตะ)
 
 ## สถานะแต่ละขั้น
 
 | ขั้น | สถานะ | commit | pytest | e2e (1–6, 8 / 7) | START→S0 ข้อ 1 / ข้อ 3 |
 |---|---|---|---|---|---|
-| S0 ตั้งต้น + D2 baseline freshness | ✅ เสร็จ | autorun S0 | 100 passed | ✅ / ❌ (คาดไว้) | 3.41s / 3.40s, 3.40s |
-| S1 ปิดงาน D2 (ตั้งพื้นหลังใหม่หลัง env change สงบ) | ✅ เสร็จ | autorun S1 | 103 passed | ✅ (+8b, 8c) / ✅* | 3.41s / 3.41s, 3.42s |
-| S2 ขั้น E (พร้อมลง Orange Pi) | ✅ เสร็จ | autorun S2 | 107 passed | ✅ (+8b, 8c) / ✅ | 3.40s / 3.43s, 3.39s |
-| S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | autorun S3 | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
-| S4 ความนิ่งของ tracker | ✅ เสร็จ (default เปิด) | autorun S4 | 126 passed (ทั้ง 2 โหมด) | ✅ ทั้ง 2 โหมด | ปิด 3.42s / 3.40s, 3.38s · เปิด 3.54s / 3.56s, 3.56s |
-| S5 กล้องค้าง | ✅ เสร็จ | autorun S5 | 133 passed | ✅ / ✅ | 3.54s / 3.55s, 3.55s |
-| S6 สรุป | รอ | | | | |
+| S0 ตั้งต้น + D2 baseline freshness | ✅ เสร็จ | `1694b6f` | 100 passed | ✅ / ❌ (คาดไว้) | 3.41s / 3.40s, 3.40s |
+| S1 ปิดงาน D2 (ตั้งพื้นหลังใหม่หลัง env change สงบ) | ✅ เสร็จ | `2645e87` | 103 passed | ✅ (+8b, 8c) / ✅* | 3.41s / 3.41s, 3.42s |
+| S2 ขั้น E (พร้อมลง Orange Pi) | ✅ เสร็จ | `753a07f` | 107 passed | ✅ (+8b, 8c) / ✅ | 3.40s / 3.43s, 3.39s |
+| S3 แยกหยิบออก / ใส่เข้า (ข้อ 7) | ✅ เสร็จ | `4ccca22` | 120 passed | ✅ (+7b, 8b, 8c) / ✅ (7b ผ่านด้วย S3 ล้วน) | 3.42s / 3.42s, 3.39s |
+| S4 ความนิ่งของ tracker | ✅ เสร็จ (default เปิด) | `215105d` | 126 passed (ทั้ง 2 โหมด) | ✅ ทั้ง 2 โหมด | ปิด 3.42s / 3.40s, 3.38s · เปิด 3.54s / 3.56s, 3.56s |
+| S5 กล้องค้าง | ✅ เสร็จ | `4665040` | 133 passed | ✅ / ✅ | 3.54s / 3.55s, 3.55s |
+| S6 สรุป | ✅ เสร็จ | autorun S6 | 133 passed | ✅ ทุกข้อ (1–7, 7b, 8, 8b, 8c) + Docker smoke PASS | 3.51s / 3.55s, 3.53s |
 
 ## รายละเอียดผลทดสอบ
 
@@ -114,6 +123,12 @@
   แล้ว None + เปิดใหม่ได้เฟรม / หลุดแล้วกลับมา / ไฟล์วิดีโอเล่นตาม FPS / read() ไม่ block / main ประมวลผล STOP ระหว่าง
   ไม่มีเฟรมใหม่และไม่นับเฟรมซ้ำว่านิ่ง / กล้องค้างระหว่างรอบ → BLOCKED → STOP ปิด UNCERTAIN; รันซ้ำ 5 รอบไม่ flaky
 
+### S6
+- `HANDOVER.md`: เพิ่มหัวข้อ 4.3 แยกหยิบออก/ใส่เข้า, 4.4 ความนิ่งแบบเข้ม, 4.5 กล้อง (reader thread), anomaly POSSIBLE_REMOVAL,
+  ค่า config ใหม่, e2e 7b + docker_smoke, known limitations ปรับตามจริง (ข้อ 7 ลดเป็น MED + ข้อจำกัดใหม่ของ S3/S5),
+  จุดระวังข้อ 8 (ห้ามประมวลผลเฟรมซ้ำ)
+- Docker image build ใหม่จาก source ล่าสุด + smoke ผ่าน, รัน pytest + e2e ทั้งชุดรอบสุดท้าย (ตัวเลขด้านบน)
+
 ## ไฟล์ที่เปลี่ยน (สะสม)
 - S0: `core/background.py`, `main.py` (D2), `tests/test_evidence.py`, `tests/integration/redis_e2e.py` (ข้อ 8, `.e2e_tmp/`),
   `.gitignore`, `docs/AUTORUN_TASK.md`, `docs/AUTORUN_REPORT.md`
@@ -123,12 +138,17 @@
 - S3: `core/removal.py` (ใหม่), `core/background.py`, `main.py`, `config.py`, `.envexample`, `tests/test_removal.py` (ใหม่), `redis_e2e.py` (7b)
 - S4: `core/tracker.py`, `config.py`, `.envexample`, `tests/test_tracker.py` (ใหม่)
 - S5: `core/frame_source.py`, `main.py`, `config.py`, `.envexample`, `tests/conftest.py`, `tests/test_frame_source.py` (ใหม่)
+- S6: `HANDOVER.md`, `docs/AUTORUN_REPORT.md`
+
+รวม: `git diff --stat main..auto/round1-finish`
 
 ## ความหมายของ test ที่เปลี่ยน
 - S0 (D2): `test_start_during_watch_uses_pre_motion_background` แยกเป็น
   `test_start_during_watch_while_item_falling_is_confirmed` (ของกำลังตกตอน START ยังนับได้) และ
   `test_start_during_watch_uses_latest_still_scene_not_watch_freeze` (ของนิ่งก่อน START ≥5 เฟรมไม่นับ — เหมือนตัวเก่า,
   ผู้ใช้อนุมัติแล้ว)
+- S1–S5: ไม่มี test เดิมถูกลบหรือเปลี่ยนความหมาย — เพิ่มอย่างเดียว (100 → 133)
+  ข้อยกเว้นเล็ก: S5 ลบ `FakeSource.pace()` ใน conftest (main ไม่เรียกแล้ว) และให้ `FakeSource.read()` คืน `NO_NEW_FRAME` ได้
 
 ## คำถามรอผู้ใช้ (ประเภท A — ทำต่อไปแล้วด้วยทางที่ปลอดภัย)
 - S1: ตั้งพื้นหลังใหม่หลัง env change สงบ ใช้ CLEAN_BG_STABLE_FRAMES (5 เฟรม ≈ 0.17s) ร่วมกัน ไม่แยกค่า
@@ -151,5 +171,43 @@
 - S1: ของที่ตก "พร้อมกับ" ตอน env change (เช่นตกขณะ slat ปิด) จะถูกกลืนเข้าพื้นหลังใหม่ → ไม่ยืนยัน (ไม่ส่ง S0) — เลือกทางกัน S0 ผิด
 
 ## Known limitations
-- ~~ข้อ 7~~ แก้แล้วใน S3 (+S1 ในกรณีมี env change) — เหลือ: ของที่เรียบกว่าพื้นถาดมาก หรือไม่มีฉากก่อนหน้า → UNCERTAIN → ไม่ส่ง S0
+(ฉบับเต็มอยู่ใน `HANDOVER.md` ข้อ 10)
+- ~~ข้อ 7~~ แก้แล้ว (S1 กรณีมี env change + S3 แยกหยิบออก/ใส่เข้า) — เหลือ: ของที่เรียบกว่าพื้นถาดมาก หรือไม่มีฉากก่อนหน้า
+  (เพิ่งเปิดเครื่องตอนมีของในถาด) → UNCERTAIN → ไม่ส่ง S0
+- สินค้าที่ขอบ/ลายน้อยกว่าพื้นถาด อาจถูกมองว่า "หยิบออก" → ไม่ส่ง S0 (ยังไม่พบในคลิป ต้องทดสอบสินค้าจริง)
+- จ่ายเกิน (2 ชิ้นในรอบเดียว) นับเป็น 1 + ภาพ EXTRA_AFTER_CONFIRM (ตามดีไซน์ S0 ครั้งเดียวต่อรอบ)
 - ของที่นิ่งอยู่ก่อน START ≥5 เฟรม ไม่ถูกนับในรอบนั้น (เหมือนตัวเก่า)
+- START ขณะฉากยังไม่นิ่ง → พื้นหลังไม่แน่นอน; ของที่ตกพร้อม slat ปิดอาจถูกกลืนตอนตั้งพื้นหลังใหม่ (ไม่ส่ง S0)
+- ของชิ้นใหญ่เกิน 30% ของ ROI = env change ไม่ถูกนับ
+- กล้องค้างบน V4L2: reader เก่าที่ค้างอาจถือ /dev/video0 จนเปิดใหม่ไม่ได้ชั่วคราว (ยังไม่ได้ทดสอบกับกล้องจริง)
+- LPUSH timeout → UNKNOWN ไม่ส่งซ้ำ (controller อาจไม่ได้ S0) — ตั้งใจ กัน S0 ซ้ำ
+- ทดสอบด้วยคลิปเดียว (`big1_pickup_cutted.mp4`) — ค่าเกณฑ์ใหม่ (REMOVAL_*, CLEAN_BG_*) ยังไม่ได้ยืนยันกับหลายตู้/หลายสภาพแสง
+
+## สิ่งที่ต้องทดสอบที่ตู้จริง (ทำไม่ได้บน PC)
+1. **Build บน Orange Pi (arm64)** — ทดสอบแค่ amd64 ใน WSL; ตรวจว่า pip ได้ wheel aarch64 (opencv-headless, numpy, redis, tzdata)
+2. **หยุดโปรแกรมตัวเก่าก่อน** แล้ว `redis-cli MONITOR` ต้องเห็น RPOP CTRL จาก client เดียว (HANDOVER ข้อ 9 / ORANGE_PI_DOCKER ข้อ 4–5)
+3. **controlled test**: START → ปล่อยของ → S0 ครั้งเดียว → STOP; START → ไม่มีของ → STOP → ไม่มี S0; ตรวจ daily log / ภาพ
+4. **ซื้อต่อกัน** (ข้อ 8): ลูกค้าหยิบของแล้วซื้อชิ้นถัดไปทันที — ต้องได้ S0 ของชิ้นใหม่ และไม่มี S0 จากรอยหยิบ
+5. **หยิบของออกระหว่างรอบ** (ข้อ 7) ด้วยมือจริง ทั้งแบบ slat บัง (env change) และไม่บัง — ดู log `ดูเหมือนหยิบออก`
+6. **สินค้าทุกแบบที่ขาย** โดยเฉพาะของสีเรียบ/ไม่มีลาย บนพื้นถาดที่มีลาย — ต้องไม่ถูกมองว่า "หยิบออก" (log `🔍 ... ใส่เข้า (ขอบ ×...)`
+   ระดับ DEBUG ใน logs/vending.log: ถ้าค่าขอบของสินค้าจริงเข้าใกล้ 0.6 ต้องปรับ `REMOVAL_EDGE_RATIO`)
+7. **ถอดสาย USB กล้อง / กล้องค้าง** ระหว่างรอบ → รอบเป็น BLOCKED → STOP ปิดเป็น UNCERTAIN, กล้องกลับมาแล้วรอบถัดไปปกติ
+   (เช็คว่าเปิด /dev/video0 ใหม่ได้ขณะ reader เก่ายังค้าง)
+8. **เวลา START→S0 จริง** (คลิป ~3.5s) และ CPU/RAM (`docker stats`) — scene history ใช้ RAM เพิ่ม ~3MB
+9. **แสงในตู้เปลี่ยนตามเวลา** (กลางวัน/กลางคืน) — log `baseline ไม่แน่นอน` ไม่ควรเกิดบ่อยตอนถาดนิ่ง
+
+## วิธี review / merge
+```bash
+git log --oneline main..auto/round1-finish      # 7 commit: autorun S0–S6
+git diff --stat main..auto/round1-finish
+git diff main..auto/round1-finish -- core/ main.py config.py   # โค้ดหลัก
+# ทดสอบซ้ำ
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe tests\integration
+edis_e2e.py --clip <big1_pickup_cutted.mp4>
+# merge เมื่อพอใจ (ผู้ใช้ทำเอง — autorun ไม่ merge / push)
+git checkout main && git merge --no-ff auto/round1-finish
+```
+แนะนำ review ทีละ commit (แต่ละขั้นผ่านประตูทดสอบของตัวเองก่อน commit) — ถ้าไม่ต้องการขั้นไหน revert เฉพาะ commit นั้นได้
+(S4 / S5 แยกจาก S3 ได้; S3 ใช้ scene history ใน background.py; S1 ปิดได้ด้วย `ENV_SETTLE_REBASELINE=0`,
+S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0` โดยไม่ต้อง revert)

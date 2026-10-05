@@ -90,7 +90,7 @@ outcome ของรอบ (เก็บใน DB เท่านั้น):
 ### 4.1 หลักการ: background subtraction ใน ROI
 - `diff = |frame − bg|` เฉพาะใน ROI (`data/roi_config.json`) → mask → กล่อง → tracker
 - **ของตก = เคลื่อนที่แล้วมานิ่ง:** centroid นิ่งครบ `LANDING_STABLE_FRAMES` (4) เฟรม → SHAPE_CONFIRMED
-  → นิ่งต่ออีก `CAPTURE_HOLD_SEC` (1.5s) → ยืนยัน (ในคลิปทดสอบ START→S0 ≈ 3.4s)
+  → นิ่งต่ออีก `CAPTURE_HOLD_SEC` (1.5s) → ยืนยัน (ในคลิปทดสอบ START→S0 ≈ 3.55s)
 - ก้อนใหญ่เกิน `MAX_BLOB_ROI_RATIO` (30%) ของ ROI = **env change** (แสง/slat/มือบัง) ไม่ใช่ของ
 
 ### 4.2 พื้นหลังของรอบ (สำคัญที่สุด)
@@ -107,7 +107,28 @@ outcome ของรอบ (เก็บใน DB เท่านั้น):
 - **หลังยืนยัน:** `rebaseline()` เฟรมปัจจุบันเป็นพื้นหลังใหม่ → ของชิ้นถัดไปเป็น motion ใหม่ (→ anomaly)
 - **ปิดรอบ:** unfreeze + grace `RESET_GRACE_SEC` (re-learn เร็ว ดูดมือที่ค้างเข้า bg) + ทิ้ง clean_bg
 
-### 4.3 Watch mode (นอกรอบ)
+### 4.3 แยก "หยิบออก" กับ "ใส่เข้า" (`core/removal.py`)
+ก่อนยืนยันในรอบ ACTIVE เทียบ candidate (เฉพาะพิกเซลที่ต่างจากพื้นหลังรอบ ในกล่อง + ขอบ 8px):
+- **ความคม (Sobel) ลดลง** เทียบพื้นหลังรอบ (< `REMOVAL_EDGE_RATIO` 0.6) = ดูเหมือนของหายไป
+  (คลิปทดสอบ: สินค้าตก ×1.52, หยิบออก ×0.40)
+- **กลับไปเหมือนฉากนิ่งก่อนหน้า** (scene history ที่บันทึกก่อนวัตถุนี้ปรากฏ, < `REMOVAL_MATCH_RATIO` 0.5 ของความต่างจากพื้นหลังรอบ)
+- ขอบไม่ลด → ใส่เข้า (ยืนยัน) แม้ฉากก่อนหน้าตรง (ซื้อซ้ำที่ตำแหน่งเดิม) / ขอบลด + ฉากตรง → หยิบออก /
+  ขอบลดแต่ไม่มีฉากยืนยัน → ไม่แน่ใจ → `REMOVAL_UNCERTAIN_SEND_S0` (default 0 = ไม่ส่ง S0)
+- หยิบออก/ไม่แน่ใจ → anomaly `POSSIBLE_REMOVAL` (แถวใน DB เสมอ ภาพตามโควตา) + ตั้งพื้นหลังใหม่ รอบยัง ACTIVE รับของจริงต่อได้
+- scene history: ฉากนิ่งย้อนหลัง `SCENE_HISTORY_SIZE` (10) ฉาก บันทึกทุกสถานะ (ฉากต่างกัน ≥ MIN_AREA px = ฉากใหม่)
+
+### 4.4 ความนิ่งแบบเข้ม (`STRICT_STABILITY`=1, default)
+- ขยับเกิน `CENTROID_STABLE_DIST` ระหว่างรอถ่าย (SHAPE_CONFIRMED) → ถอนสถานะ เริ่มนับนิ่งใหม่
+- วัตถุที่หายไป (ghost) แล้วกลับมา ต้องนิ่งครบ `LANDING_STABLE_FRAMES` ใหม่ ไม่สะสมข้ามช่วงหาย
+- ทำให้ START→S0 ช้าลง ~0.15s ในคลิปทดสอบ (3.4s → 3.55s)
+
+### 4.5 กล้อง (`core/frame_source.py`)
+- reader thread อ่านตลอด ถือเฉพาะเฟรมล่าสุด → main loop ไม่ติดใน `cap.read()` — START/STOP ประมวลผลได้แม้กล้องค้าง
+- เฟรมเดิมไม่ถูกประมวลผลซ้ำ (`NO_NEW_FRAME`) — ไม่งั้นเฟรมซ้ำถูกนับว่า ROI นิ่ง
+- ไม่มีเฟรมใหม่เกิน `CAMERA_STALL_SEC` (3s) = กล้องค้าง → เหมือนกล้องหลุด (ACTIVE → BLOCKED) + เปิดกล้องใหม่
+- ไฟล์วิดีโอ: reader หน่วงตาม FPS จริง และวนเล่นเมื่อจบ (ทดสอบบน PC / e2e)
+
+### 4.6 Watch mode (นอกรอบ)
 WAIT_START แล้วมี motion ใน ROI → freeze bg (ฉากก่อนมีการเปลี่ยนแปลง) เพื่อให้ของที่วางนิ่งนอกรอบ
 ไม่ถูกกลืนก่อนครบเกณฑ์ → ถ่ายภาพ anomaly `OUTSIDE_CYCLE` (ไม่นับยอด ไม่ส่ง S0) แล้ว rebaseline
 จบเมื่อ ROI นิ่งครบ N เฟรม **และ** tracker ว่าง หรือเฝ้าครบ 25s → unfreeze + grace
@@ -123,7 +144,7 @@ START ระหว่าง watch → เลิกเฝ้า ใช้พื�
 | `logs/item_drops/YYYY-MM-DD.log` | `05/10/2026 13:45:12 : item drop : 1` บรรทัดละการยืนยัน | ภาพสะท้อนของ DB, startup สร้างไฟล์ของวันนี้ใหม่จาก DB (ซ่อมหลัง crash) ห้ามใช้กู้ยอด |
 | `logs/vending.log` | operational log (หมุนไฟล์ ~25MB) | ดูการเปิด/ปิดรอบ, พื้นหลังที่ใช้, Redis |
 | `evidence_images/confirmed/` | ภาพตอนยืนยัน 1 ภาพต่อการยืนยัน | ลบอัตโนมัติเกิน `CLEANUP_KEEP_DAYS` |
-| `evidence_images/anomaly/` | `OUTSIDE_CYCLE`, `EXTRA_AFTER_CONFIRM` (จำกัดความถี่), `NO_CONFIRM_AT_CLOSE` (ทุกรอบที่ไม่ยืนยัน) | ไม่นับยอด, ลบเกิน `ANOMALY_KEEP_DAYS` |
+| `evidence_images/anomaly/` | `OUTSIDE_CYCLE`, `EXTRA_AFTER_CONFIRM` (จำกัดความถี่), `POSSIBLE_REMOVAL` (แถว DB เสมอ ภาพตามโควตา), `NO_CONFIRM_AT_CLOSE` (ทุกรอบที่ไม่ยืนยัน) | ไม่นับยอด, ลบเกิน `ANOMALY_KEEP_DAYS` |
 
 ลำดับการยืนยัน (ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0): บันทึกภาพ → DB (transaction เดียว) → latch รอบ → S0 → daily log
 ยอดรายวันนับตาม `COUNT_TIMEZONE` (Asia/Bangkok) ไม่ขึ้นกับเวลาเครื่อง
@@ -138,9 +159,10 @@ config.py               ค่าตั้งทั้งหมดจาก .env
 core/cycle.py           state machine ของรอบ START–STOP
 core/background.py      background model, clean_bg, freeze/rebaseline, env change
 core/detect.py          mask → กล่อง (morphology, contour, group)
-core/tracker.py         จำวัตถุข้ามเฟรม + ความนิ่ง
+core/tracker.py         จำวัตถุข้ามเฟรม + ความนิ่ง (STRICT_STABILITY)
+core/removal.py         แยกหยิบออก / ใส่เข้า ก่อนยืนยัน
 core/roi.py             ROI จาก data/roi_config.json (reload อัตโนมัติ)
-core/frame_source.py    กล้อง / ไฟล์วิดีโอ (เล่นตามเวลาจริง วนซ้ำ)
+core/frame_source.py    กล้อง / ไฟล์วิดีโอ ใน reader thread (เฟรมล่าสุด, ตรวจกล้องค้าง, เล่นวิดีโอตามเวลาจริง)
 api/redis_controller.py RPOP CTRL / LPUSH CAMERA (worker thread)
 api/client.py, retry_queue.py, order_listener.py   ฝั่ง cloud/order เดิม (ใช้เฉพาะ CLOUD_ENABLED=1; order listener ไม่ถูกเริ่ม)
 utils/state_store.py    SQLite (รอบ / ยืนยัน / anomaly / สถานะ S0)
@@ -162,10 +184,10 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 | หมวด | ค่าที่สำคัญ |
 |---|---|
 | 1 ตู้/การเชื่อมต่อ | `MACHINE_ID_DEFAULT`, `CAMERA_INDEX`, `HEADLESS`, `CONTROL_MODE` (redis/keyboard), `REDIS_*`, `CLOUD_ENABLED` |
-| 2 ความไว | `CAPTURE_HOLD_SEC` 1.5, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10 |
+| 2 ความไว | `CAPTURE_HOLD_SEC` 1.5, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
 | 3 รอบ | `CYCLE_TIMEOUT_SEC` 300 |
-| 4 ขั้นสูง | `GROUP_*`, `MORPH_*`, `BG_*`, `RESET_GRACE_SEC`, `CLEAN_BG_INTERVAL` 0.5, `CLEAN_BG_MAX_MOTION_RATIO` 0.002, `CLEAN_BG_STABLE_FRAMES` 5 |
-| 5 ระบบ | `STATE_DB_PATH`, `COUNT_TIMEZONE`, `DAILY_LOG_DIR`, `ANOMALY_*`, `CLEANUP_*` |
+| 4 ขั้นสูง | `GROUP_*`, `MORPH_*`, `BG_*`, `RESET_GRACE_SEC`, `CLEAN_BG_INTERVAL` 0.5, `CLEAN_BG_MAX_MOTION_RATIO` 0.002, `CLEAN_BG_STABLE_FRAMES` 5, `ENV_SETTLE_REBASELINE` 1, `REMOVAL_CHECK` 1, `REMOVAL_EDGE_RATIO` 0.6, `REMOVAL_MATCH_RATIO` 0.5, `REMOVAL_UNCERTAIN_SEND_S0` 0, `SCENE_HISTORY_SIZE` 10 |
+| 5 ระบบ | `CAMERA_RECONNECT_SEC` 2, `CAMERA_STALL_SEC` 3, `STATE_DB_PATH`, `COUNT_TIMEZONE`, `DAILY_LOG_DIR`, `ANOMALY_*`, `CLEANUP_*` |
 
 ค่าระบบ order เดิม (`WS_URL`, `ORDER_WINDOW`, `DROP_TIMEOUT`, ...) ไม่มีผลในโหมด START–STOP
 ROI: `data/roi_config.json` (rect / quad / polygon / multi_polygon บนภาพ 640x480) แก้แล้ว reload เองภายใน `ROI_CHECK_INTERVAL`
@@ -182,7 +204,9 @@ python tests/integration/redis_e2e.py --clip <big1_pickup_cutted.mp4>   # main.p
 - PC แบบมีจอ: `HEADLESS=0`, `CONTROL_MODE=keyboard` → กด `s` = START, `x` = STOP
 - e2e ใช้ container `vendingcam-redis-test` พอร์ต 6380 เท่านั้น (สร้าง/ลบเอง) ไฟล์ชั่วคราวอยู่ `.e2e_tmp/`
 - สถานการณ์ e2e: 1 ปกติ, 2 STOP ก่อนของตก, 3 สองรอบ, 4 Redis ดับระหว่างรอบ, 5 kill กลางรอบ, 6 ไม่มี START,
-  7 ของนิ่งก่อน START แล้วถูกหยิบ, 8/8b/8c ซื้อต่อกันหลังลูกค้าหยิบนอกรอบ — **ห้ามลบสถานการณ์ใด**
+  7 ของนิ่งก่อน START แล้วถูกหยิบ, 7b = ข้อ 7 โดยปิด ENV_SETTLE_REBASELINE (ต้องผ่านด้วยการแยกหยิบออก),
+  8/8b/8c ซื้อต่อกันหลังลูกค้าหยิบนอกรอบ — **ห้ามลบสถานการณ์ใด**
+- Docker: `tests/integration/docker_smoke.py` (image `vending-cam:autorun-test` + `--network host` + Redis ทดสอบ 6380)
 
 ---
 
@@ -217,7 +241,9 @@ docker tag vending-cam:prev vending-cam:latest && docker compose up -d --no-buil
 
 | ระดับ | ข้อจำกัด | สถานะ |
 |---|---|---|
-| HIGH | ของวางนิ่งก่อน START แล้วถูกหยิบออกระหว่างรอบ → หลุมที่ของเคยอยู่ถูกยืนยันเป็นสินค้า → S0 ผิด (e2e ข้อ 7) | ข้อ 7 ในคลิปผ่านแล้วเพราะการหยิบมี env change (slat) → ตั้งพื้นหลังใหม่หลังสงบ; การหยิบที่ไม่มี env change ยังเสี่ยง (Round 2) |
+| MED | ของวางนิ่งก่อน START แล้วถูกหยิบออกระหว่างรอบ (e2e ข้อ 7) | แก้แล้ว: ตั้งพื้นหลังใหม่หลัง env change สงบ + แยกหยิบออก/ใส่เข้า (7b) — เหลือ: ของที่เรียบกว่าพื้นถาดมาก หรือไม่มีฉากก่อนหน้า (เพิ่งเปิดเครื่อง) → ไม่แน่ใจ → ไม่ส่ง S0 (ปรับ `REMOVAL_UNCERTAIN_SEND_S0`) |
+| MED | สินค้าที่ "เรียบ" กว่าพื้นถาด (ขอบน้อยกว่าลายพื้น) อาจถูกมองว่าเป็นการหยิบออก → ไม่ส่ง S0 | ยังไม่พบในคลิปทดสอบ ต้องทดสอบกับสินค้าจริงทุกแบบ |
+| LOW | กล้องค้างบน V4L2: reader เก่ายังถือ `/dev/video0` อาจทำให้เปิดใหม่ไม่ได้จนกว่าจะคืน | ต้องทดสอบที่ตู้จริง |
 | MED | จ่ายเกิน (ของตก 2 ชิ้นในรอบเดียว) นับเป็น 1 + ภาพ anomaly `EXTRA_AFTER_CONFIRM` | ตามดีไซน์ (S0 1 ครั้งต่อรอบ) |
 | MED | ของที่นิ่งอยู่แล้วก่อน START ≥ 5 เฟรม ถูกนับเป็นพื้นหลัง ไม่ยืนยันในรอบนั้น | เหมือนตัวเก่า |
 | MED | START ขณะฉากยังไม่นิ่ง (มือ/slat) → พื้นหลังไม่แน่นอน; ของที่ตกพร้อม slat ปิดอาจถูกกลืนตอนตั้งพื้นหลังใหม่ (ไม่ส่ง S0) | เลือกทางกัน S0 ผิด |
@@ -234,5 +260,6 @@ docker tag vending-cam:prev vending-cam:latest && docker compose up -d --no-buil
 4. **grace หลัง unfreeze** — กันมือที่ค้างในเฟรมกลายเป็น blob หลอก
 5. **ห้ามใช้ daily log กู้ยอด** — DB คือแหล่งจริง
 6. `tracker.clear_all()` ไม่ reset `next_id` (กัน id ซ้ำ)
-7. ไฟล์วิดีโอเล่นตาม FPS จริง (`FrameSource.pace()`) — timer ทั้งหมดอิงเวลาจริง
-8. คอมเมนต์และ log เป็นภาษาไทย; ไฟล์ข้อความเป็น LF (`.gitattributes`) เพราะรันบน Linux
+7. ไฟล์วิดีโอเล่นตาม FPS จริง (reader thread ของ `FrameSource`) — timer ทั้งหมดอิงเวลาจริง
+8. ห้ามประมวลผลเฟรมเดิมซ้ำ — ความนิ่ง (clean_bg / watch / env settle) นับเฟรมต่อเฟรม
+9. คอมเมนต์และ log เป็นภาษาไทย; ไฟล์ข้อความเป็น LF (`.gitattributes`) เพราะรันบน Linux
