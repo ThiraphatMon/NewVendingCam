@@ -383,3 +383,40 @@ S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud �
   file object เดียวกัน → main.py ค้างตั้งแต่ init stdio แบบสุ่ม (ไม่มี output, "รอเวลาคลิป 1.0s ไม่ทัน") → แก้: `stdin=DEVNULL`
   ทั้ง keepalive และ main.py + e2e บันทึก DIAG (stdout ท้าย ๆ ของ main.py) เมื่อสถานการณ์ error · ผล e2e ของ S17 ด้านบนเป็นรันที่ไม่โดน
 - จุดที่แก้เทสต์: `tests/conftest.py` คอมเมนต์ default hold เท่านั้น
+
+### S19 — ภาพ anomaly
+1. **ยกเลิก rate limit เดิม** (30 วิ/ภาพ, 20 ภาพ/ชม.): `config.py` ลบ `ANOMALY_MIN_INTERVAL_SEC` / `ANOMALY_MAX_PER_HOUR`
+   (ถ้ายังตั้งใน .env → log เตือน "ยกเลิกแล้ว" ผ่าน `inactive_warnings`) · main ไม่ใช้ `AnomalyLimiter` แล้ว
+   (class ยังอยู่ใน `core/cycle.py` พร้อมเทสต์เดิม เผื่อเปิดกลับ — ไม่ถูกเรียก)
+   - ตรวจทุกชนิดว่าเกิด 1 ครั้งต่อเหตุการณ์ ไม่ใช่ทุกเฟรม: `OUTSIDE_CYCLE` / `EXTRA_AFTER_CONFIRM` / `POSSIBLE_REMOVAL` →
+     rebaseline + ล้าง tracker ทุกครั้ง (ทำอยู่แล้วแม้ตอนเกินโควตา) ของเดิมจึงไม่ถูกจับซ้ำ · `NO_CONFIRM_AT_CLOSE` เกิดตอนปิดรอบครั้งเดียว
+     → **ไม่มีชนิดเดิมที่ยิงซ้ำทุกเฟรม** ไม่ต้องเพิ่มกันซ้ำ (มีแค่ ENV_CHANGE ใหม่ที่ต้องมีกันซ้ำของตัวเอง)
+2. **เพดาน `ANOMALY_MAX_PER_DAY=2000`** (ทุกชนิดรวม วันตาม `COUNT_TIMEZONE`): นับจาก DB ตอนเริ่มวัน/เริ่มโปรแกรม
+   (`StateStore.count_anomaly_images` — ต่อข้าม restart) · ถึงเพดาน → ไม่เก็บภาพ (แถว DB ยังบันทึก evidence_path NULL)
+   + log เตือน 1 ครั้งต่อวัน `anomaly image limit reached ...`
+3. **anomaly ใหม่ `ENV_CHANGE`**: 1 ภาพตอนเริ่ม env change ทุก state (ผูก cycle_id ถ้าอยู่ในรอบ, นอกรอบ = nocycle)
+   - ถ่ายแล้ว "disarm" จน ROI นิ่งครบ `CLEAN_BG_STABLE_FRAMES` (ใช้ `bg.roi_still()` ตัวเดียวกับ clean_bg) แล้ว env change ถัดไปจึงถ่ายใหม่
+   - ถ่ายเฉพาะตอนฉากกำลังเปลี่ยน (ROI ไม่นิ่ง) — env change ที่ค้างตอนฉากนิ่ง (slat เปิดค้าง / bg แกว่งรอบเกณฑ์ 30%) ไม่นับเป็นเหตุการณ์ใหม่
+   - หมายเหตุ: ช่วง WAIT_START env change เรียก `mark_scene_changed()` ทุกเฟรม (ของเดิม — เกณฑ์ clean_bg) → env change ค้าง = ยังไม่สงบ
+     จนกว่า env change หายและถาดนิ่ง 5 เฟรม · ในรอบ (ACTIVE/CONFIRMED) ความนิ่งนับตามเฟรมต่อเฟรมล้วน
+   - **ไม่เปลี่ยนตรรกะการตรวจจับ** (แค่อ่าน `env_change` / `roi_still()` แล้วบันทึกภาพ)
+4. ภาพ anomaly ยังลบเมื่อเก่ากว่า 3 วัน (`ANOMALY_KEEP_DAYS`) เหมือนเดิม · ไม่ส่งขึ้นเว็บ
+- pytest **183 passed** (+5 `tests/test_anomaly.py`: ไม่มี rate limit ทุกชนิด, เพดานต่อวัน + เตือนครั้งเดียว + นับต่อหลัง restart +
+  ข้ามวันเก็บได้อีก, ENV_CHANGE ค้าง 40 เฟรม = 1 ภาพ, เปลี่ยน-สงบ-เปลี่ยน = 2 ภาพ, ENV_CHANGE ในรอบผูก cycle_id และของตกจริงยังยืนยันได้)
+- redis_e2e: **ผ่านทุกข้อทั้ง SEND_S0=1 และ 0** (66/66) · ภาพ ENV_CHANGE ตามจริงในคลิป (หยิบ/slat 7.2–10.6s):
+
+| ข้อ | ภาพ ENV_CHANGE | เวลาคลิป | หมายเหตุ |
+|---|---|---|---|
+| 7 | 2 | 7.3s, 9.1s | รอบ ACTIVE: slat เปิดค้างนิ่ง (~8.0s) → arm ใหม่ → slat ปิด = เหตุการณ์ที่ 2 |
+| 7b | 2 | 7.3s, 8.1s | + POSSIBLE_REMOVAL |
+| 8 | 1 | 7.3s | นอกรอบ (WAIT_START) — ทั้งช่วงหยิบเป็นเหตุการณ์เดียว |
+| 8b | 1 | 7.3s | เหมือนข้อ 8 |
+| ข้ออื่น | 1–2 | 7.3s (+8.1s) | ทุกข้อเห็นการหยิบที่ 7.3s; รอบที่ยังเปิดอยู่ (1, 3, 4) ได้ภาพที่ 2 ตอน slat ปิด |
+
+- e2e: หมายเหตุใหม่ต่อข้อ `ENV_CHANGE: ภาพ N ภาพ (clip ...)` จากชื่อไฟล์ภาพ
+- **จุดที่แก้เทสต์ (เงื่อนไขเปลี่ยนเพราะโจทย์ S19 ยกเลิก rate limit — ไม่ใช่เพราะ S0)**:
+  - `test_evidence.py::test_outside_cycle_rate_limited` → `test_outside_cycle_one_image_per_event_no_rate_limit`
+    (ลำดับเฟรมเดิม: เดิมคาด 1 ภาพภายใน 30s → ตอนนี้ 3 เหตุการณ์ = 3 ภาพ + ของนิ่งต่อไม่ถ่ายซ้ำ)
+  - `test_evidence.py::test_extra_after_confirm_anomaly_rate_limited` → `..._one_image_per_item_no_rate_limit` (เดิม 1 แถว → 2 แถว 2 ภาพ)
+  - `test_removal.py::test_possible_removal_recorded_even_when_over_image_quota`: ความหมายเดิม (เกินโควตา → แถว POSSIBLE_REMOVAL ไม่มีภาพ)
+    คงไว้ แต่โควตามาจาก `ANOMALY_MAX_PER_DAY=1` (monkeypatch) แทน 30s

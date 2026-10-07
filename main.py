@@ -28,7 +28,7 @@ from config import (
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD, LANDING_STABLE_FRAMES,
     CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, EVIDENCE_DIR,
-    DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
+    DAILY_LOG_DIR, ANOMALY_MAX_PER_DAY,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
     STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES, SEND_S0,
@@ -38,7 +38,7 @@ from api.cloud import item_landed_event
 from api.redis_controller import Command, LinkStatus, RedisController, SendResult, make_client
 from core import cycle as cyc
 from core.background import BackgroundModel, find_env_change
-from core.cycle import AnomalyLimiter, CycleMachine
+from core.cycle import CycleMachine
 from core.detect import build_fgmask, contour_boxes, drop_large_boxes, group_close_boxes
 from core.frame_source import NO_NEW_FRAME, FrameSource
 from core import removal
@@ -63,11 +63,13 @@ OUTSIDE_CYCLE = "OUTSIDE_CYCLE"              # ไม่มีรอบ แต�
 EXTRA_AFTER_CONFIRM = "EXTRA_AFTER_CONFIRM"  # ยืนยันแล้ว เจอวัตถุใหม่นิ่งอีก (น่าสงสัย)
 NO_CONFIRM_AT_CLOSE = "NO_CONFIRM_AT_CLOSE"  # ปิดรอบโดยไม่ได้ยืนยัน
 POSSIBLE_REMOVAL = "POSSIBLE_REMOVAL"        # รอบ ACTIVE: วัตถุนิ่งที่ดูเหมือนของถูกหยิบออก → ไม่ยืนยัน
+ENV_CHANGE = "ENV_CHANGE"                    # env change (ก้อนใหญ่เกิน MAX_BLOB_ROI_RATIO) — 1 ภาพต่อเหตุการณ์ ทุก state
 _ANOMALY_LABELS = {
     OUTSIDE_CYCLE: "OUTSIDE CYCLE",
     EXTRA_AFTER_CONFIRM: "SUSPICIOUS (extra after confirm)",
     NO_CONFIRM_AT_CLOSE: "NO CONFIRM AT CLOSE",
     POSSIBLE_REMOVAL: "POSSIBLE REMOVAL (not counted)",
+    ENV_CHANGE: "ENV CHANGE",
 }
 
 
@@ -153,7 +155,12 @@ class App:
         self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
         self.cycle_t0 = None           # [TIMING] เวลา (clock) ที่เปิดรอบปัจจุบัน
         self.cycle_motion_at = None    # [TIMING] เฟรมแรกในรอบ ACTIVE ที่ tracker เห็นวัตถุ
-        self.anomaly_limiter = AnomalyLimiter(ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR)
+        # [ANOMALY] เพดานภาพต่อวัน (ทุกชนิดรวม) — นับจาก DB ตอนเริ่มวัน/เริ่มโปรแกรม
+        self.anomaly_day = None
+        self.anomaly_images_today = 0
+        self.anomaly_cap_warned = False
+        # [ENV_CHANGE] ถ่ายแล้วรอ ROI นิ่ง (CLEAN_BG_STABLE_FRAMES เฟรม) ก่อน arm ใหม่ → env change ค้างหลายเฟรม = 1 ภาพ
+        self.env_armed = True
 
         # [RECOVERY] process ก่อนหน้าตายกลางรอบ → ปิดเป็น INTERRUPTED + S0 ค้างหมดอายุ
         # แล้วเริ่มที่ WAIT_START ทันที (เหมือนตัวเก่าที่ restart แล้วรับ START ใหม่ได้เลย)
@@ -215,6 +222,7 @@ class App:
             return frame, None, {}
 
         fgmask, detected, env_change = detect_objects(diff, self.roi_manager, roi_mask)
+        self._track_env_change(env_change, frame)
         if env_change and self.bg.frozen:
             self.bg.restore_snapshot()
         if env_change and idle:
@@ -490,26 +498,55 @@ class App:
         self.bg.unfreeze(now)
 
     def _capture_anomaly(self, kind, frame, frame_gray, now):
-        """[ANOMALY a/b] วัตถุนิ่งครบเกณฑ์นอกช่วงยืนยัน → ภาพ (จำกัดความถี่) ไม่นับยอด ไม่ส่ง S0
-        ถ่ายหรือไม่ก็ตาม: rebaseline + ล้าง tracker (เหมือนหลังยืนยัน) → ไม่จับวัตถุเดิมซ้ำทุกเฟรม"""
-        cycle_id = self.cm.cycle_id
-        if self.anomaly_limiter.allow(self.mono()):
-            self._save_anomaly(kind, cycle_id, frame)
-        elif kind == POSSIBLE_REMOVAL:
-            # ตัดสินใจไม่ส่ง S0 ในรอบ → ต้องมีหลักฐานใน DB เสมอ (เกินโควตาแค่ไม่ถ่ายภาพ)
-            self._save_anomaly(kind, cycle_id, None, why_no_image="เกินโควตาภาพ anomaly")
-        else:
-            logger.info(f"🔕 [{kind}] วัตถุนิ่งครบเกณฑ์ แต่เกินโควตาภาพ anomaly → ไม่ถ่าย")
+        """[ANOMALY a/b] วัตถุนิ่งครบเกณฑ์นอกช่วงยืนยัน → 1 ภาพต่อเหตุการณ์ ไม่นับยอด ไม่ส่ง S0
+        แล้ว rebaseline + ล้าง tracker (เหมือนหลังยืนยัน) → วัตถุเดิมไม่ถูกจับซ้ำทุกเฟรม (กันซ้ำต่อเหตุการณ์)"""
+        self._save_anomaly(kind, self.cm.cycle_id, frame)
         self.bg.rebaseline(frame_gray, now)
         self.tracker.clear_all()
 
+    def _track_env_change(self, env_change, frame):
+        """[ENV_CHANGE] 1 ภาพตอนเริ่ม env change (ทุก state, ผูก cycle_id ถ้าอยู่ในรอบ) — ไม่แตะตรรกะการตรวจจับ
+        ไม่ถ่ายซ้ำจน ROI นิ่งครบ CLEAN_BG_STABLE_FRAMES (เกณฑ์เดียวกับ clean_bg) แล้ว env change ครั้งถัดไปจึงถ่ายใหม่
+        ถ่ายเฉพาะตอนฉากกำลังเปลี่ยนจริง (ROI ไม่นิ่งเฟรมต่อเฟรม) — env change ที่ค้างขณะฉากนิ่ง (เช่น slat เปิดค้าง
+        หรือ bg ค่อย ๆ เรียนรู้จนก้อนแกว่งรอบเกณฑ์ 30%) ไม่นับเป็นเหตุการณ์ใหม่"""
+        if env_change and self.env_armed and not self.bg.roi_still():
+            self.env_armed = False
+            self._save_anomaly(ENV_CHANGE, self.cm.cycle_id if self.cm.is_open() else None, frame)
+        elif not self.env_armed and self.bg.roi_still():
+            self.env_armed = True
+
+    def _anomaly_image_allowed(self):
+        """[ANOMALY] เพดาน ANOMALY_MAX_PER_DAY ภาพต่อวัน (ทุกชนิดรวม วันตาม COUNT_TIMEZONE) — เตือนวันละครั้ง"""
+        today = self.store.today()
+        if today != self.anomaly_day:
+            self.anomaly_day = today
+            self.anomaly_cap_warned = False
+            try:
+                self.anomaly_images_today = self.store.count_anomaly_images(today)
+            except sqlite3.Error:
+                self.anomaly_images_today = 0
+        if self.anomaly_images_today < ANOMALY_MAX_PER_DAY:
+            return True
+        if not self.anomaly_cap_warned:
+            self.anomaly_cap_warned = True
+            logger.warning(
+                f"anomaly image limit reached: {self.anomaly_images_today} images today "
+                f"(ANOMALY_MAX_PER_DAY={ANOMALY_MAX_PER_DAY}) -> no more anomaly images until tomorrow "
+                f"(events still recorded in DB)"
+            )
+        return False
+
     def _save_anomaly(self, kind, cycle_id, frame, why_no_image="ไม่มีเฟรม"):
         path = None
-        if frame is not None:
+        if frame is not None and not self._anomaly_image_allowed():
+            why_no_image = f"ANOMALY_MAX_PER_DAY={ANOMALY_MAX_PER_DAY} reached"
+        elif frame is not None:
             path = image_saver.save_evidence(
                 frame, image_saver.ANOMALY, kind, cycle_id,
                 base_dir=self.evidence_dir, label=_ANOMALY_LABELS[kind],
             )
+            if path is not None:
+                self.anomaly_images_today += 1
         try:
             self.store.record_anomaly(kind, cycle_id, path)
         except sqlite3.Error as e:

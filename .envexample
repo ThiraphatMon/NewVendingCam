@@ -109,9 +109,8 @@ CLEANUP_INTERVAL_HOURS=1
 # STATE_DB_PATH=data/vending_state.sqlite3
 # COUNT_TIMEZONE=Asia/Bangkok
 # DAILY_LOG_DIR=logs/item_drops
-# ภาพความผิดปกติ: ไม่เกิน 1 ภาพต่อกี่วินาที / ต่อชั่วโมง / เก็บกี่วัน
-# ANOMALY_MIN_INTERVAL_SEC=30
-# ANOMALY_MAX_PER_HOUR=20
+# ภาพความผิดปกติ: 1 ภาพต่อเหตุการณ์ (ไม่จำกัดความถี่) · เพดานรวมทุกชนิดต่อวัน (กันดิสก์เต็ม) / เก็บกี่วัน
+# ANOMALY_MAX_PER_DAY=2000
 # ANOMALY_KEEP_DAYS=3
 
 # ใช้เฉพาะ CLOUD_ENABLED=1: ดึง ROI จากเว็บทุกกี่วินาที / เวลารอสูงสุดระหว่างลองส่งซ้ำ (backoff 5s, 10s, ... ไม่เกินค่านี้)

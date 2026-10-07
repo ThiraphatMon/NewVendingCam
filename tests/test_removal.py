@@ -108,8 +108,10 @@ def _anomaly_rows(app):
         "SELECT kind, cycle_id, evidence_path IS NOT NULL FROM anomalies ORDER BY id")]
 
 
-def test_possible_removal_recorded_even_when_over_image_quota(make_app, env):
-    # OUTSIDE_CYCLE ใช้โควตาภาพไปแล้ว (< 30s) → POSSIBLE_REMOVAL ยังต้องมีแถวใน DB (ไม่มีภาพ)
+def test_possible_removal_recorded_even_when_over_image_quota(make_app, env, monkeypatch):
+    # OUTSIDE_CYCLE ใช้โควตาภาพไปแล้ว → POSSIBLE_REMOVAL ยังต้องมีแถวใน DB (ไม่มีภาพ)
+    # S19: โควตาเดิม (30s/ภาพ) ถูกยกเลิก → ใช้เพดานต่อวันแทน (ANOMALY_MAX_PER_DAY=1)
+    monkeypatch.setattr(main, "ANOMALY_MAX_PER_DAY", 1)
     ctl = FakeController()
     app = make_app(ctl)
     settle(app, env)

@@ -332,6 +332,25 @@ def wait_s0(r, n, timeout):
     return None
 
 
+def anomaly_images(workdir, kind=""):
+    d = os.path.join(workdir, "evidence_images", "anomaly")
+    return sorted(n for n in os.listdir(d) if kind in n) if os.path.isdir(d) else []
+
+
+def env_clip_times(m, names):
+    """ชื่อภาพ YYYYmmdd_HHMMSS_mmm_... → เวลาคลิป (วินาที) ของรอบคลิปที่ภาพนั้นอยู่"""
+    out = []
+    for n in names:
+        try:
+            t = datetime.strptime(n[:19], "%Y%m%d_%H%M%S_%f").timestamp()
+        except ValueError:
+            continue
+        ff = max([f for f in m.first_frames if f <= t], default=None)
+        if ff is not None:
+            out.append(f"{t - ff:.1f}s")
+    return out
+
+
 def outcomes(workdir):
     return [o for _, o, _ in cycles(workdir)]
 
@@ -614,6 +633,9 @@ def main():
                     age = re.search(r"อายุ (\d+\.\d+)s", line)
                     starts.append(f"clean_bg {age.group(1)}s" if age else "เฟรมปัจจุบัน")
                 rep.note(f"[{sc}] พื้นหลังของแต่ละ START: {starts or '-'}; anomaly={anomaly_kinds(wd)}")
+                env_imgs = anomaly_images(wd, "ENV_CHANGE")
+                rep.note(f"[{sc}] ENV_CHANGE: ภาพ {len(env_imgs)} ภาพ "
+                         f"(clip {', '.join(env_clip_times(m, env_imgs)) or '-'}) · ภาพ anomaly ทั้งหมด {len(anomaly_images(wd))}")
                 for t in timing_rows(m):
                     rep.note(
                         f"[{sc}] TIMING (วินาทีคลิป) START {t['start']:.2f} → motion {t['motion']:.2f} → "

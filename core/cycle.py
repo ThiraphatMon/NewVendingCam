@@ -175,7 +175,8 @@ class CycleMachine:
 
 
 class AnomalyLimiter:
-    """จำกัดความถี่ภาพ anomaly (OUTSIDE_CYCLE + EXTRA_AFTER_CONFIRM ใช้โควตาร่วมกัน)
+    """[ไม่ใช้แล้วตั้งแต่ S19 — ภาพ anomaly ทุกเหตุการณ์ได้ 1 ภาพ มีแค่เพดานต่อวันใน main.py] เก็บไว้เผื่อเปิดกลับ
+    จำกัดความถี่ภาพ anomaly (OUTSIDE_CYCLE + EXTRA_AFTER_CONFIRM ใช้โควตาร่วมกัน)
     ไม่เกิน 1 ภาพต่อ min_interval วินาที และไม่เกิน max_per_hour ภาพใน 1 ชั่วโมงล่าสุด"""
 
     def __init__(self, min_interval, max_per_hour):

@@ -314,6 +314,12 @@ class StateStore:
         return [dict(r) for r in self.conn.execute("SELECT * FROM cloud_outbox ORDER BY id")]
 
     # ── anomaly ──────────────────────────────────────────────────────────────
+    def count_anomaly_images(self, local_date):
+        """จำนวนภาพ anomaly (ทุกชนิด ที่มีไฟล์ภาพ) ของวันนั้น — ใช้นับเพดาน ANOMALY_MAX_PER_DAY ต่อข้าม restart"""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM anomalies WHERE local_date=? AND evidence_path IS NOT NULL", (local_date,)
+        ).fetchone()[0]
+
     def record_anomaly(self, kind, cycle_id, evidence_path):
         utc, local = self._now()
         with self._tx():

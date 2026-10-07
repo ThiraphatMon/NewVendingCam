@@ -271,9 +271,10 @@ except Exception:
 # โฟลเดอร์ log ยอดรายวัน (1 ไฟล์ต่อวัน: YYYY-MM-DD.log)
 DAILY_LOG_DIR = _str("DAILY_LOG_DIR", "logs/item_drops")
 
-# ภาพหลักฐานความผิดปกติ (นอกรอบ / ของเพิ่มหลังยืนยัน): ถ่ายได้ไม่เกิน 1 ภาพต่อกี่วินาที / ต่อชั่วโมง
-ANOMALY_MIN_INTERVAL_SEC = _float("ANOMALY_MIN_INTERVAL_SEC", 30)
-ANOMALY_MAX_PER_HOUR = _int("ANOMALY_MAX_PER_HOUR", 20)
+# ภาพหลักฐานความผิดปกติ: ทุกเหตุการณ์ได้ 1 ภาพ (ไม่จำกัดความถี่ — ยกเลิก ANOMALY_MIN_INTERVAL_SEC / ANOMALY_MAX_PER_HOUR)
+#   เพดานกันดิสก์เต็ม: ภาพ anomaly ทุกชนิดรวมกันไม่เกินกี่ภาพต่อวัน (วันตาม COUNT_TIMEZONE)
+#   ถึงเพดาน → ไม่เก็บภาพเพิ่ม + log เตือนวันละครั้ง (ยังบันทึกเหตุการณ์ลง DB ต่อ)
+ANOMALY_MAX_PER_DAY = _int("ANOMALY_MAX_PER_DAY", 2000)
 # เก็บภาพความผิดปกติกี่วัน (แยกจาก CLEANUP_KEEP_DAYS ของภาพที่ยืนยัน)
 ANOMALY_KEEP_DAYS = _int("ANOMALY_KEEP_DAYS", 3)
 
@@ -332,6 +333,8 @@ def cloud_summary(features=None):
         f"ITEM_LANDED={onoff('events')}, "
         f"anomaly={'เปิด (ยังไม่ส่งจริง)' if f['anomaly'] else 'ปิด'}"
     )
+# ยกเลิกแล้ว (ไม่มีผล)
+_REMOVED_KEYS = ("ANOMALY_MIN_INTERVAL_SEC", "ANOMALY_MAX_PER_HOUR")
 # มีผลเฉพาะ CONTROL_MODE=redis
 _REDIS_ONLY_KEYS = (
     "REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_PASSWORD", "REDIS_CTRL_KEY", "REDIS_RESPONSE_KEY",
@@ -344,7 +347,10 @@ def inactive_warnings(environ=None):
     env = os.environ if environ is None else environ
     cloud = env.get("CLOUD_ENABLED", "0").strip().strip('"').strip("'") in ("1", "true", "True", "yes")
     mode = (env.get("CONTROL_MODE") or "redis").strip().strip('"').strip("'").lower()
-    groups = [(_ORDER_ONLY_KEYS, "ระบบ order เดิม ไม่ใช้ในโหมด START–STOP")]
+    groups = [
+        (_ORDER_ONLY_KEYS, "ระบบ order เดิม ไม่ใช้ในโหมด START–STOP"),
+        (_REMOVED_KEYS, "ยกเลิกแล้ว: ภาพ anomaly ไม่จำกัดความถี่ ใช้ ANOMALY_MAX_PER_DAY แทน"),
+    ]
     if not cloud:
         groups.append((_CLOUD_ONLY_KEYS, "มีผลเฉพาะ CLOUD_ENABLED=1"))
     if mode != "redis":

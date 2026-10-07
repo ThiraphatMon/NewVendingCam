@@ -55,18 +55,18 @@ def test_outside_cycle_object_gives_anomaly_not_count(make_app, env):
     assert app.watch_since is None and not app.bg.frozen
 
 
-def test_outside_cycle_rate_limited(make_app, env):
+def test_outside_cycle_one_image_per_event_no_rate_limit(make_app, env):
+    # S19: ยกเลิก rate limit (เดิม 30s/ภาพ) — ทุกเหตุการณ์ได้ 1 ภาพ แต่ไม่ใช่ทุกเฟรม
     app = make_app(FakeController())
     settle(app, env)
     run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)        # ภาพที่ 1
-    run_frames(app, env, empty_frame(), 60)              # หยิบออก → รอยว่างนิ่ง (ภายใน 30s → ไม่ถ่าย)
-    run_frames(app, env, ITEM_B, FRAMES_TO_CONFIRM)      # ของใหม่ภายใน 30s → ไม่ถ่าย
-    assert kinds(app) == ["OUTSIDE_CYCLE"]
-    run_frames(app, env, empty_frame(), 60)
-    env.clock.advance(31)
-    settle(app, env)
-    run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)        # พ้น 30s แล้ว → ถ่ายได้อีก
-    assert kinds(app) == ["OUTSIDE_CYCLE", "OUTSIDE_CYCLE"]
+    run_frames(app, env, empty_frame(), 60)              # หยิบออก → รอยว่างนิ่ง = เหตุการณ์ที่ 2 (เดิมภายใน 30s → ไม่ถ่าย)
+    run_frames(app, env, ITEM_B, FRAMES_TO_CONFIRM)      # ของใหม่ = เหตุการณ์ที่ 3 (เดิมไม่ถ่าย)
+    n = len(kinds(app))
+    assert kinds(app) == ["OUTSIDE_CYCLE"] * n and n == 3
+    assert len(anomaly_files(env)) == 3 and all(img for _, _, img in anomalies(app))
+    run_frames(app, env, ITEM_B, FRAMES_TO_CONFIRM * 3)  # ของเดิมนิ่งต่อ → ไม่ถ่ายซ้ำทุกเฟรม
+    assert len(kinds(app)) == 3
     assert app.store.count_today() == 0
 
 
@@ -159,7 +159,8 @@ def test_watch_not_ended_by_single_empty_tracker_frame(make_app, env):
 
 # ── b) EXTRA_AFTER_CONFIRM ────────────────────────────────────────────────────
 
-def test_extra_after_confirm_anomaly_rate_limited(make_app, env):
+def test_extra_after_confirm_one_image_per_item_no_rate_limit(make_app, env):
+    # S19: ยกเลิก rate limit — ของใหม่ 2 ชิ้นภายใน 30s ได้ภาพทั้ง 2 (เดิมได้ภาพเดียว ชิ้นที่ 2 ไม่มีแถว)
     ctl = FakeController()
     app = make_app(ctl)
     settle(app, env)
@@ -168,8 +169,8 @@ def test_extra_after_confirm_anomaly_rate_limited(make_app, env):
     cid = app.cm.cycle_id
     for pos in ((200, 180), (420, 330)):  # ของใหม่ 2 ชิ้นภายใน 30s
         run_frames(app, env, frame_with((300, 250), pos), FRAMES_TO_CONFIRM)
-    assert anomalies(app) == [("EXTRA_AFTER_CONFIRM", cid, 1)]
-    assert "EXTRA_AFTER_CONFIRM" in anomaly_files(env)[0]
+    assert anomalies(app) == [("EXTRA_AFTER_CONFIRM", cid, 1), ("EXTRA_AFTER_CONFIRM", cid, 1)]
+    assert all("EXTRA_AFTER_CONFIRM" in f for f in anomaly_files(env)) and len(anomaly_files(env)) == 2
     assert app.store.count_today() == 1 and len(ctl.s0) == 1
 
 
