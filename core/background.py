@@ -234,6 +234,19 @@ class BackgroundModel:
         self.clean_bg_valid = True
         self.clean_bg_last_update = now
 
+    def ncc_reference(self):
+        """[S22] ภาพนิ่งสำหรับตัวกรองแสง/เงา (เทียบลวดลาย) — ไม่ใช่ภาพที่ใช้คำนวณ diff
+        frozen snapshot (ถ้า freeze อยู่) → clean_bg ล่าสุด (แม้ไม่ valid แล้ว) → bg ที่ใช้คำนวณ diff
+        bg ที่กำลังเรียนรู้อาจผสมวัตถุที่เพิ่งเข้ามาแล้ว → ลายของวัตถุอยู่ในพื้นหลัง → NCC สูงผิด
+        clean_bg ใช้แม้ไม่ valid (กติกาเดียวกับ watch freeze): วัตถุที่เพิ่งเข้ามาเองทำให้ไม่ valid ตั้งแต่เฟรมแรก
+          ถ้าใช้เฉพาะตอน valid เฟรมที่ 2 จะตกไปใช้ bg ที่ผสมวัตถุแล้ว (ผู้ใช้เลือกทางนี้ใน S22)
+        เรียกก่อน update() ของเฟรมนี้ คืน None ถ้ายังไม่มี bg"""
+        if self.frozen and self.snapshot is not None:
+            return self.snapshot
+        if self.clean_bg is not None:
+            return self.clean_bg
+        return self.bg
+
     def restore_snapshot(self):
         """env change ระหว่างจับของ → ดึง bg ตอน freeze กลับมา คืน True ถ้า restore ได้"""
         if self.snapshot is None:

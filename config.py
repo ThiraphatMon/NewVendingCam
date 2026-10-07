@@ -129,6 +129,21 @@ MIN_AREA = _int("MIN_AREA", 150)
 #   ⚠ ของชิ้นใหญ่กว่าค่านี้จะไม่ถูกนับ — ถ้าตู้ขายของใหญ่ให้ ↑ หรือขยาย ROI
 MAX_BLOB_ROI_RATIO = _float("MAX_BLOB_ROI_RATIO", 0.30)
 
+# [S22] กรองแสง/เงาออกจาก motion mask ก่อนหาก้อน (คนยืนหน้าตู้ → เงา/แสงเปลี่ยนใน ROI)
+#   texture = จุดที่ลวดลายพื้นผิวยังเหมือนพื้นหลัง (local NCC สูง) = แค่แสงเปลี่ยน → ตัดออก
+#   off     = แบบเดิม (ไว้เทียบ / ย้อนกลับ)
+SHADOW_FILTER = _str("SHADOW_FILTER", "texture").lower()
+# ขนาดหน้าต่างคำนวณลวดลาย (px บนภาพ 640x480, เลขคี่)
+SHADOW_NCC_WIN = _int("SHADOW_NCC_WIN", 7)
+# NCC มากกว่านี้ = ลวดลายเดิม = แค่แสง/เงา | ↑ กรองน้อยลง (ของลายคล้ายพื้นหลุดน้อยลง) | ↓ กรองเงาได้มากขึ้น
+SHADOW_NCC_THR = _float("SHADOW_NCC_THR", 0.6)
+# variance ในหน้าต่างของทั้งพื้นหลังและเฟรมปัจจุบัน < ค่านี้ (ไม่มีลวดลายทั้งคู่) = แค่แสง
+SHADOW_FLAT_VAR = _float("SHADOW_FLAT_VAR", 4.0)
+# พื้นที่ก้อนเล็กสุดที่นับว่าเป็นของ (px²) เฉพาะ SHADOW_FILTER=texture — ใช้แทน MIN_AREA
+#   (texture เหลือเศษเงาบนพื้นลายน้อย ~200 px ที่ MIN_AREA 150 ยังนับ) · โหมด off ใช้ MIN_AREA เดิม
+#   ทุกการยืนยัน log ขนาดก้อน ("item size:") ไว้เก็บขนาดสินค้าจริงจากตู้ก่อนปรับค่านี้
+SHADOW_MIN_AREA = _int("SHADOW_MIN_AREA", 400)
+
 # จำนวนเฟรมติดกันที่ตำแหน่งของต้องนิ่ง จึงถือว่า "ลงจอดแล้ว" (30 เฟรม ≈ 1 วินาที)
 LANDING_STABLE_FRAMES = _int("LANDING_STABLE_FRAMES", 4)
 

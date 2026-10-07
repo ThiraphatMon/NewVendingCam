@@ -80,16 +80,31 @@ class FakeController:
         self.revoked.append(cycle_id)
 
 
+# พื้นถาดจำลองมีลายละเอียดคงที่ (±8 ต่ำกว่า MOT_THRESH มาก ไม่เกิด motion) เหมือนพรมจริง
+# [S22] ตัวกรองแสง/เงา (SHADOW_FILTER=texture) ถือว่า "ไม่มีลายทั้งพื้นหลังและเฟรม" = แค่แสง
+#   → ถ้าพื้นเรียบสนิท ของสีเรียบบนพื้นเรียบจะถูกตัดทิ้ง ซึ่งไม่ใช่สภาพตู้จริง
+_TRAY = np.repeat(
+    (BG_GRAY + np.random.default_rng(0).integers(-8, 9, (480, 640, 1))).astype(np.uint8), 3, axis=2
+)
+
+
 def empty_frame():
-    return np.full((480, 640, 3), BG_GRAY, np.uint8)
+    return _TRAY.copy()
+
+
+# ลายบนตัววัตถุ (ฉลาก/บรรจุภัณฑ์) ไม่เกี่ยวกับลายพื้น: OBJ_GRAY ±20
+_ITEM = np.repeat(
+    (OBJ_GRAY + np.random.default_rng(1).integers(-20, 21, (480, 640, 1))).astype(np.uint8), 3, axis=2
+)
 
 
 def frame_with(*centers, size=60):
-    """เฟรมที่มีวัตถุสี่เหลี่ยมสว่างที่ตำแหน่ง centers [(cx, cy), ...]"""
+    """เฟรมที่มีวัตถุสี่เหลี่ยมสว่าง (มีลายของตัวเอง) ที่ตำแหน่ง centers [(cx, cy), ...]"""
     f = empty_frame()
     half = size // 2
     for cx, cy in centers:
-        f[cy - half:cy + half, cx - half:cx + half] = OBJ_GRAY
+        sl = (slice(cy - half, cy + half), slice(cx - half, cx + half))
+        f[sl] = _ITEM[sl]
     return f
 
 

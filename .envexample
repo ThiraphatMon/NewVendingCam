@@ -62,6 +62,14 @@ CLOUD_ENABLED=0
 # MOT_THRESH=25
 # MIN_AREA=150
 # MAX_BLOB_ROI_RATIO=0.30
+# กรองแสง/เงา (คนยืนหน้าตู้) ออกจาก motion ก่อนหาก้อน: texture = เปิด (ค่าเริ่ม) | off = แบบเดิม
+#   จุดที่ลวดลายพื้นผิวเหมือนพื้นหลัง (NCC > SHADOW_NCC_THR) หรือไม่มีลายทั้งคู่ (variance < SHADOW_FLAT_VAR) = แค่แสง
+# SHADOW_FILTER=texture
+# SHADOW_NCC_WIN=7
+# SHADOW_NCC_THR=0.6
+# SHADOW_FLAT_VAR=4.0
+# พื้นที่ก้อนเล็กสุด (px²) เฉพาะ texture — ใช้แทน MIN_AREA (off ใช้ MIN_AREA) · ดูขนาดของจริงจาก log "item size:"
+# SHADOW_MIN_AREA=400
 # LANDING_STABLE_FRAMES=4
 # CENTROID_STABLE_DIST=10
 # ความนิ่งแบบเข้ม: ขยับระหว่างรอถ่าย / หายแล้วกลับมา → เริ่มนับนิ่งใหม่ (0 = แบบเดิม)

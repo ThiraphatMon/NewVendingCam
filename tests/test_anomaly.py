@@ -25,7 +25,7 @@ def files(env, kind=None):
 
 def big_blob(dx=0, gray=OBJ_GRAY):
     """ก้อนใหญ่ ~55% ของ ROI (เกิน MAX_BLOB_ROI_RATIO 0.30) = env change (เช่น slat / แสง)"""
-    f = np.full((480, 640, 3), BG_GRAY, np.uint8)
+    f = empty_frame()
     x, y = ROI_RECT["x"] + 20 + dx, ROI_RECT["y"] + 20
     f[y:y + 220, x:x + 300] = gray
     return f

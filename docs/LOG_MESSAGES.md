@@ -43,6 +43,7 @@
 |---|---|
 | `📸 ยืนยันสินค้า รอบ … — ยอดวันนี้ 3 (บันทึก 25ms) → ส่ง S0` | `[cycle …] item confirmed, today's count 3 (saved in 25ms) -> S0 requested` (SEND_S0=1) |
 | (ใหม่ S17) | `[cycle …] item confirmed, today's count 3 (saved in 25ms) -> S0 NOT SENT (observe mode)` (SEND_S0=0) |
+| (ใหม่ S22) | `[cycle …] item size: blob 1447px, box 52x40 at (180,215)` (ทุกการยืนยัน: px ของ mask ในกล่อง) |
 | (ใหม่ S18) | `[cycle …] timing: START->motion …s, START->item seen …s, seen->still …s (N frames, …), still->hold done …s (CAPTURE_HOLD_SEC=0.3), S3 …ms, save …ms, START->confirm …s t0=…` |
 | `🔍 รอบ …: S3=ADDITION candidate เป็นของใส่เข้า (ขอบ ×1.12, ต่างจากพื้นหลังรอบ 46.9, ต่างจากฉากก่อนหน้า 47.5 \| เกณฑ์: ขอบ < 0.60 = ขอบลด, ฉากก่อนหน้า < 23.4 (พื้นหลังรอบ ×0.50) = ตรง) → ยืนยัน` | `[cycle …] S3=ADDITION edge_ratio=1.12 (threshold 0.60), diff_bg=46.9, diff_prev=47.5, diff_prev match < 23.4 (diff_bg x0.50) -> item added -> confirm` |
 | `🔍 รอบ …: S3=REMOVAL วัตถุนิ่งดูเหมือนหยิบออก (…) → ไม่ยืนยัน ไม่ส่ง S0` | `[cycle …] S3=REMOVAL edge_ratio=0.40 (threshold 0.60), … -> item removed -> not confirmed, no S0` |
@@ -56,6 +57,7 @@
 | `❓ LPUSH S0 ไม่รู้ผล (cycle=…): … → UNKNOWN ไม่ส่งซ้ำ` | `[cycle …] LPUSH S0 result unknown: … -> UNKNOWN, not resent` |
 | `📤 S0 ของรอบ … → EXPIRED รอบปิดก่อนส่ง S0` | `[cycle …] S0 -> EXPIRED cycle closed before S0 was sent` |
 | (ใหม่ S17) | `S0 response: DISABLED (observe mode, SEND_S0=0)` / `S0 response: ENABLED (SEND_S0=1)` |
+| (ใหม่ S22) | `Shadow filter: texture (win=7, ncc>0.6, flat_var<4, min blob 400px instead of MIN_AREA 150px)` / `Shadow filter: off` |
 
 ## anomaly
 | เดิม | ใหม่ |

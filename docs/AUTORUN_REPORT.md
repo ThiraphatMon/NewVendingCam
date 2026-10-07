@@ -509,3 +509,122 @@ S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud �
 - `AnomalyLimiter` เก็บไว้ (ไม่ถูกเรียก) เพื่อไม่แตะเทสต์เดิม — ลบได้ถ้าไม่ต้องการเปิดกลับ
 - ENV_CHANGE ในคลิปนี้: ทุกการหยิบ (slat) ได้ 1–2 ภาพ — ตู้ที่มีเงาลูกค้าเข้า ROI บ่อยจะมีภาพมาก (เพดาน 2000/วัน) ซึ่งตรงกับจุดประสงค์เก็บข้อมูลเงา
 - ก่อนเปิด `SEND_S0=1` ที่ตู้จริง: ใช้ SQL ใน HANDOVER 2.1 เทียบเวลา NOT_SENT กับ STOP จริง + ดูภาพ confirmed / ENV_CHANGE ของรอบที่ของไม่ตก
+
+---
+
+## S22 รอบแรก — texture shadow filter → BLOCKED (ผู้ใช้ตัดสินใจแล้ว — ดูหัวข้อ "S22 — หลังผู้ใช้ตัดสินใจ" ถัดไป)
+
+### ทำแล้ว (ยังไม่ commit)
+- `config.py` / `.envexample`: `SHADOW_FILTER=texture` (default), `SHADOW_NCC_WIN=7`, `SHADOW_NCC_THR=0.6`, `SHADOW_FLAT_VAR=4.0`
+- `core/detect.py`: `light_only_mask()` ตามอัลกอริทึมในโจทย์ + `build_fgmask(..., shadow=...)` ตัดจุด light-only ก่อน morphology
+  — **เพิ่ม 1 จุดนอกโจทย์**: โหมด texture ล้าง mask นอกกล่อง ROI เป็น 0 ก่อน DILATE (ไม่งั้นเงานอกกรอบล้นเข้าขอบ ROI ~4 px รอบกรอบ = 5,536 px ในเทสต์) · โหมด off ไม่เปลี่ยน
+- `main.py`: copy พื้นหลังเดียวกับที่ใช้คำนวณ diff (เฉพาะกล่อง ROI) ก่อน `bg.update` → `detect_objects` · log startup `Shadow filter: texture (win=7, ncc>0.6, flat_var<4)` / `off`
+- `tests/test_shadow_filter.py` (12 ข้อ): สว่างทั้งภาพ/เงาบนพื้นมีลาย → mask ว่าง · ของมีลาย/ขาว/ดำบนพื้นมีลาย → อยู่ >90% · off = pipeline เดิมทุกพิกเซล
+- `tests/conftest.py`: พื้นถาดจำลองมีลายคงที่ ±8 และวัตถุมีลายของตัวเอง ±20 (เดิมเรียบสนิททั้งคู่ — texture ตัดของเรียบบนพื้นเรียบทิ้งตามกฎ flat_var) · `test_anomaly.py` `big_blob` ใช้ `empty_frame()`
+- `redis_e2e.py`: ข้อ 9, 10 (+ `--shadow texture,off`, `--clip-dir`), ROI `tests/integration/fixtures/roi_shadow_clips.json` = rect `(264,414)–(1275,720)` @1920x1080 ตามโจทย์ (ดูภาพแล้วครอบพรม+แถบเทาพอดี ไม่ต้องปรับ)
+- คลิป: `redis_e2e.py` ใช้โฟลเดอร์ `C:\Users\epicm\Desktop\VendingCameraProject\test_videos\` — มีสำเนา 2 คลิปอยู่แล้ว (md5 ตรงกัน) จึงลบสำเนาที่ root ของโปรเจคนี้ · โฟลเดอร์นั้นเป็น git ของอีกโปรเจค และ `.gitignore` มี `test_videos/` + `*.mp4` แล้ว
+
+### เหตุที่หยุด
+1. **e2e ข้อ 9 ไม่ผ่านใน texture** (เกณฑ์ "ไม่มีการยืนยันเลย"): ยืนยันผิด 1 ครั้งที่ clip 4.67s (off: 4.56s) + EXTRA_AFTER_CONFIRM 6 ภาพ (off: 7)
+   - texture ลด mask จาก ~2,100 px เหลือ ~230 px แต่ก้อนที่เหลือบนแถบเทาด้านขวา (~204–232 px) ยัง > `MIN_AREA` 150 และนิ่ง → ยืนยัน
+   - ตรงกับผลทดลองในโจทย์เอง ("Texture: ยืนยันผิด 1 (ก้อนเล็ก 256 px)") → **โจทย์ขัดกันเอง**: ค่าตั้งที่กำหนดคาดว่ายืนยันผิด 1 แต่เกณฑ์ข้อ 9 = 0
+   - ห้ามปรับ threshold อื่น (MIN_AREA ฯลฯ) · ลองค่าของตัวกรองเอง (ข้อมูลเท่านั้น ไม่ได้เปลี่ยน default): ก้อนใหญ่สุดที่ 4.3/4.6/6.0s
+     | win/thr | 4.3s | 4.6s | 6.0s | ขนม 12.0s | ขวด 28.0s |
+     |---|---|---|---|---|---|
+     | 7 / 0.6 (โจทย์) | 204 | 213 | 179 | 1447 | 2683 |
+     | 7 / 0.5 | 0 | 182 | 160 | 1442 | 2458 |
+     | 7 / 0.4 | 0 | 114 | 157 | 1413 | 2302 |
+     | 11 / 0.5 | 212 | 188 | 114 | 1382 | 2622 |
+     ไม่มีชุดไหนต่ำกว่า 150 ทุกเฟรม → ต้องเปลี่ยนแนวทาง (ดูข้อเสนอ)
+   - ภาพ: `docs/img/s22_sc9_false_confirm_mask.jpg` (เฟรม | mask off | mask texture ที่ 4.3/4.6/6.0s)
+2. **pytest เดิม 1 ข้อเปลี่ยนผลเมื่อเปิด texture**: `test_evidence.py::test_outside_cycle_one_image_per_event_no_rate_limit` (texture 196/197, off 197/197)
+   - ของ B ปรากฏเฟรมสุดท้ายของ grace (เหลือ 0.033s) → watch ไม่ freeze ช่วง grace (ตามออกแบบ) → bg เรียนรู้ 0.3 → เฟรม 2: bg = 0.7·ถาด + 0.3·ของ
+     → ลายของในพื้นหลังเด่นกว่าลายถาด → NCC > 0.6 (light-only 97% ของตัวของ) → ของหายจาก mask ก่อน watch จะ freeze → ไม่มีภาพ OUTSIDE_CYCLE ของ B
+   - off: diff เฟรม 2 ยังใหญ่ (0.7×160) → เห็นของต่อ · ผลกระทบจริง: ของนอกรอบที่ตกในช่วง grace หลังปิดรอบ/จบ watch (ในรอบ bg ถูก freeze — การนับ/S0 ไม่โดน)
+   - ภาพ: `docs/img/s22_grace_blend_mask.png`
+
+### ผล e2e (SEND_S0=0, ครั้งเดียว ทั้ง texture และ off) — ข้อเดิม 11 ข้อ **ผลเหมือนกันทุกข้อทั้ง 2 โหมด**
+| ข้อ | texture | off |
+|---|---|---|
+| 1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c | ✅ ทุกข้อ | ✅ ทุกข้อ |
+| 9 เงาคน | ❌ ยืนยัน 1 @4.67s · CONFIRMED · EXTRA_AFTER_CONFIRM 6 | (รายงาน) ยืนยัน 1 @4.56s · CONFIRMED · EXTRA_AFTER_CONFIRM 7 |
+| 10 ขนม+ขวด | ✅ ยืนยัน 11.38s, 27.36s · CONFIRMED×2 | ✅ ยืนยัน 11.32s, 27.35s · CONFIRMED×2 |
+| ASCII log / ไม่แตะ CAMERA / outcome เทียบโหมด | ✅ | ✅ |
+
+- ข้อ 10 START→confirm (จาก DB): texture 1.37s / 1.85s · off 1.32s / 1.85s → ช้ากว่า ≤ 0.05s (เกณฑ์ ≤ 0.1s ✅)
+- ภาพ anomaly: ข้อ 9 texture `EXTRA_AFTER_CONFIRM 6` / off `7` · ข้อ 10 ทั้งสองโหมด `ENV_CHANGE 6, EXTRA_AFTER_CONFIRM 2`
+- SEND_S0=1 ยังไม่ได้รัน (หยุดก่อนรอบสุดท้าย)
+
+### ประสิทธิภาพ (PC: Intel Core gen 14 / OpenCV 4.10, วัดขณะ pytest รันขนานอยู่)
+| ROI | off | texture | ต้นทุนตัวกรอง |
+|---|---|---|---|
+| ROI ตัวอย่าง 310x122 | 0.50 ms | 1.20 ms | 0.70 ms |
+| ROI คลิปเงา 337x136 | 0.37 ms | 1.07 ms | 0.70 ms |
+| เต็มเฟรม 640x480 (กรณีแย่สุด) | 0.37 ms | 9.26 ms | 8.89 ms |
+- ROI จริง < 5 ms บน PC · Orange Pi (Cortex-A55 ช้ากว่า ~8–15 เท่า) ประมาณ 6–10 ms/เฟรม — พอสำหรับ 30 fps (33 ms) · ถ้า ROI ใหญ่เต็มเฟรมให้คำนวณครึ่งความละเอียด
+
+### ข้อเสนอให้ผู้ใช้ตัดสิน
+- ข้อ 9: (ก) ยอมรับว่า texture ลดแต่ไม่หมด แล้วเปลี่ยนเกณฑ์ข้อ 9 เป็น "ไม่แย่กว่า off" · (ข) ให้ตัดก้อนที่อยู่บนแถบเทา (ลายน้อย/สะท้อนแสง) ด้วย ROI ที่ครอบเฉพาะพรม · (ค) อนุญาตเพิ่ม MIN_AREA หรือใช้ MIN_AREA แยกสำหรับโหมด texture
+- grace: (ก) ใช้ snapshot/clean_bg เป็นพื้นหลังอ้างอิงของ NCC ตอน bg ยังเรียนรู้ (ต่างจากโจทย์ "พื้นหลังเดียวกับ diff") · (ข) ยอมรับ (กระทบเฉพาะภาพ OUTSIDE_CYCLE ช่วง grace)
+
+---
+
+## S22 — หลังผู้ใช้ตัดสินใจ → **DONE** (commit `autorun S22`)
+
+### การตัดสินใจของผู้ใช้ที่นำมาใช้
+1. `SHADOW_MIN_AREA=400` ใช้แทน `MIN_AREA` (150) **เฉพาะ** `SHADOW_FILTER=texture` (เฉพาะการกรองก้อนก่อนเข้า tracker —
+   `MIN_AREA` ใน scene history ของ `core/background.py` ไม่เปลี่ยน) · ทุกการยืนยัน log `item size: blob …px, box WxH at (x,y)`
+2. ภาพอ้างอิง NCC: frozen snapshot (ถ้า freeze) → **clean_bg ล่าสุดแม้หมดอายุแล้ว** → bg ของ diff · diff ยังใช้ bg เดิม
+   - ถามผู้ใช้ระหว่างทาง: ลำดับ "clean_bg ถ้ายัง valid" ไม่แก้กรณี grace (เฟรมแรกของวัตถุเองทำให้ clean_bg หมดอายุ → เฟรม 2 ตกไปใช้ bg ที่ผสมวัตถุ)
+     → ผู้ใช้เลือก "clean_bg ล่าสุดแม้ไม่ valid" (กติกาเดียวกับ watch freeze)
+   - ROI ใหม่ → `forget_roi_history()` ทิ้ง clean_bg ทันที (มีอยู่แล้ว ทำก่อนเลือกภาพอ้างอิงใน `step`) + เทสต์ใหม่ยืนยัน
+3. fixture พื้นถาด/วัตถุมีลาย + ล้าง mask นอกกล่อง ROI ก่อน DILATE: ผู้ใช้รับ
+4. ข้อ 9: ผ่านเมื่อไม่มีการยืนยัน หรือดีกว่า off (`judge_sc9` ใน redis_e2e) — **ผลจริง: ไม่มีการยืนยันเลย** (ไม่ต้องใช้เกณฑ์สำรอง)
+6. e2e ข้อ 11 (`small1_big1_cutted.mp4`) — ใช้ไฟล์ใน `C:\Users\epicm\Desktop\VendingCameraProject\test_videos\`
+   (โฟลเดอร์เดียวกับคลิปอื่น, git-ignored) · ไฟล์ที่ root ของโปรเจค md5 ตรงกัน (1a81f653…) จึงลบสำเนาที่ root
+
+### แก้เทสต์เดิม (ความหมายเดิม — แจ้งทุกจุด)
+- `tests/conftest.py`: พื้นถาดจำลองมีลาย ±8 + วัตถุมีลายของตัวเอง ±20 (เดิมเรียบสนิท) — ผู้ใช้รับแล้ว
+- `tests/test_anomaly.py`: `big_blob` ใช้ `empty_frame()` (ถาดมีลายเหมือน fixture)
+- `tests/test_evidence.py::test_env_change_in_wait_start_invalidates_clean_bg`: ตั้ง `clean_bg[:] = 200` คู่กับ `bg[:] = 200`
+  — เดิมจำลอง env change ด้วยการแก้แค่ bg ขณะที่เฟรมตรงกับ clean_bg ทุกพิกเซล → texture (อ้างอิง clean_bg) เห็นว่า "แค่แสง"
+  ไม่เกิด env change · ของจริง env change ทำให้ทั้ง bg และฉากนิ่งล่าสุดเป็นฉากเดิม → ความหมายเทสต์เดิม (env change ตอนว่างทำให้ clean_bg หมดอายุ)
+- `tests/test_shadow_filter.py` ใหม่ 17 ข้อ (เงา/สว่างขึ้น → mask ว่าง · ของมีลาย/ขาว/ดำ → อยู่ · off = เดิมทุกพิกเซล ·
+  ลำดับภาพอ้างอิง · ของเข้ามาตอน bg เรียนรู้ไม่ถูกกลืน · ROI ใหม่ทิ้ง clean_bg · SHADOW_MIN_AREA vs MIN_AREA · log item size)
+
+### ผลทดสอบ
+| ขั้น | commit | pytest | e2e |
+|---|---|---|---|
+| S22 | (commit นี้) | **202 passed** ทั้ง `SHADOW_FILTER=texture` และ `off` | **224/224 ✅** — 14 ข้อ × texture/off × SEND_S0=1/0 (รอบเดียวกันรวม SEND_S0=1) |
+
+- ข้อเดิม 11 ข้อ (1–8c) ผ่านทุกข้อทั้ง 4 ชุด · log ASCII ✅ · โหมด 0 ไม่แตะ CAMERA ✅ · outcome โหมด 0 = โหมด 1 ✅
+
+**ข้อ 9 / 10 / 11** (SEND_S0=1 | SEND_S0=0)
+
+| ข้อ | texture | off |
+|---|---|---|
+| 9 เงาคน | **ยืนยัน 0** · UNCONFIRMED · ภาพ NO_CONFIRM_AT_CLOSE 1 (ทั้ง 2 โหมด) | ยืนยันผิด 1 @4.61s (blob 2025px, box 28x81) · EXTRA_AFTER_CONFIRM 9 |
+| 10 ขนม+ขวด | ยืนยัน 11.28s, 27.37s \| 11.22s, 27.37s | 11.33s, 27.32s \| 11.38s, 27.38s |
+| 10 START→confirm | 1.29s, 1.88s \| 1.22s, 1.86s | 1.34s, 1.83s \| 1.37s, 1.88s |
+| 10 ขนาดก้อน | 1435–1454px (58x48), 2649–2732px (113x103) | 1968–1972px (134x34), 3064–3074px |
+| 10 ภาพ anomaly | ENV_CHANGE 6, EXTRA_AFTER_CONFIRM 2 | ENV_CHANGE 6, EXTRA_AFTER_CONFIRM 2 |
+| 11 ขนม→ขวด | ยืนยัน 4.61s, **20.61s (ขวด)** \| 4.65s, 20.62s · หลัง STOP ถึง 45.5s ไม่มีเพิ่ม | 4.65s, 20.65s \| 4.64s, 20.61s · ไม่มีเพิ่ม |
+| 11 START→confirm | 1.61s, 1.62s \| 1.64s, 1.61s | 1.66s, 1.65s \| 1.64s, 1.61s |
+| 11 ขนาดก้อน | 1633px (77x91), 3110–3119px (234x87) | 1819px (288x94), 3546–3587px (277x97) |
+| 11 ภาพ anomaly | ENV_CHANGE 3 (31.9s, 35.1s, 39.9s) | ENV_CHANGE 3, OUTSIDE_CYCLE 3, EXTRA_AFTER_CONFIRM 1 |
+
+- เวลา texture เทียบ off: ข้อ 10 −0.05s/+0.05s (S0=1), −0.15s/−0.02s (S0=0) · ข้อ 11 −0.05s/−0.03s, 0.00s/0.00s → ไม่ช้ากว่าเกิน 0.1s ✅
+- ข้อ 11 off มี OUTSIDE_CYCLE 3 + EXTRA 1 จากเงา/มือตอนหยิบนอกรอบ — texture ไม่มี
+- ข้อ 1 (คลิปเดิม): texture ยืนยันก้อน 2069px (box 131x100 = ตัวของ) · off ยืนยันก้อน 236px (box 22x13 — เศษขอบ ไม่ใช่ทั้งชิ้น)
+  เวลา START→confirm เท่าเดิม (2.26 vs 2.27s) แม้ texture นับความนิ่ง 16–17 เฟรม (reset 2–3) แทน 9 เฟรม
+- ขนาดสินค้าจริงที่เห็นใน 3 คลิป (texture): 1435–3119 px → `SHADOW_MIN_AREA` 400 เผื่อ ~3.5 เท่า · ของชิ้นเล็กกว่า (mask < 400 px) จะไม่ถูกนับในโหมด texture
+  → ใช้ log `item size:` จากตู้จริงยืนยันก่อน
+
+### ประสิทธิภาพ
+- ตัวกรอง ~0.7 ms/เฟรมบน PC (ROI 310–340 x 120–136) · 8.9 ms ถ้า ROI เต็มเฟรม · Orange Pi ประมาณ 6–10 ms (พอสำหรับ 30 fps)
+- การเลือกภาพอ้างอิงเป็นแค่เลือก array + copy เฉพาะกล่อง ROI (ต้นทุนเท่ารอบแรก)
+
+### ภาพ mask (`docs/img/`)
+- `s22_shadow_mask.jpg` — เงา 9.0/17.0s (off มีก้อน, texture ว่าง) และขนม 12.0s / ขวดใส 28.0s (texture ยังเห็นของ)
+- `s22_sc9_false_confirm_mask.jpg` — ข้อ 9 ที่ 4.3/4.6/6.0s: off ~2,000 px, texture เหลือ ~200 px (< SHADOW_MIN_AREA 400 → ไม่เป็นก้อน)
+- `s22_grace_blend_mask.png` — เหตุที่ต้องใช้ clean_bg เป็นภาพอ้างอิง (bg ที่เรียนรู้ผสมวัตถุ → texture ตัดของทิ้ง)

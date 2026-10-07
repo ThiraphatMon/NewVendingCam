@@ -111,6 +111,17 @@ outcome ของรอบ (เก็บใน DB เท่านั้น):
   → นิ่งต่ออีก `CAPTURE_HOLD_SEC` (0.3s) → ยืนยัน (ในคลิปทดสอบ START→ยืนยัน ≈ 2.3s ที่ hold 0.3 / 3.03s ที่ hold 1.0 —
   ทุกการยืนยันมี log `timing:` แยกช่วงเวลา ดูตารางใน docs/AUTORUN_REPORT.md S18)
 - ก้อนใหญ่เกิน `MAX_BLOB_ROI_RATIO` (30%) ของ ROI = **env change** (แสง/slat/มือบัง) ไม่ใช่ของ
+- **ตัวกรองแสง/เงา (S22, `SHADOW_FILTER=texture` default)** — คนยืนหน้าตู้ทำให้แสง/เงาใน ROI เปลี่ยน → เคยยืนยันผิด
+  - แสง/เงาเปลี่ยนแค่ความสว่าง ลวดลายพื้นเดิม: จุดที่ local NCC (หน้าต่าง `SHADOW_NCC_WIN` 7 px) ระหว่างภาพอ้างอิงกับเฟรม
+    > `SHADOW_NCC_THR` 0.6 หรือไม่มีลายทั้งคู่ (variance < `SHADOW_FLAT_VAR` 4) = แค่แสง → ตัดออกจาก mask ก่อน OPEN/DILATE
+    (ทำเฉพาะกล่อง ROI; นอกกล่องล้างเป็น 0 กันเงานอกกรอบถูก DILATE ล้นเข้าขอบ ROI)
+  - ภาพอ้างอิงลวดลาย ≠ ภาพที่ใช้ diff: frozen snapshot (ถ้า freeze) → clean_bg ล่าสุด (แม้หมดอายุแล้ว) → bg ของ diff
+    (bg ที่กำลังเรียนรู้ผสมวัตถุที่เพิ่งเข้ามา → NCC สูงผิด) · ROI ใหม่ → clean_bg เก่าถูกทิ้งทันที
+  - ก้อนเล็กสุดในโหมด texture = `SHADOW_MIN_AREA` 400 px (แทน `MIN_AREA` 150 — เศษเงาที่เหลือ ~200 px) · `off` ใช้ MIN_AREA เดิม
+  - ทุกการยืนยัน log `item size: blob …px, box WxH at (x,y)` → เก็บขนาดสินค้าจริงจากตู้ก่อนปรับ `SHADOW_MIN_AREA`
+    (⚠ ของชิ้นเล็กมากที่ mask < 400 px จะไม่ถูกนับในโหมด texture)
+  - ต้นทุน ~0.7 ms/เฟรมบน PC (ROI ~340x136) · ประมาณ 6–10 ms บน Orange Pi · `SHADOW_FILTER=off` = แบบเดิมทุกพิกเซล
+  - ภาพตัวอย่าง mask: `docs/img/s22_*.jpg|png` · ผลทดสอบ: docs/AUTORUN_REPORT.md S22
 
 ### 4.2 พื้นหลังของรอบ (สำคัญที่สุด)
 `core/background.py` (`BackgroundModel`):
@@ -219,7 +230,7 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 | หมวด | ค่าที่สำคัญ |
 |---|---|
 | 1 ตู้/การเชื่อมต่อ | `MACHINE_ID_DEFAULT`, `CAMERA_INDEX`, `HEADLESS`, `CONTROL_MODE` (redis/keyboard), `REDIS_*`, **`SEND_S0` 0** (ข้อ 2.1), `CLOUD_*` (ข้อ 7.1) |
-| 2 ความไว | `CAPTURE_HOLD_SEC` 0.3, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
+| 2 ความไว | `CAPTURE_HOLD_SEC` 0.3, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, **`SHADOW_FILTER` texture**, `SHADOW_NCC_WIN` 7, `SHADOW_NCC_THR` 0.6, `SHADOW_FLAT_VAR` 4.0, **`SHADOW_MIN_AREA` 400** (ข้อ 4.1), `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
 | 3 รอบ | `CYCLE_TIMEOUT_SEC` 300 |
 | 4 ขั้นสูง | `GROUP_*`, `MORPH_*`, `BG_*`, `RESET_GRACE_SEC`, `CLEAN_BG_INTERVAL` 0.5, `CLEAN_BG_MAX_MOTION_RATIO` 0.002, `CLEAN_BG_STABLE_FRAMES` 5, `ENV_SETTLE_REBASELINE` 1, `REMOVAL_CHECK` 1, `REMOVAL_EDGE_RATIO` 0.6, `REMOVAL_MATCH_RATIO` 0.5, `REMOVAL_UNCERTAIN_SEND_S0` 0, `SCENE_HISTORY_SIZE` 10 |
 | 5 ระบบ | `CAMERA_RECONNECT_SEC` 2, `CAMERA_STALL_SEC` 3, `STATE_DB_PATH`, `COUNT_TIMEZONE`, `DAILY_LOG_DIR`, `ANOMALY_MAX_PER_DAY` 2000, `ANOMALY_KEEP_DAYS` 3, `CLEANUP_*` |

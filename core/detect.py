@@ -3,7 +3,7 @@ core/detect.py — foreground-mask building + blob detection
 
 สร้าง binary motion mask จากภาพ diff แล้วหา bounding boxes ของ blob
 
-Pipeline: threshold → OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียวที่ขาด)
+Pipeline: threshold → [S22] ตัดจุดที่เป็นแค่แสง/เงา (texture) → OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียวที่ขาด)
           → contour_boxes (หา bounding box) → group_close_boxes (รวมก้อนที่แตกของชิ้นเดียว)
   - OPEN ลบ noise จุดเดียวออกก่อน
   - DILATE อยู่ท้ายสุด: ขยายเฉพาะมวลของจริงที่เหลือ (ถ้า dilate ก่อน noise จะโดนขยายตาม)
@@ -15,15 +15,47 @@ import cv2
 import numpy as np
 
 
-def build_fgmask(diff, mot_thresh, open_ksize=5, dilate_ksize=5, dilate_iter=2):
+def light_only_mask(bg, cur, win=7, ncc_thr=0.6, flat_var=4.0):
+    """[S22 SHADOW] จุดที่การเปลี่ยนเป็นแค่แสง/เงา (bool array ขนาดเท่า bg)
+
+    แสง/เงา/การปรับแสงของกล้อง เปลี่ยนแค่ความสว่าง ลวดลายพื้นผิวยังเหมือนเดิม — ของที่ตกลงมาทับลวดลาย
+    → local NCC (box filter ขนาด win) ระหว่างพื้นหลังกับเฟรมปัจจุบันสูง = ลายเดิม = แค่แสง
+    → ไม่มีลายทั้งคู่ (variance < flat_var) ก็ถือเป็นแค่แสง (พื้นเรียบสว่าง/มืดลง)
+    bg, cur : grayscale float32 (ส่วนเดียวกันของภาพ เช่น bounding box ของ ROI)"""
+    a = bg.astype(np.float32, copy=False)
+    b = cur.astype(np.float32, copy=False)
+    k = (win, win)
+    ma, mb = cv2.blur(a, k), cv2.blur(b, k)
+    va = cv2.blur(a * a, k) - ma * ma
+    vb = cv2.blur(b * b, k) - mb * mb
+    cab = cv2.blur(a * b, k) - ma * mb
+    ncc = cab / np.sqrt(np.maximum(va * vb, 1e-3))
+    return (ncc > ncc_thr) | ((va < flat_var) & (vb < flat_var))
+
+
+def build_fgmask(diff, mot_thresh, open_ksize=5, dilate_ksize=5, dilate_iter=2, shadow=None):
     """
     สร้าง binary motion mask จากภาพ diff (absdiff ระหว่างเฟรมกับ background)
 
     open_ksize   : ขนาด kernel ของ MORPH_OPEN — ลบ noise จุดเล็ก ๆ (0=ปิด)
     dilate_ksize : ขนาด kernel ของ MORPH_DILATE — เชื่อม mask ชิ้นเดียวที่ขาด (0=ปิด)
     dilate_iter  : จำนวนรอบที่ทำ DILATE (0=ปิด)
+    shadow       : None = ไม่กรองแสง/เงา (SHADOW_FILTER=off)
+                   หรือ (bg_crop, cur_crop, (x, y, w, h), win, ncc_thr, flat_var)
+                   → จุดในกล่อง (x, y, w, h) ที่เป็นแค่แสง/เงา ถูกตัดออกก่อน morphology
+                   (bg_crop = พื้นหลังเดียวกับที่ใช้คำนวณ diff, ตัดเฉพาะกล่องนั้น)
     """
     fgmask = np.where(diff > mot_thresh, np.uint8(255), np.uint8(0))
+
+    if shadow is not None:
+        bg_crop, cur_crop, (x, y, w, h), win, ncc_thr, flat_var = shadow
+        sub = fgmask[y:y + h, x:x + w].copy()
+        if w > 0 and h > 0:
+            sub[light_only_mask(bg_crop, cur_crop, win, ncc_thr, flat_var)] = 0
+        # นอกกล่อง ROI ไม่ได้กรอง (และผู้เรียกตัดทิ้งด้วย roi_mask อยู่แล้ว) → ล้างเป็น 0
+        # ไม่งั้นเงานอกกรอบถูก DILATE ล้นเข้าขอบ ROI เป็นแนวยาว (~4 px รอบกรอบ)
+        fgmask[:] = 0
+        fgmask[y:y + h, x:x + w] = sub
 
     if open_ksize and open_ksize >= 1:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_ksize, open_ksize))

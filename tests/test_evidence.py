@@ -137,7 +137,10 @@ def test_env_change_in_wait_start_invalidates_clean_bg(make_app, env):
     app = make_app(FakeController())
     settle(app, env)
     assert app.bg.clean_bg_valid
+    # ฉากเดิม (ทั้ง bg และ clean_bg = ฉากนิ่งล่าสุด) ต่างจากเฟรมจริง — [S22] ตัวกรอง texture เทียบลายกับ clean_bg
+    # ถ้าแก้แค่ bg เฟรมจะตรงกับ clean_bg ทุกพิกเซล = "แค่แสง" ไม่ใช่ env change
     app.bg.bg[:] = 200
+    app.bg.clean_bg[:] = 200
     run_frames(app, env, empty_frame(), 1)
     assert not app.bg.clean_bg_valid and app.bg.quiet_frames == 0
 

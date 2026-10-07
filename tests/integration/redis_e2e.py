@@ -20,6 +20,17 @@ tests/integration/redis_e2e.py — integration test ระดับ 3: main.py �
 
 สมมติฐานของคลิป big1_pickup_cutted.mp4 (13 วินาที วนซ้ำเมื่อจบ):
   0–2s ถาดว่าง | 2s ของตก | 3s นิ่ง | ~7s เปิด slat หยิบของออก
+
+[S22] ข้อ 9, 10 ใช้คลิปของตัวเอง (อยู่โฟลเดอร์เดียวกับ --clip หรือ --clip-dir) + ROI ใน fixtures/roi_shadow_clips.json
+  person_shadow.mp4       (~24.2s) คนยืนหน้าตู้ มีแต่เงา/แสง ไม่มีของ
+  small1pick_big1pick.mp4 (~38.1s) ขนมตก ~10.7s ถึงพื้น ~11.0s → ฝาเปิด 14.9–16.7s หยิบ
+                                   → ขวดน้ำใสตก ~26.4s ถึงพื้น ~26.9s → ฝาเปิด 29.2–30.2s หยิบ → ว่าง 32.2s
+โหมดตัวกรองแสง/เงา (--shadow, ค่าเริ่ม "texture"): ส่ง SHADOW_FILTER ให้ main.py ทุกข้อ ("texture,off" = รันทั้งสองโหมด)
+  ข้อ 9 ที่ off: คาดว่ายืนยันผิด → รายงานอย่างเดียว ไม่นับ fail
+  ข้อ 9 ที่ texture: ผ่านเมื่อไม่มีการยืนยัน — ถ้ายังมี ผ่านเมื่อ "ดีกว่า off" (ยืนยันน้อยกว่า หรือเท่ากันแต่ภาพ
+    EXTRA_AFTER_CONFIRM น้อยกว่า) ในโหมด SEND_S0 เดียวกัน (ผู้ใช้ตัดสินใน S22) — ต้องรัน --shadow texture,off
+  small1_big1_cutted.mp4  (~47s)   ขนมห่อม่วงตก ~4.1s → ขวดน้ำตกข้างขนม ~20s → ดันฝาหยิบขวด 32.8–34.8s (ขนมยังอยู่)
+                                   → ดันฝาหยิบขนม 38.9s → ว่าง 41s (ข้อ 11)
 เวลาคลิปนับจากบรรทัด FIRST_FRAME ใน logs/vending.log (FrameSource log ทุกครั้งที่เปิดคลิปใหม่)
 """
 
@@ -48,7 +59,7 @@ TMP_BASE = os.path.join(REPO, ".e2e_tmp")
 FIRST_FRAME_RE = re.compile(r"FIRST_FRAME t=(\d+\.\d+)")
 
 # โหมดของรอบที่กำลังรัน (main() ตั้ง) — s0s / wait_s0 อ่านจากที่นี่
-MODE = {"send_s0": True, "wd": None, "hold": None}
+MODE = {"send_s0": True, "wd": None, "hold": None, "shadow": "texture"}
 TIMING_RE = re.compile(
     r"START->motion (?P<motion>[\d.]+)s, START->item seen (?P<seen>[\d.]+)s, seen->still (?P<still>[\d.]+)s "
     r"\((?P<frames>\d+) frames, LANDING_STABLE_FRAMES=\d+, still resets (?P<resets>\d+)\), "
@@ -205,6 +216,7 @@ class MainProc:
             "DAILY_LOG_DIR": "logs/item_drops",
             "PYTHONIOENCODING": "utf-8",
             "SEND_S0": "1" if MODE["send_s0"] else "0",
+            "SHADOW_FILTER": MODE["shadow"],
         })
         if MODE["hold"] is not None:
             env["CAPTURE_HOLD_SEC"] = str(MODE["hold"])
@@ -590,18 +602,144 @@ def sc7b(r, m, wd, rep):
               "POSSIBLE_REMOVAL" in anomaly_kinds(wd))
 
 
+def confirm_clip_times(m, wd):
+    """เวลาคลิป (วินาที) ของทุกการยืนยันใน DB (ทั้ง 2 โหมด SEND_S0) เรียงตามลำดับ"""
+    out = []
+    for (t,) in db_query(wd, "SELECT confirmed_at_utc FROM confirmations ORDER BY id"):
+        ts = datetime.fromisoformat(t).timestamp()
+        ff = max([f for f in m.first_frames if f <= ts], default=None)
+        out.append(ts - ff if ff is not None else None)
+    return out
+
+
+ANOMALY_KINDS = ("OUTSIDE_CYCLE", "EXTRA_AFTER_CONFIRM", "NO_CONFIRM_AT_CLOSE", "POSSIBLE_REMOVAL", "ENV_CHANGE")
+
+
+def anomaly_summary(wd):
+    """จำนวนภาพ anomaly แยกชนิด เช่น {'ENV_CHANGE': 3, 'NO_CONFIRM_AT_CLOSE': 1}"""
+    out = {}
+    for name in anomaly_images(wd):
+        for kind in ANOMALY_KINDS:
+            if kind in name:
+                out[kind] = out.get(kind, 0) + 1
+    return out
+
+
+def item_sizes(m):
+    """บรรทัด log "item size:" ของทุกการยืนยัน (ตัด prefix เวลา/โมดูล)"""
+    return [line.split("item size: ", 1)[-1] for line in m.grep("item size:")]
+
+
+# ข้อ 9: (shadow, send_s0) → (ยอด, ภาพ EXTRA_AFTER_CONFIRM, index แถวตรวจ) — ตัดสิน "ดีกว่า off" ตอนจบ
+SC9 = {}
+
+
+def sc9(r, m, wd, rep):
+    # [S22] คนยืนหน้าตู้: เงา/แสงเปลี่ยนใน ROI ทั้งคลิป ไม่มีของตก → ต้องไม่ยืนยัน
+    m.wait_clip(2.0, loop=1)
+    push(r, "START")
+    m.wait_clip(23.8, loop=1)
+    push(r, "STOP")
+    time.sleep(0.5)
+    times = [t for t in confirm_clip_times(m, wd) if t is not None]
+    rep.note(f"[9] SHADOW_FILTER={MODE['shadow']}: ยืนยัน {count(wd)} ครั้ง "
+             f"(clip {', '.join(f'{t:.2f}s' for t in times) or '-'}), "
+             f"outcome={outcomes(wd)}, ภาพ anomaly={anomaly_summary(wd)}")
+    ok = (s0s(r) == 0 and count(wd) == 0 and outcomes(wd) == ["UNCONFIRMED"]
+          and "NO_CONFIRM_AT_CLOSE" in anomaly_kinds(wd))
+    off = MODE["shadow"] == "off"
+    SC9[(MODE["shadow"], MODE["send_s0"])] = (count(wd), anomaly_summary(wd).get("EXTRA_AFTER_CONFIRM", 0),
+                                              len(rep.rows))
+    rep.check(9, "เงาคน START@2.0 → STOP@23.8" + (" (off: รายงานอย่างเดียว)" if off else ""),
+              "S0 0, ยอด 0, UNCONFIRMED + NO_CONFIRM_AT_CLOSE" + ("" if off else " (หรือดีกว่า off)"),
+              f"S0 {s0s(r)}, ยอด {count(wd)}, {','.join(outcomes(wd))}, anomaly={anomaly_kinds(wd)}",
+              ok or off)
+
+
+def judge_sc9(rep):
+    """ข้อ 9 texture ที่ยังมีการยืนยัน → ผ่านเมื่อดีกว่า off (ยอด, ภาพ EXTRA) ในโหมด SEND_S0 เดียวกัน"""
+    for (shadow, send), (n, extra, idx) in SC9.items():
+        if shadow != "texture" or n == 0:
+            continue
+        o = SC9.get(("off", send))
+        row = list(rep.rows[idx])
+        if o is None:
+            row[3] += " | ไม่มีผล off ให้เทียบ"
+        else:
+            better = (n, extra) < (o[0], o[1])
+            row[3] += f" | off: ยอด {o[0]}, EXTRA {o[1]} → texture {'ดีกว่า' if better else 'ไม่ดีกว่า'}"
+            row[4] = "✅" if better else "❌"
+        rep.rows[idx] = tuple(row)
+
+
+def sc10(r, m, wd, rep):
+    # [S22] ขนมตก ~10.7s (ฝาเปิด 14.9–16.7) → ขวดน้ำใสตก ~26.4s (ฝาเปิด 29.2–30.2): 2 รอบ รอบละ 1 ยืนยัน
+    lats = []
+    for t_start, t_stop, n in ((10.0, 18.6, 1), (25.5, 32.5, 2)):
+        m.wait_clip(t_start, loop=1)
+        t = push(r, "START")
+        t_s0 = wait_s0(r, n, timeout=t_stop - t_start - 0.3)
+        lats.append(t_s0 - t if t_s0 else None)
+        m.wait_clip(t_stop, loop=1)
+        push(r, "STOP")
+    time.sleep(0.5)
+    times = [t for t in confirm_clip_times(m, wd) if t is not None]
+    lat_txt = ", ".join(f"{x:.2f}s" if x else "-" for x in lats)
+    rep.note(f"[10] SHADOW_FILTER={MODE['shadow']}: ยืนยันที่ clip {', '.join(f'{t:.2f}s' for t in times) or '-'}, "
+             f"START->confirm(S0) {lat_txt}, outcome={outcomes(wd)}, ภาพ anomaly={anomaly_summary(wd)}")
+    rep.check(10, "ขนม START@10→STOP@18.6 · ขวด START@25.5→STOP@32.5", "S0 2, ยอด 2, CONFIRMED,CONFIRMED",
+              f"S0 {s0s(r)}, ยอด {count(wd)}, {','.join(outcomes(wd))} ({lat_txt})",
+              s0s(r) == 2 and count(wd) == 2 and outcomes(wd) == ["CONFIRMED", "CONFIRMED"])
+    in_win = len(times) == 2 and 10.7 <= times[0] < 14.9 and 26.4 <= times[1] < 29.2
+    rep.check(10, "เวลายืนยัน (ไม่มียืนยันช่วงฝาเปิด)", "[10.7,14.9) และ [26.4,29.2)",
+              ", ".join(f"{t:.2f}s" for t in times) or "-", in_win)
+
+
+def sc11(r, m, wd, rep):
+    # [S22] ขนมตก ~4.1s → (ขนมยังอยู่) ขวดตกข้างขนม ~20s → หยิบขวด 32.8–34.8 → หยิบขนม 38.9 → ว่าง 41s
+    lats = []
+    for t_start, t_stop, n in ((3.0, 12.0, 1), (19.0, 31.0, 2)):
+        m.wait_clip(t_start, loop=1)
+        t = push(r, "START")
+        t_s0 = wait_s0(r, n, timeout=t_stop - t_start - 0.3)
+        lats.append(t_s0 - t if t_s0 else None)
+        m.wait_clip(t_stop, loop=1)
+        push(r, "STOP")
+    time.sleep(0.5)
+    n_at_stop = count(wd)
+    m.wait_clip(45.5, loop=1)  # หลัง STOP รอบ 2: หยิบขวด / หยิบขนม นอกรอบ → ต้องไม่มีการยืนยัน
+    times = [t for t in confirm_clip_times(m, wd) if t is not None]
+    lat_txt = ", ".join(f"{x:.2f}s" if x else "-" for x in lats)
+    rep.note(f"[11] SHADOW_FILTER={MODE['shadow']}: ยืนยันที่ clip {', '.join(f'{t:.2f}s' for t in times) or '-'}, "
+             f"START->confirm(S0) {lat_txt}, outcome={outcomes(wd)}, ภาพ anomaly={anomaly_summary(wd)}")
+    rep.check(11, "ขนม START@3→STOP@12 · ขวด START@19→STOP@31", "S0 2, ยอด 2, CONFIRMED,CONFIRMED",
+              f"S0 {s0s(r)}, ยอด {count(wd)}, {','.join(outcomes(wd))} ({lat_txt})",
+              s0s(r) == 2 and count(wd) == 2 and outcomes(wd) == ["CONFIRMED", "CONFIRMED"])
+    rep.check(11, "รอบ 2 ยืนยันขวด (ไม่ใช่ขนมเดิม)", "ยืนยัน 1 ใน [4.1,12) · ยืนยัน 2 ใน [20.0,31)",
+              ", ".join(f"{t:.2f}s" for t in times) or "-",
+              len(times) == 2 and 4.1 <= times[0] < 12.0 and 20.0 <= times[1] < 31.0)
+    rep.check(11, "หลัง STOP รอบ 2 (หยิบขวด/ขนม) ถึง 45.5s", "ไม่มีการยืนยันเพิ่ม",
+              f"ยอดตอน STOP {n_at_stop} → 45.5s {count(wd)}", count(wd) == n_at_stop == 2)
+
+
 # env เพิ่มเติมของบางสถานการณ์
 SCENARIO_ENV = {"7b": {"ENV_SETTLE_REBASELINE": "0"}}
+# [S22] คลิป + ROI เฉพาะของบางสถานการณ์ (คลิปอยู่โฟลเดอร์เดียวกับ --clip หรือ --clip-dir)
+SCENARIO_CLIP = {"9": "person_shadow.mp4", "10": "small1pick_big1pick.mp4", "11": "small1_big1_cutted.mp4"}
+SCENARIO_ROI = {"9": "roi_shadow_clips.json", "10": "roi_shadow_clips.json", "11": "roi_shadow_clips.json"}
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
 SCENARIOS = {"1": sc1, "2": sc2, "3": sc3, "4": sc4, "5": sc5, "6": sc6, "7": sc7, "8": sc8,
-             "8b": sc8b, "8c": sc8c, "7b": sc7b}
+             "8b": sc8b, "8c": sc8c, "7b": sc7b, "9": sc9, "10": sc10, "11": sc11}
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # console Windows (cp1252) พิมพ์ไทยไม่ได้
     ap = argparse.ArgumentParser()
     ap.add_argument("--clip", default=os.environ.get("E2E_CLIP"), required=not os.environ.get("E2E_CLIP"))
-    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,7b,8,8b,8c")
+    ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,7b,8,8b,8c,9,10,11")
+    ap.add_argument("--clip-dir", default=None, help="โฟลเดอร์คลิปของข้อ 9, 10 (ไม่ใส่ = โฟลเดอร์เดียวกับ --clip)")
+    ap.add_argument("--shadow", default="texture", help="SHADOW_FILTER ของ main.py: texture, off หรือ texture,off")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
     ap.add_argument("--send-s0", default="1,0", help="โหมด SEND_S0 ที่จะรัน: 1, 0 หรือ 1,0")
     ap.add_argument("--hold", type=float, default=None, help="CAPTURE_HOLD_SEC ของ main.py (ไม่ใส่ = default ใน config)")
@@ -614,26 +752,34 @@ def main():
     root = tempfile.mkdtemp(prefix="vendingcam_e2e_", dir=TMP_BASE)
     print(f"📁 โฟลเดอร์ชั่วคราว: {root}")
     modes = [x.strip() == "1" for x in args.send_s0.split(",")]
+    shadows = [x.strip() for x in args.shadow.split(",")]
+    clip_dir = args.clip_dir or os.path.dirname(os.path.abspath(args.clip))
     MODE["hold"] = args.hold
     if args.hold is not None:
         rep.note(f"CAPTURE_HOLD_SEC={args.hold:g}")
-    results = {}  # (send_s0, ข้อ) → outcomes ของทุกรอบ
+    results = {}  # (shadow, send_s0, ข้อ) → outcomes ของทุกรอบ
     r = redis_up()
     mon = CameraMonitor()
     try:
-      for send in modes:
-        MODE["send_s0"] = send
-        tag = "" if send else "@S0=0"
-        rep.note(f"=== SEND_S0={int(send)} ===")
+      for shadow, send in [(sh, s0) for sh in shadows for s0 in modes]:
+        MODE["send_s0"], MODE["shadow"] = send, shadow
+        tag = ("" if send else "@S0=0") + ("" if len(shadows) == 1 else f"@{shadow}")
+        rep.note(f"=== SEND_S0={int(send)} SHADOW_FILTER={shadow} ===")
         for sc in args.scenarios.split(","):
-            wd = os.path.join(root, f"s0{int(send)}_sc{sc}")
+            wd = os.path.join(root, f"{shadow}_s0{int(send)}_sc{sc}")
             MODE["wd"] = wd
             os.makedirs(os.path.join(wd, "data"))
-            shutil.copy(os.path.join(REPO, "data", "roi_config.example.json"), os.path.join(wd, "data", "roi_config.json"))
+            roi_src = (os.path.join(FIXTURES, SCENARIO_ROI[sc]) if sc in SCENARIO_ROI
+                       else os.path.join(REPO, "data", "roi_config.example.json"))
+            shutil.copy(roi_src, os.path.join(wd, "data", "roi_config.json"))
+            clip = os.path.join(clip_dir, SCENARIO_CLIP[sc]) if sc in SCENARIO_CLIP else args.clip
+            if not os.path.isfile(clip):
+                rep.check(f"{sc}{tag}", "คลิป", clip, "ไม่พบไฟล์", False)
+                continue
             reset_keys(r)
             time.sleep(0.2)
             mon.take()
-            m = MainProc(wd, args.clip, SCENARIO_ENV.get(sc))
+            m = MainProc(wd, clip, SCENARIO_ENV.get(sc))
             print(f"▶️ สถานการณ์ {sc}{tag}")
             m.start()
             first_row = len(rep.rows)
@@ -647,6 +793,9 @@ def main():
                 env_imgs = anomaly_images(wd, "ENV_CHANGE")
                 rep.note(f"[{sc}] ENV_CHANGE: ภาพ {len(env_imgs)} ภาพ "
                          f"(clip {', '.join(env_clip_times(m, env_imgs)) or '-'}) · ภาพ anomaly ทั้งหมด {len(anomaly_images(wd))}")
+                sizes = item_sizes(m)
+                if sizes:
+                    rep.note(f"[{sc}] ขนาดก้อนที่ยืนยัน: {sizes}")
                 for t in timing_rows(m):
                     rep.note(
                         f"[{sc}] TIMING (วินาทีคลิป) START {t['start']:.2f} → motion {t['motion']:.2f} → "
@@ -656,7 +805,7 @@ def main():
                     )
                 ff = m.first_frames
                 if len(ff) >= 2:
-                    rep.note(f"[{sc}] คาบการวนคลิปที่วัดได้ {ff[1] - ff[0]:.2f}s (คลิป 13.0s + reconnect)")
+                    rep.note(f"[{sc}] คาบการวนคลิปที่วัดได้ {ff[1] - ff[0]:.2f}s (ความยาวคลิป + reconnect)")
             except Exception as e:
                 rep.check(sc, "รันสถานการณ์", "สำเร็จ", f"error: {e}", False)
                 try:  # วินิจฉัย: บรรทัดท้ายของ stdout main.py + จำนวน FIRST_FRAME ที่เห็น
@@ -668,7 +817,7 @@ def main():
             finally:
                 m.kill()
                 r = test_redis()
-            results[(send, sc)] = outcomes(wd)
+            results[(shadow, send, sc)] = outcomes(wd)
             bad = non_ascii_lines(wd)
             rep.check(sc, "log ASCII ล้วน (stdout + vending.log)", "0 บรรทัดที่มีอักขระ > 0x7F",
                       f"{len(bad)} บรรทัด" + (f" เช่น {bad[0][:80]!r}" if bad else ""), not bad)
@@ -681,8 +830,8 @@ def main():
                     cam = f"error {e}"
                 rep.check(sc, "โหมดเก็บข้อมูล: ไม่แตะ CAMERA", "llen 0, MONITOR 0 คำสั่ง",
                           f"llen {cam}, MONITOR {len(writes)} {writes[:3]}", cam == 0 and not writes)
-                if (True, sc) in results:
-                    a, b = (",".join(map(str, results[(k, sc)])) for k in (True, False))
+                if (shadow, True, sc) in results:
+                    a, b = (",".join(map(str, results[(shadow, k, sc)])) for k in (True, False))
                     rep.check(sc, "outcome ทุกรอบเหมือนโหมด SEND_S0=1", a, b, a == b)
             else:
                 lp = [w for w in writes if w.split()[0].upper().strip('"') == "LPUSH"]
@@ -695,6 +844,7 @@ def main():
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
 
+    judge_sc9(rep)
     print("\n| # | ตรวจ | คาดหวัง | ได้จริง | ผล |\n|---|---|---|---|---|")
     for row in rep.rows:
         print("| " + " | ".join(str(x) for x in row) + " |")

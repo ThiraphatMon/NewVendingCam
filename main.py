@@ -25,6 +25,7 @@ import config
 from config import (
     FRAME_W, FRAME_H, CAMERA_INDEX, MACHINE_ID, HEADLESS, ROI_CONFIG_PATH,
     MOT_THRESH, MIN_AREA, MAX_BLOB_ROI_RATIO,
+    SHADOW_FILTER, SHADOW_NCC_WIN, SHADOW_NCC_THR, SHADOW_FLAT_VAR, SHADOW_MIN_AREA,
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
     GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD, LANDING_STABLE_FRAMES,
     CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, EVIDENCE_DIR,
@@ -75,12 +76,35 @@ _ANOMALY_LABELS = {
 }
 
 
-def detect_objects(diff, roi_manager, roi_mask):
+def shadow_filter_on():
+    return SHADOW_FILTER == "texture"
+
+
+def shadow_summary():
+    """1 บรรทัดตอน startup: ตัวกรองแสง/เงาที่ใช้"""
+    if not shadow_filter_on():
+        return "Shadow filter: off"
+    return (
+        f"Shadow filter: texture (win={SHADOW_NCC_WIN}, ncc>{SHADOW_NCC_THR:g}, flat_var<{SHADOW_FLAT_VAR:g}, "
+        f"min blob {SHADOW_MIN_AREA}px instead of MIN_AREA {MIN_AREA}px)"
+    )
+
+
+def detect_objects(diff, roi_manager, roi_mask, shadow_ref=None, frame_gray=None, roi_box=None):
     """diff → motion mask ใน ROI → กล่องของ (รวมก้อนที่แตกแล้ว)
-    คืน (fgmask, detected[(cx, cy, w, h)], env_change)"""
-    # OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียวที่ขาด) — ดู core/detect.py
+    คืน (fgmask, detected[(cx, cy, w, h)], env_change)
+
+    shadow_ref : [S22] ภาพนิ่งอ้างอิงลวดลาย (BackgroundModel.ncc_reference) ตัดเฉพาะ roi_box (x, y, w, h)
+                 None = ไม่กรองแสง/เงา (ใช้ MIN_AREA) | มี = กรอง + ก้อนเล็กสุด SHADOW_MIN_AREA
+    frame_gray : เฟรมปัจจุบัน (grayscale float32 ทั้งภาพ) ใช้คู่กับ shadow_ref"""
+    shadow = None
+    if shadow_ref is not None and frame_gray is not None and roi_box is not None:
+        x, y, w, h = roi_box
+        shadow = (shadow_ref, frame_gray[y:y + h, x:x + w], roi_box,
+                  SHADOW_NCC_WIN, SHADOW_NCC_THR, SHADOW_FLAT_VAR)
+    # [S22] ตัดแสง/เงา → OPEN (ลบ noise จุดเล็ก) → DILATE (เชื่อม mask ชิ้นเดียวที่ขาด) — ดู core/detect.py
     fgmask = build_fgmask(
-        diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER
+        diff, MOT_THRESH, MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER, shadow=shadow
     )
     fgmask = cv2.bitwise_and(fgmask, roi_mask)
 
@@ -88,7 +112,7 @@ def detect_objects(diff, roi_manager, roi_mask):
     # [ENV CHANGE] ก้อนใหญ่เกิน MAX_BLOB_ROI_RATIO ของ ROI = แสง/bg เปลี่ยน → ไม่ส่งเข้า tracker
     roi_areas = roi_manager.get_roi_areas(fgmask.shape)
     env_change = find_env_change(fgmask, roi_areas)
-    raw_boxes = contour_boxes(fgmask, MIN_AREA)
+    raw_boxes = contour_boxes(fgmask, MIN_AREA if shadow is None else SHADOW_MIN_AREA)
     if env_change:
         raw_boxes = drop_large_boxes(raw_boxes, roi_areas, MAX_BLOB_ROI_RATIO)
 
@@ -122,12 +146,13 @@ class App:
     mono  : monotonic สำหรับ timeout ของรอบ
     cloud : api.cloud.CloudServices หรือ None (cloud ปิด) — main loop แค่ฝากเฟรม/งาน ไม่รอ network
     send_s0 : False = โหมดเก็บข้อมูล (ยืนยันตามปกติแต่ไม่ขอส่ง S0, DB เป็น NOT_SENT) — None = ตาม SEND_S0
+    shadow_filter : [S22] True = กรองแสง/เงา (texture) | False = แบบเดิม — None = ตาม SHADOW_FILTER
     """
 
     def __init__(
         self, machine_id, source, roi_manager, store, controller,
         headless=True, evidence_dir=EVIDENCE_DIR, daily_log_dir=DAILY_LOG_DIR,
-        clock=time.time, mono=time.monotonic, cloud=None, send_s0=None,
+        clock=time.time, mono=time.monotonic, cloud=None, send_s0=None, shadow_filter=None,
     ):
         self.machine_id = machine_id
         self.source = source
@@ -141,6 +166,7 @@ class App:
         self.mono = mono
         self.cloud = cloud
         self.send_s0 = SEND_S0 if send_s0 is None else send_s0
+        self.shadow_filter = shadow_filter_on() if shadow_filter is None else shadow_filter
 
         self.cm = CycleMachine(CYCLE_TIMEOUT_SEC)
         self.tracker = MemoryTracker()
@@ -153,6 +179,7 @@ class App:
         self.today_count = store.count_today()
         self._count_checked_at = 0.0
         self.frame = None              # เฟรมล่าสุด (ใช้ถ่ายภาพ NO_CONFIRM_AT_CLOSE ตอนปิดรอบ)
+        self.fgmask = None             # [S22] motion mask ล่าสุด (log ขนาดก้อนตอนยืนยัน)
         self.frame_gray = None         # เฟรมล่าสุดแบบ gray (START ใช้เป็นพื้นหลังได้ถ้าไม่มี clean_bg ที่ valid)
         self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
         self.cycle_t0 = None           # [TIMING] เวลา (clock) ที่เปิดรอบปัจจุบัน
@@ -219,11 +246,22 @@ class App:
         if self.roi_manager.reload_if_changed(allow_apply=idle):
             self._on_roi_changed(now)
         roi_mask = self.roi_manager.build_mask(frame_gray.shape)
+        # [S22] ภาพนิ่งอ้างอิงลวดลาย (snapshot → clean_bg ที่ valid → bg ของ diff) เฉพาะกล่อง ROI
+        #   เลือกก่อน bg.update (update เรียนรู้ทับ bg / เปลี่ยน clean_bg) จึง copy ไว้
+        roi_box = shadow_ref = None
+        ref = self.bg.ncc_reference() if self.shadow_filter else None
+        if ref is not None:
+            roi_box = cv2.boundingRect(roi_mask)
+            x, y, w, h = roi_box
+            shadow_ref = ref[y:y + h, x:x + w].copy()
         diff = self.bg.update(frame_gray, now, idle=idle, roi_mask=roi_mask)
         if diff is None:
             return frame, None, {}
 
-        fgmask, detected, env_change = detect_objects(diff, self.roi_manager, roi_mask)
+        fgmask, detected, env_change = detect_objects(
+            diff, self.roi_manager, roi_mask, shadow_ref, frame_gray, roi_box
+        )
+        self.fgmask = fgmask
         self._track_env_change(env_change, frame)
         if env_change and self.bg.frozen:
             self.bg.restore_snapshot()
@@ -399,11 +437,24 @@ class App:
         ms = (time.perf_counter() - t0) * 1000
         if obj is not None and self.cycle_t0 is not None:
             logger.info(self._timing_line(cycle_id, now, obj, s3_ms, ms))
+        if obj is not None:
+            logger.info(f"[cycle {cycle_id[:8]}] {self._size_text(obj)}")
         s0 = "S0 requested" if self.send_s0 else "S0 NOT SENT (observe mode)"
         logger.info(
             f"[cycle {cycle_id[:8]}] item confirmed, today's count {conf.daily_sequence} "
             f"(saved in {ms:.0f}ms) -> {s0}"
         )
+
+    def _size_text(self, obj):
+        """[S22] ขนาดก้อนที่ยืนยัน (เก็บขนาดสินค้าจริงจากตู้ไว้ตั้ง SHADOW_MIN_AREA / MIN_AREA)
+        blob = จำนวนพิกเซล motion mask ในกล่องของวัตถุ (หลัง OPEN/DILATE)"""
+        cx, cy = obj["centroid"]
+        w, h = obj["shape"]
+        blob = "?"
+        if self.fgmask is not None:
+            x0, y0 = max(0, int(cx - w / 2)), max(0, int(cy - h / 2))
+            blob = int(cv2.countNonZero(self.fgmask[y0:y0 + int(h), x0:x0 + int(w)]))
+        return f"item size: blob {blob}px, box {int(w)}x{int(h)} at ({int(cx)},{int(cy)})"
 
     def _timing_line(self, cycle_id, now, obj, s3_ms, save_ms):
         """[TIMING] 1 บรรทัดแยกช่วงเวลา START → เห็นวัตถุ → นิ่ง (เริ่มนับ hold) → ครบ hold → S3 → ยืนยัน
@@ -636,6 +687,7 @@ def main():
     logger.info(
         "S0 response: ENABLED (SEND_S0=1)" if SEND_S0 else "S0 response: DISABLED (observe mode, SEND_S0=0)"
     )
+    logger.info(shadow_summary())
     for warning in config.inactive_warnings():
         logger.warning(warning)
 
