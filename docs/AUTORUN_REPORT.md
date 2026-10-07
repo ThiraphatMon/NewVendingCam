@@ -2,6 +2,7 @@
 
 > คำสั่งหลัก: `docs/AUTORUN_TASK.md` | review: `git log main..auto/round1-finish`
 > **สถานะ: ครบทุกขั้น S0–S13 ไม่มีขั้นที่ถูกข้าม ไม่มี AUTORUN BLOCKED** — ไม่ได้ push / merge / แตะ main
+> **รอบ OBSERVE (`docs/AUTORUN_TASK_OBSERVE.md`) S17–S21 ครบ ไม่มี AUTORUN BLOCKED** — สรุปอยู่ท้ายไฟล์ (หัวข้อ "รอบ OBSERVE")
 
 ## สรุปผลล่าสุด (S9–S13 — cloud/เว็บ)
 - pytest: **166 passed** (+32 ใน `tests/test_cloud.py`, `tests/test_roi_sync.py` — cloud ทดสอบกับ stub HTTP ในเครื่อง ไม่ยิง server จริง)
@@ -452,3 +453,59 @@ S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud �
   - `redis_e2e.py`: `เชื่อม Redis สำเร็จ` → `Redis connected` (ข้อ 4), `FROZEN [START` + `อายุ` → `cycle opened (background:` + `age`,
     `เฟรมปัจจุบัน` → `current frame` (8b), `ใช้ clean_bg` → `empty-tray` (8c), `env change สงบแล้ว` → `env change settled` (8b),
     7b `ดูเหมือนหยิบออก`/`ไม่แน่ใจว่าหยิบออก` → `-> item removed`/`-> uncertain`, คำค้น log ของข้อ 8 เป็นอังกฤษ
+
+### S21 — สรุปรอบ OBSERVE
+- `HANDOVER.md`: สถานะ observe mode ต้นไฟล์, ข้อ 2.1 `SEND_S0` (ตาราง 0/1, NOT_SENT ใน DB + SQL เทียบเวลา STOP, MONITOR ที่ตู้),
+  ภาพ anomaly ใหม่ (ไม่จำกัดความถี่, ENV_CHANGE, เพดาน 2000/วัน), ตัวอย่าง log อังกฤษ, config (`SEND_S0`, hold 0.3, `ANOMALY_MAX_PER_DAY`),
+  การทดสอบ (`--send-s0`, `--hold`, docker_smoke 2 โหมด, WSL keepalive), ขั้นตอนลงบอร์ด/controlled test ตาม observe mode, known limitations (hold < 0.3, ภาพ ENV_CHANGE มาก)
+- `.envexample` / `ORANGE_PI_DOCKER.md`: ข้อความ log ที่อ้างถึงเป็นอังกฤษ + controlled test แยก SEND_S0=0/1
+- `tests/integration/docker_smoke.py`: รัน image ทั้ง SEND_S0=0 (ไม่ตั้ง env = ค่าเริ่มของ image → ยืนยันใน DB, CAMERA ว่าง, MONITOR 0 คำสั่ง,
+  log ASCII) และ SEND_S0=1 (S0 1 รายการ) — image build ใหม่จาก source ล่าสุด (`docker build -t vending-cam:autorun-test`, WSL amd64)
+
+**ผลรันครบรอบสุดท้าย (S21)**
+- pytest: **185 passed**
+- redis_e2e ทุกข้อ (1, 2, 3, 4, 5, 6, 7, 7b, 8, 8b, 8c) **ทั้ง SEND_S0=1 และ 0: 88/88 ผ่าน**
+  — SEND_S0=0 ไม่แตะ CAMERA 11/11 ข้อ (llen 0 + MONITOR 0 คำสั่ง), outcome ทุกรอบเหมือนโหมด 1 11/11, log ASCII 22/22 รัน
+  — START→S0 (โหมด 1) ข้อ 1 = 2.33s, ข้อ 3 = 2.35s / 2.33s · START→confirm (โหมด 0) ข้อ 1 = 2.34s, ข้อ 3 = 2.32s / 2.34s
+  — ภาพ ENV_CHANGE: ข้อ 7 = 2 (clip 7.3s, 9.1s), ข้อ 8 = 1 (7.3s), ข้อ 8b = 1 (7.3s)
+- docker_smoke: **PASS ทั้ง 2 โหมด** — SEND_S0=0: START→confirm 2.34s, CAMERA `[]`, MONITOR `[]`, CONFIRMED, log ASCII ·
+  SEND_S0=1: START→S0 2.32s, CAMERA `[b'S0']`, MONITOR `['LPUSH CAMERA S0']`
+
+**ตารางขั้น S17–S21**
+
+| ขั้น | commit | pytest | redis_e2e (ทุกข้อ) | หมายเหตุ |
+|---|---|---|---|---|
+| S17 สวิตช์ `SEND_S0` (default 0) | `2e43e05` | 177 passed | ✅ ทั้ง SEND_S0=1 และ 0 (CAMERA 0, outcome เท่ากัน) | START→S0 3.05s / START→confirm 3.03s (hold 1.0) |
+| S18 hold 0.3 + timing | `e524d6c` | 178 passed | ✅ ทั้ง 2 โหมดที่ hold 0.3 (66/66) · hold 0.1: ข้อ 7 ยืนยันผิด (รายงาน ไม่แก้) | START→S0 2.33s |
+| S19 ภาพ anomaly | `4ce3297` | 183 passed | ✅ ทั้ง 2 โหมด (66/66) | ENV_CHANGE ข้อ 7: 2, ข้อ 8/8b: 1 |
+| S20 log อังกฤษ ASCII | `fe0785b` | 185 passed | ✅ ทั้ง 2 โหมด (88/88 รวม ASCII 22/22) | `docs/LOG_MESSAGES.md` |
+| S21 สรุป | (commit นี้) | 185 passed | ✅ ทั้ง 2 โหมด (88/88) + docker_smoke PASS 2 โหมด | HANDOVER / .envexample / ORANGE_PI_DOCKER |
+
+**ตารางเวลา S18** (วินาทีคลิป, e2e ข้อ 1) — รายละเอียดอยู่ในหัวข้อ S18
+
+| hold | START | motion แรก | เห็นของ | นิ่ง (เริ่ม hold) | ครบ hold | S3 | บันทึก | START→confirm |
+|---|---|---|---|---|---|---|---|---|
+| 0.1 | 1.05 | 2.32 | 2.66 | 2.99 (9 เฟรม) | 3.12 | 1ms | 39ms | 2.07s |
+| **0.3** | 1.05 | 2.32 | 2.65 | 2.99 (9 เฟรม) | 3.33 | 1ms | 37ms | 2.27s |
+| 0.5 | 1.05 | 2.32 | 2.66 | 2.99 (9 เฟรม) | 3.52 | 1ms | 30ms | 2.47s |
+| 1.0 | 1.04 | 2.31 | 2.64 | 2.98 (9 เฟรม) | 4.00 | 1ms | 23ms | 2.97s |
+
+**จุดที่แก้เทสต์ทั้งหมด (S17–S21)** — ไม่มีเทสต์ถูกลบ
+- S17 (S0 ถูกปิดเป็นค่าเริ่ม): `tests/conftest.py` `make_app(send_s0=True)` — เทสต์เดิมทั้งหมดทดสอบโหมด SEND_S0=1 ตามเดิม;
+  e2e โหมด 0 นับ "S0" จากแถว NOT_SENT ใน DB และวัด START→confirm แทน START→S0
+- S18: `tests/conftest.py` คอมเมนต์ default hold (0.3) เท่านั้น
+- S19 (โจทย์ยกเลิก rate limit): `test_outside_cycle_rate_limited` → `test_outside_cycle_one_image_per_event_no_rate_limit`,
+  `test_extra_after_confirm_anomaly_rate_limited` → `test_extra_after_confirm_one_image_per_item_no_rate_limit` (คาดภาพทุกเหตุการณ์แทนภาพเดียว),
+  `test_possible_removal_recorded_even_when_over_image_quota` (ความหมายเดิม โควตาจาก `ANOMALY_MAX_PER_DAY=1` แทน 30s);
+  เทสต์ `AnomalyLimiter` ใน `test_cycle.py` คงเดิม (class ยังอยู่ ไม่ถูกเรียก)
+- S20 (log เปลี่ยนภาษา — แก้เฉพาะข้อความที่ค้นหา): `test_evidence.py` (5 จุด), `test_removal.py` (3), `test_frame_source.py` (1),
+  `test_roi_sync.py` (2), `test_state_store.py` (1), `test_cloud.py` (3), `redis_e2e.py` (ข้อ 4, 7b, 8, 8b, 8c + การนับพื้นหลังของ START),
+  `docker_smoke.py` (คำค้น log)
+- ตัวทดสอบ (ไม่ใช่เงื่อนไข): `redis_e2e.py` keepalive WSL + `stdin=DEVNULL`, DIAG เมื่อสถานการณ์ error, `--send-s0`, `--hold`, MONITOR,
+  หมายเหตุ TIMING / ENV_CHANGE, ตรวจ log ASCII
+
+**ข้อสังเกต / คำถามรอผู้ใช้ (ประเภท A — ทำต่อด้วยทางที่ปลอดภัยแล้ว)**
+- hold 0.1 ทำให้ข้อ 7 ยืนยันผิด → default 0.3 ตามโจทย์ผ่านทุกข้อ แต่ไม่ควรลดต่ำกว่านี้โดยไม่มีข้อมูลตู้จริง
+- `AnomalyLimiter` เก็บไว้ (ไม่ถูกเรียก) เพื่อไม่แตะเทสต์เดิม — ลบได้ถ้าไม่ต้องการเปิดกลับ
+- ENV_CHANGE ในคลิปนี้: ทุกการหยิบ (slat) ได้ 1–2 ภาพ — ตู้ที่มีเงาลูกค้าเข้า ROI บ่อยจะมีภาพมาก (เพดาน 2000/วัน) ซึ่งตรงกับจุดประสงค์เก็บข้อมูลเงา
+- ก่อนเปิด `SEND_S0=1` ที่ตู้จริง: ใช้ SQL ใน HANDOVER 2.1 เทียบเวลา NOT_SENT กับ STOP จริง + ดูภาพ confirmed / ENV_CHANGE ของรอบที่ของไม่ตก

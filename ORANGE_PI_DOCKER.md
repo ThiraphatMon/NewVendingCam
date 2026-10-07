@@ -59,7 +59,7 @@ cp .envexample .env
 nano .env                         # หมวด 1: MACHINE_ID_DEFAULT, CAMERA_INDEX, REDIS_* ให้ตรงกับ controller
 mkdir -p evidence_images data logs
 # ROI ของตู้นี้: ถ้ามีไฟล์จากตู้เดิมให้วางที่ data/roi_config.json
-# ถ้าไม่มี โปรแกรมจะ copy จาก data/roi_config.example.json ให้ตอนเริ่ม (log "⚠️ ไม่พบ ...")
+# ถ้าไม่มี โปรแกรมจะ copy จาก data/roi_config.example.json ให้ตอนเริ่ม (log "... not found -> copy from ...")
 # แล้วรอ ROI จากเว็บ (CLOUD_ROI_SYNC) เขียนทับ หรือแก้ data/roi_config.json เอง (reload อัตโนมัติ)
 ```
 
@@ -90,7 +90,8 @@ docker compose ps
 docker compose logs --tail=100 -f vending-cam
 ```
 
-ใน log ต้องเห็น: `Active config` (ค่าถูก), `✅ เชื่อม Redis สำเร็จ`, ไม่มี `⚠️ .env: ... ไม่มีผล` ที่ไม่ได้ตั้งใจ
+ใน log ต้องเห็น: `active config:` (ค่าถูก), `S0 response: DISABLED (observe mode, SEND_S0=0)` (ค่าเริ่มต้น — ดู HANDOVER ข้อ 2.1),
+`Redis connected`, ไม่มี `.env: ... has no effect` ที่ไม่ได้ตั้งใจ (log ทั้งหมดเป็นภาษาอังกฤษ ASCII — `docs/LOG_MESSAGES.md`)
 ถ้า log แสดงกล้องหลุดซ้ำ ๆ ให้ `docker compose down` แล้วตรวจ `/dev/video*` อีกครั้ง
 
 ## 5. Controlled test (ก่อนเปิดขายจริง)
@@ -98,9 +99,12 @@ docker compose logs --tail=100 -f vending-cam
 เปิด 2 terminal: ซ้าย `redis-cli MONITOR`, ขวาส่งคำสั่ง
 
 ```bash
-# ก) มีของตก → ต้องได้ S0 ครั้งเดียว
+# ก) มีของตก
 redis-cli LPUSH CTRL START        # แล้วปล่อยสินค้า 1 ชิ้น (หรือวางของลงช่อง)
-# รอ ~3-4 วินาทีหลังของนิ่ง → MONITOR ต้องเห็น "LPUSH" "CAMERA" "S0" ครั้งเดียว
+# รอ ~1 วินาทีหลังของนิ่ง →
+#   SEND_S0=0 (ค่าเริ่มต้น, โหมดเก็บข้อมูล): log "item confirmed ... -> S0 NOT SENT (observe mode)"
+#                                          และ MONITOR ต้องไม่มีคำสั่งใดที่แตะ CAMERA เลย
+#   SEND_S0=1: MONITOR ต้องเห็น "LPUSH" "CAMERA" "S0" ครั้งเดียว
 redis-cli LPUSH CTRL STOP
 
 # ข) ไม่มีของ → ต้องไม่มี S0
