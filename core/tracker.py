@@ -89,6 +89,7 @@ class MemoryTracker:
                 obj["centroid"] = (cx, cy)
                 obj["shape"] = (w, h)
                 obj["ghost_frames"] = 0
+                obj["frames"] = obj.get("frames", 1) + 1  # [TIMING] จำนวนเฟรมที่เห็น (log เท่านั้น)
 
                 # Shape stability check
                 centroid_dist = math.hypot(cx - px, cy - py)
@@ -98,14 +99,18 @@ class MemoryTracker:
                         obj["state"] = "DETECTING"
                         obj["shape_stable_count"] = 0
                         obj["shape_confirmed_time"] = None
+                        obj["still_resets"] = obj.get("still_resets", 0) + 1
                 else:
                     if centroid_dist <= CENTROID_STABLE_DIST:
                         obj["shape_stable_count"] = obj.get("shape_stable_count", 0) + 1
                     else:
+                        if obj.get("shape_stable_count", 0):
+                            obj["still_resets"] = obj.get("still_resets", 0) + 1
                         obj["shape_stable_count"] = 0
 
                     if obj["shape_stable_count"] >= LANDING_STABLE_FRAMES:
                         obj["shape_confirmed_time"] = current_time
+                        obj["still_frame"] = obj["frames"]  # [TIMING] เฟรมที่เริ่มนับ hold
                         obj["state"] = "SHAPE_CONFIRMED"
                     else:
                         obj["state"] = "DETECTING"
@@ -120,6 +125,8 @@ class MemoryTracker:
                     "shape_stable_count": 0,
                     "shape_confirmed_time": None,
                     "ghost_frames": 0,
+                    "frames": 1,
+                    "still_resets": 0,
                 }
                 self.next_id += 1
 
@@ -141,6 +148,8 @@ class MemoryTracker:
             obj["state"] = "DETECTING"
             if STRICT_STABILITY:
                 # [F04] หายไปแล้วกลับมา → ต้องนิ่งครบ LANDING_STABLE_FRAMES ใหม่ ไม่สะสมข้ามช่วงหาย
+                if obj.get("shape_stable_count", 0) or obj.get("shape_confirmed_time"):
+                    obj["still_resets"] = obj.get("still_resets", 0) + 1
                 obj["shape_stable_count"] = 0
                 obj["shape_confirmed_time"] = None
             new_objects[obj_id] = obj

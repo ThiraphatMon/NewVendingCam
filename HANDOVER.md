@@ -90,7 +90,8 @@ outcome ของรอบ (เก็บใน DB เท่านั้น):
 ### 4.1 หลักการ: background subtraction ใน ROI
 - `diff = |frame − bg|` เฉพาะใน ROI (`data/roi_config.json`) → mask → กล่อง → tracker
 - **ของตก = เคลื่อนที่แล้วมานิ่ง:** centroid นิ่งครบ `LANDING_STABLE_FRAMES` (4) เฟรม → SHAPE_CONFIRMED
-  → นิ่งต่ออีก `CAPTURE_HOLD_SEC` (1.0s) → ยืนยัน (ในคลิปทดสอบ START→S0 ≈ 3.03s)
+  → นิ่งต่ออีก `CAPTURE_HOLD_SEC` (0.3s) → ยืนยัน (ในคลิปทดสอบ START→ยืนยัน ≈ 2.3s ที่ hold 0.3 / 3.03s ที่ hold 1.0 —
+  ทุกการยืนยันมี log `timing:` แยกช่วงเวลา ดูตารางใน docs/AUTORUN_REPORT.md S18)
 - ก้อนใหญ่เกิน `MAX_BLOB_ROI_RATIO` (30%) ของ ROI = **env change** (แสง/slat/มือบัง) ไม่ใช่ของ
 
 ### 4.2 พื้นหลังของรอบ (สำคัญที่สุด)
@@ -187,7 +188,7 @@ tests/                  pytest (unit) + tests/integration/redis_e2e.py (Redis �
 | หมวด | ค่าที่สำคัญ |
 |---|---|
 | 1 ตู้/การเชื่อมต่อ | `MACHINE_ID_DEFAULT`, `CAMERA_INDEX`, `HEADLESS`, `CONTROL_MODE` (redis/keyboard), `REDIS_*`, `CLOUD_*` (ข้อ 7.1) |
-| 2 ความไว | `CAPTURE_HOLD_SEC` 1.0, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
+| 2 ความไว | `CAPTURE_HOLD_SEC` 0.3, `MOT_THRESH` 25, `MIN_AREA` 150, `MAX_BLOB_ROI_RATIO` 0.30, `LANDING_STABLE_FRAMES` 4, `CENTROID_STABLE_DIST` 10, `STRICT_STABILITY` 1 |
 | 3 รอบ | `CYCLE_TIMEOUT_SEC` 300 |
 | 4 ขั้นสูง | `GROUP_*`, `MORPH_*`, `BG_*`, `RESET_GRACE_SEC`, `CLEAN_BG_INTERVAL` 0.5, `CLEAN_BG_MAX_MOTION_RATIO` 0.002, `CLEAN_BG_STABLE_FRAMES` 5, `ENV_SETTLE_REBASELINE` 1, `REMOVAL_CHECK` 1, `REMOVAL_EDGE_RATIO` 0.6, `REMOVAL_MATCH_RATIO` 0.5, `REMOVAL_UNCERTAIN_SEND_S0` 0, `SCENE_HISTORY_SIZE` 10 |
 | 5 ระบบ | `CAMERA_RECONNECT_SEC` 2, `CAMERA_STALL_SEC` 3, `STATE_DB_PATH`, `COUNT_TIMEZONE`, `DAILY_LOG_DIR`, `ANOMALY_*`, `CLEANUP_*` |

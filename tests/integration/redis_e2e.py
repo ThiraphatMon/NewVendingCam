@@ -48,7 +48,36 @@ TMP_BASE = os.path.join(REPO, ".e2e_tmp")
 FIRST_FRAME_RE = re.compile(r"FIRST_FRAME t=(\d+\.\d+)")
 
 # โหมดของรอบที่กำลังรัน (main() ตั้ง) — s0s / wait_s0 อ่านจากที่นี่
-MODE = {"send_s0": True, "wd": None}
+MODE = {"send_s0": True, "wd": None, "hold": None}
+TIMING_RE = re.compile(
+    r"START->motion (?P<motion>[\d.]+)s, START->item seen (?P<seen>[\d.]+)s, seen->still (?P<still>[\d.]+)s "
+    r"\((?P<frames>\d+) frames, LANDING_STABLE_FRAMES=\d+, still resets (?P<resets>\d+)\), "
+    r"still->hold done (?P<hold>[\d.]+)s .*?S3 (?P<s3>\d+)ms, save (?P<save>\d+)ms, "
+    r"START->confirm (?P<total>[\d.]+)s t0=(?P<t0>[\d.]+)"
+)
+
+
+def timing_rows(m):
+    """บรรทัด timing: ของทุกการยืนยัน → dict เวลาเป็นวินาทีของคลิป (นับจาก FIRST_FRAME ของรอบคลิปนั้น)"""
+    out = []
+    for line in m.grep("timing:"):
+        g = TIMING_RE.search(line)
+        if not g:
+            continue
+        t0 = float(g["t0"])
+        ff = max([f for f in m.first_frames if f <= t0], default=None)
+        if ff is None:
+            continue
+        start = t0 - ff
+        seen = start + float(g["seen"])
+        still = seen + float(g["still"])
+        hold_done = still + float(g["hold"])
+        out.append({
+            "start": start, "motion": start + float(g["motion"]), "seen": seen, "still": still,
+            "hold_done": hold_done, "s3_ms": int(g["s3"]), "save_ms": int(g["save"]),
+            "frames": int(g["frames"]), "resets": int(g["resets"]), "total": float(g["total"]),
+        })
+    return out
 
 
 class CameraMonitor:
@@ -111,7 +140,9 @@ def _wsl_keepalive(on):
     global _keepalive
     if on and _keepalive is None and docker_cmd()[0] == "wsl":
         distro = docker_cmd()[:-2]  # ["wsl", "-d", "Ubuntu"]
-        _keepalive = subprocess.Popen(distro + ["--", "sleep", "infinity"],
+        # stdin=DEVNULL สำคัญ: wsl.exe อ่าน stdin ค้าง (blocking read) — ถ้าใช้ stdin ร่วมกับ main.py
+        # Windows จะ serialize I/O บน file object เดียวกัน → main.py ค้างตั้งแต่ init stdio (ไม่มี output เลย)
+        _keepalive = subprocess.Popen(distro + ["--", "sleep", "infinity"], stdin=subprocess.DEVNULL,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif not on and _keepalive is not None:
         _keepalive.kill()
@@ -175,11 +206,13 @@ class MainProc:
             "PYTHONIOENCODING": "utf-8",
             "SEND_S0": "1" if MODE["send_s0"] else "0",
         })
+        if MODE["hold"] is not None:
+            env["CAPTURE_HOLD_SEC"] = str(MODE["hold"])
         env.update(self.extra_env)
         self.out = open(os.path.join(self.workdir, "stdout.txt"), "ab")
         self.proc = subprocess.Popen(
             [PYTHON, os.path.join(REPO, "main.py")],
-            cwd=self.workdir, env=env, stdout=self.out, stderr=subprocess.STDOUT,
+            cwd=self.workdir, env=env, stdin=subprocess.DEVNULL, stdout=self.out, stderr=subprocess.STDOUT,
         )
         self.loops_at_start = len(self.first_frames)
 
@@ -541,6 +574,7 @@ def main():
     ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,7b,8,8b,8c")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
     ap.add_argument("--send-s0", default="1,0", help="โหมด SEND_S0 ที่จะรัน: 1, 0 หรือ 1,0")
+    ap.add_argument("--hold", type=float, default=None, help="CAPTURE_HOLD_SEC ของ main.py (ไม่ใส่ = default ใน config)")
     args = ap.parse_args()
     if not os.path.isfile(args.clip):
         raise SystemExit(f"❌ ไม่พบคลิป {args.clip}")
@@ -550,6 +584,9 @@ def main():
     root = tempfile.mkdtemp(prefix="vendingcam_e2e_", dir=TMP_BASE)
     print(f"📁 โฟลเดอร์ชั่วคราว: {root}")
     modes = [x.strip() == "1" for x in args.send_s0.split(",")]
+    MODE["hold"] = args.hold
+    if args.hold is not None:
+        rep.note(f"CAPTURE_HOLD_SEC={args.hold:g}")
     results = {}  # (send_s0, ข้อ) → outcomes ของทุกรอบ
     r = redis_up()
     mon = CameraMonitor()
@@ -577,11 +614,24 @@ def main():
                     age = re.search(r"อายุ (\d+\.\d+)s", line)
                     starts.append(f"clean_bg {age.group(1)}s" if age else "เฟรมปัจจุบัน")
                 rep.note(f"[{sc}] พื้นหลังของแต่ละ START: {starts or '-'}; anomaly={anomaly_kinds(wd)}")
+                for t in timing_rows(m):
+                    rep.note(
+                        f"[{sc}] TIMING (วินาทีคลิป) START {t['start']:.2f} → motion {t['motion']:.2f} → "
+                        f"เห็นของ {t['seen']:.2f} → นิ่ง(เริ่ม hold) {t['still']:.2f} [{t['frames']} เฟรม, "
+                        f"reset {t['resets']}] → ครบ hold {t['hold_done']:.2f} → S3 {t['s3_ms']}ms → "
+                        f"ยืนยัน (+save {t['save_ms']}ms) | START→confirm {t['total']:.2f}s"
+                    )
                 ff = m.first_frames
                 if len(ff) >= 2:
                     rep.note(f"[{sc}] คาบการวนคลิปที่วัดได้ {ff[1] - ff[0]:.2f}s (คลิป 13.0s + reconnect)")
             except Exception as e:
                 rep.check(sc, "รันสถานการณ์", "สำเร็จ", f"error: {e}", False)
+                try:  # วินิจฉัย: บรรทัดท้ายของ stdout main.py + จำนวน FIRST_FRAME ที่เห็น
+                    with open(os.path.join(wd, "stdout.txt"), "rb") as f:
+                        tail = f.read().decode("utf-8", "replace").splitlines()[-4:]
+                    rep.note(f"[{sc}] DIAG first_frames={len(m.first_frames)} alive={m.alive()} stdout: {tail}")
+                except OSError as de:
+                    rep.note(f"[{sc}] DIAG อ่าน stdout ไม่ได้: {de}")
             finally:
                 m.kill()
                 r = test_redis()

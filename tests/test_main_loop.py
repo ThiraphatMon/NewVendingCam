@@ -266,3 +266,26 @@ def test_restart_same_day_continues_count(make_app, env):
 
     app2 = make_app(FakeController())
     assert app2.cm.state == cyc.WAIT_START and app2.today_count == 3
+
+
+def test_confirm_logs_timing_breakdown(make_app, env, caplog):
+    # S18: ทุกการยืนยันมี 1 บรรทัดแยกช่วงเวลา START → เห็น → นิ่ง → ครบ hold → S3 → ยืนยัน
+    import logging
+    import re
+
+    import main
+
+    ctl = FakeController()
+    app = make_app(ctl)
+    settle(app, env)
+    ctl.push("START")
+    run_frames(app, env, empty_frame(), 15)  # 0.5s ก่อนของตก
+    with caplog.at_level(logging.INFO):
+        run_frames(app, env, ITEM, FRAMES_TO_CONFIRM)
+    line = next(r.getMessage() for r in caplog.records if "timing:" in r.getMessage())
+    nums = dict(re.findall(r"(START->motion|START->item seen|seen->still|still->hold done|START->confirm) ([\d.]+)s", line))
+    assert abs(float(nums["START->item seen"]) - 0.5) < 0.1
+    assert float(nums["still->hold done"]) >= main.CAPTURE_HOLD_SEC
+    total = sum(float(nums[k]) for k in ("START->item seen", "seen->still", "still->hold done"))
+    assert abs(total - float(nums["START->confirm"])) < 0.02
+    assert "LANDING_STABLE_FRAMES=" in line and "S3 " in line and line.isascii()

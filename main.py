@@ -26,7 +26,7 @@ from config import (
     FRAME_W, FRAME_H, CAMERA_INDEX, MACHINE_ID, HEADLESS, ROI_CONFIG_PATH,
     MOT_THRESH, MIN_AREA, MAX_BLOB_ROI_RATIO,
     MORPH_OPEN_KSIZE, MORPH_DILATE_KSIZE, MORPH_DILATE_ITER,
-    GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD,
+    GROUP_MODE, GROUP_DIST, GROUP_OVERLAP_PAD, LANDING_STABLE_FRAMES,
     CAPTURE_HOLD_SEC, CYCLE_TIMEOUT_SEC, CONTROL_MODE, EVIDENCE_DIR,
     DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
@@ -151,6 +151,8 @@ class App:
         self.frame = None              # เฟรมล่าสุด (ใช้ถ่ายภาพ NO_CONFIRM_AT_CLOSE ตอนปิดรอบ)
         self.frame_gray = None         # เฟรมล่าสุดแบบ gray (START ใช้เป็นพื้นหลังได้ถ้าไม่มี clean_bg ที่ valid)
         self.watch_since = None        # [WATCH] เวลาเริ่มเฝ้าดูนอกรอบ (None = ไม่ได้เฝ้า)
+        self.cycle_t0 = None           # [TIMING] เวลา (clock) ที่เปิดรอบปัจจุบัน
+        self.cycle_motion_at = None    # [TIMING] เฟรมแรกในรอบ ACTIVE ที่ tracker เห็นวัตถุ
         self.anomaly_limiter = AnomalyLimiter(ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR)
 
         # [RECOVERY] process ก่อนหน้าตายกลางรอบ → ปิดเป็น INTERRUPTED + S0 ค้างหมดอายุ
@@ -224,15 +226,20 @@ class App:
 
         if self.cm.state == cyc.WAIT_START:
             self._watch(tracked, now)
+        elif self.cm.can_confirm() and tracked and self.cycle_motion_at is None:
+            self.cycle_motion_at = now
 
         landed = find_landed(tracked, now)
         if landed is not None:
             if self.cm.can_confirm():
                 if now >= self.confirm_retry_at:
-                    if self._looks_like_removal(tracked[landed], frame_gray):
+                    t_s3 = time.perf_counter()
+                    is_removal = self._looks_like_removal(tracked[landed], frame_gray)
+                    s3_ms = (time.perf_counter() - t_s3) * 1000
+                    if is_removal:
                         self._capture_anomaly(POSSIBLE_REMOVAL, frame, frame_gray, now)
                     else:
-                        self._confirm(frame, frame_gray, now, landed)
+                        self._confirm(frame, frame_gray, now, landed, tracked[landed], s3_ms)
             elif self.cm.state == cyc.CONFIRMED_WAIT_STOP:
                 self._capture_anomaly(EXTRA_AFTER_CONFIRM, frame, frame_gray, now)
             elif self.cm.state == cyc.WAIT_START and self.watch_since is not None:
@@ -300,6 +307,8 @@ class App:
             logger.warning(f"⛔ รอบ {cycle_id[:8]}: ไม่มีพื้นหลังก่อน START → BLOCKED_WAIT_STOP")
         else:
             self.bg.start_cycle(self.frame_gray, now, reason=f"START {cycle_id[:8]}")
+        self.cycle_t0 = now
+        self.cycle_motion_at = None
         logger.info(f"▶️ เปิดรอบ {cycle_id[:8]} (state={self.cm.state})")
 
     def _on_closed(self, closed, now):
@@ -332,7 +341,7 @@ class App:
         self.watch_since = None
 
     # ── การยืนยัน ────────────────────────────────────────────────────────────
-    def _confirm(self, frame, frame_gray, now, obj_id=None):
+    def _confirm(self, frame, frame_gray, now, obj_id=None, obj=None, s3_ms=0.0):
         """ภาพ → DB (transaction เดียว) → latch → S0 → (cloud outbox) — ล้มเหลวขั้นไหน = ไม่มียอด ไม่มี S0
         cloud ทำหลัง S0 และล้มเหลวได้โดยไม่กระทบยอด/S0"""
         cycle_id = self.cm.cycle_id
@@ -364,10 +373,28 @@ class App:
         self.bg.rebaseline(frame_gray, now)
         self.tracker.clear_all()
         ms = (time.perf_counter() - t0) * 1000
+        if obj is not None and self.cycle_t0 is not None:
+            logger.info(self._timing_line(cycle_id, now, obj, s3_ms, ms))
         s0 = "ส่ง S0" if self.send_s0 else "S0 NOT SENT (observe mode)"
         logger.info(
             f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — item confirmed, ยอดวันนี้ {conf.daily_sequence} "
             f"(บันทึก {ms:.0f}ms) -> {s0}"
+        )
+
+    def _timing_line(self, cycle_id, now, obj, s3_ms, save_ms):
+        """[TIMING] 1 บรรทัดแยกช่วงเวลา START → เห็นวัตถุ → นิ่ง (เริ่มนับ hold) → ครบ hold → S3 → ยืนยัน
+        เวลาเป็นวินาทีจาก START (นาฬิกาเฟรม) · t0 = epoch ของ START (e2e แปลงเป็นเวลาคลิป)"""
+        t0 = self.cycle_t0
+        motion = self.cycle_motion_at if self.cycle_motion_at is not None else obj["first_seen"]
+        still = obj.get("shape_confirmed_time") or now
+        frames_to_still = obj.get("still_frame", 0) - 1
+        return (
+            f"[cycle {cycle_id[:8]}] timing: START->motion {motion - t0:.2f}s, "
+            f"START->item seen {obj['first_seen'] - t0:.2f}s, "
+            f"seen->still {still - obj['first_seen']:.2f}s ({frames_to_still} frames, "
+            f"LANDING_STABLE_FRAMES={LANDING_STABLE_FRAMES}, still resets {obj.get('still_resets', 0)}), "
+            f"still->hold done {now - still:.2f}s (CAPTURE_HOLD_SEC={CAPTURE_HOLD_SEC:g}), "
+            f"S3 {s3_ms:.0f}ms, save {save_ms:.0f}ms, START->confirm {now - t0:.2f}s t0={t0:.3f}"
         )
 
     def _queue_item_landed(self, conf, obj_id):

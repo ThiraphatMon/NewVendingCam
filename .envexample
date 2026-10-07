@@ -58,7 +58,7 @@ CLOUD_ENABLED=0
 #   → ตรวจ `docker compose logs vending-cam | grep "Cloud:"` ว่าฟีเจอร์ไหนเปิด/ปิด
 
 # ── หมวด 2: ความไวและความเร็วในการจับของ (จูนบ่อยที่สุด) ─────────────────────────
-# CAPTURE_HOLD_SEC=1.0
+# CAPTURE_HOLD_SEC=0.3
 # MOT_THRESH=25
 # MIN_AREA=150
 # MAX_BLOB_ROI_RATIO=0.30

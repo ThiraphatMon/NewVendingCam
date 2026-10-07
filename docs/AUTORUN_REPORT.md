@@ -341,3 +341,45 @@ S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud �
 - **พบระหว่างทำ (สภาพแวดล้อม ไม่ใช่โค้ด)**: WSL 2.7.12 ปิด distro ที่ไม่มี `wsl.exe` ค้าง ~15s หลังคำสั่ง docker สุดท้าย →
   ต่อ port 6380 จาก Windows ใหม่ไม่ได้ (connection เดิมยังอยู่ ข้อแรกผ่าน ข้อถัดไปต่อไม่ติด) → `redis_e2e.redis_up()` ค้าง
   `wsl -d Ubuntu -- sleep infinity` ไว้ตลอดการทดสอบ (`redis_down()` ปิด) — docker_smoke ใช้ร่วมด้วย
+
+### S18 — `CAPTURE_HOLD_SEC` default 0.3 + วัดเวลาละเอียด
+- `config.py` / `.envexample` / `HANDOVER.md`: default `CAPTURE_HOLD_SEC` 1.0 → **0.3**
+- ทุกการยืนยัน log 1 บรรทัด (ASCII) `[cycle xxxxxxxx] timing: START->motion …s, START->item seen …s, seen->still …s
+  (N frames, LANDING_STABLE_FRAMES=4, still resets R), still->hold done …s (CAPTURE_HOLD_SEC=0.3), S3 …ms, save …ms,
+  START->confirm …s t0=<epoch>` — ใช้ทั้งที่ตู้จริงและ e2e (แปลงเป็นวินาทีคลิป)
+  - `core/tracker.py` เพิ่มตัวนับสำหรับ log เท่านั้น (`frames`, `still_frame`, `still_resets`) **ไม่เปลี่ยนเกณฑ์ใด ๆ**
+  - `main.py` จำเวลาเปิดรอบ / เฟรมแรกที่ tracker เห็นวัตถุในรอบ ACTIVE + จับเวลา S3
+- e2e: `--hold X` (ส่ง `CAPTURE_HOLD_SEC` ให้ main.py) + หมายเหตุ `TIMING (วินาทีคลิป)` ของทุกการยืนยัน
+- pytest **178 passed** (+1 `test_confirm_logs_timing_breakdown`: ช่วงเวลารวมกันได้ START→confirm, ≥ hold, ASCII)
+
+**ตาราง S18 — แยกช่วงเวลา (วินาทีของคลิป, e2e ข้อ 1 รอบแรก, SEND_S0=1)**
+
+| hold | START | เห็น motion แรก | เห็นของ (tracker obj ที่ยืนยัน) | นิ่ง = เริ่มนับ hold | ครบ hold | S3 | บันทึก (ภาพ+DB) | START→confirm | START→S0 (Redis) |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.1 | 1.05 | 2.32 | 2.66 | 2.99 (9 เฟรม, reset 1) | 3.12 | 1ms | 39ms | 2.07s | 2.16s |
+| **0.3** | 1.05 | 2.32 | 2.65 | 2.99 (9 เฟรม, reset 1) | 3.33 | 1ms | 37ms | 2.27s | 2.33–2.36s |
+| 0.5 | 1.05 | 2.32 | 2.66 | 2.99 (9 เฟรม, reset 1) | 3.52 | 1ms | 30ms | 2.47s | - |
+| 1.0 | 1.04 | 2.31 | 2.64 | 2.98 (9 เฟรม, reset 1) | 4.00 | 1ms | 23ms | 2.97s | (S7: 3.03s) |
+
+ข้อ 3 (2 รอบคลิป) ได้ค่าเดียวกัน ±0.02s ทุก hold (เช่น hold 0.3: นิ่ง 2.98 → ครบ hold 3.28–3.31, START→confirm 2.24–2.27s)
+ยกเว้นรอบที่ START ใช้เฟรมปัจจุบันเป็นพื้นหลัง: hold 1.0 ข้อ 3 รอบสอง เห็นของ 2.48 → นิ่ง 3.19 (21 เฟรม, reset 4)
+
+สรุปว่านอกจาก hold กินเวลาที่ไหน (คลิปนี้):
+- START → motion แรก **1.27s** = เนื้อหาคลิป (ของเริ่มตกที่ ~2.3s ของคลิป) ไม่ใช่เวลาประมวลผล
+- motion แรก → เห็นของ **0.33s**: ช่วงของกำลังตก tracker เห็นเป็นก้อนอื่น/ก้อนแตก — object ที่ถูกยืนยันเกิดตอนของใกล้ถึงพื้น
+- เห็นของ → นิ่ง **0.33s = 9 เฟรม**: `LANDING_STABLE_FRAMES=4` ต้องนิ่ง 4 เฟรมติดกัน + ของเด้ง 1 ครั้ง (still resets 1 —
+  STRICT_STABILITY นับใหม่) → ถ้าไม่เด้งจะเหลือ ~5 เฟรม (0.17s)
+- นิ่ง → ครบ hold = hold + ≤1 เฟรม (0.00–0.03s เพราะตรวจทีละเฟรม 30fps)
+- S3 ~1ms, บันทึกภาพ+DB 20–40ms, S0 ผ่าน Redis +~0.06–0.09s (poll 50ms ของ worker / ฝั่งตัวทดสอบ)
+- ⇒ เวลาคงที่หลังของถึงถาด ≈ 0.67s + hold (0.3) ≈ **1.0s** จากของแตะถาดถึงยืนยัน
+
+**รัน e2e ครบทุกข้อที่ hold 0.1 และ 0.3 (ไม่แก้ตามโจทย์)**
+- hold **0.3** (default ใหม่): ทุกข้อผ่าน **ทั้ง SEND_S0=1 และ 0** (66/66 การตรวจ) — ผลเหมือน hold 1.0 ทุกข้อ
+- hold **0.1**: 21/22 ผ่าน — **ข้อ 7 เปลี่ยน**: START @5.0 (ของนิ่งอยู่ก่อน) → หยิบ @7s → **ยืนยันผิด S0 ที่ clip 9.23s** (ยอด 1)
+  (hold 0.3 ข้อ 7 / 7b ยังไม่ยืนยัน — hold 0.1 สั้นกว่าช่วงที่ ENV_SETTLE_REBASELINE/S3 ใช้กันรอยหยิบ) → **ไม่ควรตั้งต่ำกว่า 0.3**
+- หมายเหตุ: ข้อ 3 รอบสองของโหมด 1 ที่ hold 0.3 วัดได้ START→S0 3.33s (START ที่ clip 0.05 ของรอบคลิปที่ 2 — ช่วงรอยต่อการวนคลิป
+  ของตัวทดสอบ ไม่ใช่โปรแกรมช้า; โหมด 0 รันเดียวกันได้ 2.33s)
+- **พบระหว่างทำ (ตัวทดสอบ)**: keepalive ของ S17 (`wsl … sleep infinity`) ใช้ stdin ร่วมกับ main.py → Windows serialize I/O บน
+  file object เดียวกัน → main.py ค้างตั้งแต่ init stdio แบบสุ่ม (ไม่มี output, "รอเวลาคลิป 1.0s ไม่ทัน") → แก้: `stdin=DEVNULL`
+  ทั้ง keepalive และ main.py + e2e บันทึก DIAG (stdout ท้าย ๆ ของ main.py) เมื่อสถานการณ์ error · ผล e2e ของ S17 ด้านบนเป็นรันที่ไม่โดน
+- จุดที่แก้เทสต์: `tests/conftest.py` คอมเมนต์ default hold เท่านั้น

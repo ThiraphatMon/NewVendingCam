@@ -151,7 +151,7 @@ def settle(app, env, sec=1.0):
     run_frames(app, env, empty_frame(), int(sec * FPS))
 
 
-# วัตถุนิ่งจนผ่านเกณฑ์ยืนยัน: 4 เฟรมจน SHAPE_CONFIRMED + CAPTURE_HOLD_SEC (default 1.0s) + เผื่อ
+# วัตถุนิ่งจนผ่านเกณฑ์ยืนยัน: 4 เฟรมจน SHAPE_CONFIRMED + CAPTURE_HOLD_SEC (default 0.3s) + เผื่อ
 FRAMES_TO_CONFIRM = int(2.0 * FPS)
 
 
