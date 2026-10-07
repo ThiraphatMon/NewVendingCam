@@ -84,6 +84,12 @@ REDIS_DB = _int("REDIS_DB", 0)
 REDIS_PASSWORD = _str("REDIS_PASSWORD", "")
 REDIS_CTRL_KEY = _str("REDIS_CTRL_KEY", "CTRL")          # รับ START/STOP (RPOP)
 REDIS_RESPONSE_KEY = _str("REDIS_RESPONSE_KEY", "CAMERA")  # ส่ง S0 (LPUSH)
+# ส่ง S0 กลับ controller หรือไม่
+#   0 = โหมดเก็บข้อมูล (observe): ทำงานเหมือนเดิมทุกอย่าง (รอบ / ภาพ / DB / daily log / cloud)
+#       แต่ "ไม่เขียน REDIS_RESPONSE_KEY เลย" ไม่ว่ากรณีใด — DB บันทึก S0 เป็น NOT_SENT พร้อมเวลาที่จะได้ส่ง
+#   1 = ส่ง S0 จริง (controller จบออเดอร์ตามกล้อง)
+#   default 0: ทดสอบที่ตู้จริงพบเงาลูกค้าทำให้ S0 ผิด → เก็บข้อมูลก่อนจนมั่นใจ
+SEND_S0 = _bool("SEND_S0", False)
 # timeout ต่อ Redis (วินาที) — Redis ค้างต้องไม่ทำให้กล้อง/STOP ค้าง
 REDIS_CONNECT_TIMEOUT_SEC = _float("REDIS_CONNECT_TIMEOUT_SEC", 1.0)
 REDIS_SOCKET_TIMEOUT_SEC = _float("REDIS_SOCKET_TIMEOUT_SEC", 1.0)

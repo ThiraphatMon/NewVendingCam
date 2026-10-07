@@ -30,6 +30,10 @@ R_ENQUEUED = "ENQUEUED"  # LPUSH สำเร็จ (Redis รับแล้ว
 R_FAILED = "FAILED"      # ส่งไม่ถึง Redis แน่นอน (retry ได้ถ้ารอบยังเปิด)
 R_UNKNOWN = "UNKNOWN"    # timeout / ไม่รู้ผล → ห้าม retry (อาจได้ S0 ซ้ำ)
 R_EXPIRED = "EXPIRED"    # รอบปิด / restart ก่อนส่งสำเร็จ → ห้ามส่งอีก
+# โหมดเก็บข้อมูล (SEND_S0=0): ยืนยันแล้วแต่ไม่ส่ง S0 โดยตั้งใจ — updated_at = เวลาที่ "จะได้ส่ง" (เวลายืนยัน)
+#   ไว้เทียบกับ cycles.closed_at_utc (STOP จริง) · เป็นแค่ค่า state ใหม่ ไม่เปลี่ยน schema
+#   (image รุ่นก่อนเปิด DB นี้ได้ และไม่แตะแถวนี้ เพราะ expire เฉพาะ PENDING/FAILED)
+R_NOT_SENT = "NOT_SENT"
 
 # สถานะ event ใน cloud_outbox
 O_PENDING = "PENDING"  # รอส่ง (ส่งไม่สำเร็จ → ยัง PENDING พร้อม next_attempt_at ตาม backoff)
@@ -204,11 +208,12 @@ class StateStore:
         return dict(row) if row else None
 
     # ── การยืนยัน ────────────────────────────────────────────────────────────
-    def confirm(self, cycle_id, evidence_path):
+    def confirm(self, cycle_id, evidence_path, send_s0=True):
         """บันทึกการยืนยัน 1 ครั้งของรอบ + daily_sequence + S0 intent (PENDING) ใน transaction เดียว
 
         - รอบต้องยังเปิดอยู่ ไม่งั้น raise (กันผลของรอบเก่า)
         - รอบเดิมยืนยันซ้ำ → sqlite3.IntegrityError (cycle_id UNIQUE) ยอดไม่เพิ่ม
+        - send_s0=False (โหมดเก็บข้อมูล): S0 เป็น NOT_SENT แทน PENDING — updated_at = เวลาที่จะได้ส่ง
         """
         utc, local = self._now()
         local_date = local.date().isoformat()
@@ -229,9 +234,10 @@ class StateStore:
                 (cycle_id, self.machine_id, utc, local_date, seq, evidence_path),
             )
             self.conn.execute(
-                "INSERT INTO responses (cycle_id, payload, state, updated_at) "
-                "VALUES (?, 'S0', ?, ?)",
-                (cycle_id, R_PENDING, utc),
+                "INSERT INTO responses (cycle_id, payload, state, last_error, updated_at) "
+                "VALUES (?, 'S0', ?, ?, ?)",
+                (cycle_id, R_PENDING, None, utc) if send_s0
+                else (cycle_id, R_NOT_SENT, "observe mode (SEND_S0=0)", utc),
             )
         return Confirmation(cycle_id, local, local_date, seq, evidence_path)
 

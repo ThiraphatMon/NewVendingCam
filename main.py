@@ -31,7 +31,7 @@ from config import (
     DAILY_LOG_DIR, ANOMALY_MIN_INTERVAL_SEC, ANOMALY_MAX_PER_HOUR,
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CTRL_KEY, REDIS_RESPONSE_KEY,
     REDIS_CONNECT_TIMEOUT_SEC, REDIS_SOCKET_TIMEOUT_SEC,
-    STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES,
+    STATE_DB_PATH, COUNT_TIMEZONE, CLEAN_BG_STABLE_FRAMES, SEND_S0,
     ENV_SETTLE_REBASELINE, REMOVAL_CHECK, REMOVAL_EDGE_RATIO, REMOVAL_MATCH_RATIO, REMOVAL_UNCERTAIN_SEND_S0,
 )
 from api.cloud import item_landed_event
@@ -117,12 +117,13 @@ class App:
     clock : wall clock สำหรับการตรวจจับ (tracker ใช้ time.time ภายใน จึงต้องเป็นนาฬิกาเดียวกัน)
     mono  : monotonic สำหรับ timeout ของรอบ
     cloud : api.cloud.CloudServices หรือ None (cloud ปิด) — main loop แค่ฝากเฟรม/งาน ไม่รอ network
+    send_s0 : False = โหมดเก็บข้อมูล (ยืนยันตามปกติแต่ไม่ขอส่ง S0, DB เป็น NOT_SENT) — None = ตาม SEND_S0
     """
 
     def __init__(
         self, machine_id, source, roi_manager, store, controller,
         headless=True, evidence_dir=EVIDENCE_DIR, daily_log_dir=DAILY_LOG_DIR,
-        clock=time.time, mono=time.monotonic, cloud=None,
+        clock=time.time, mono=time.monotonic, cloud=None, send_s0=None,
     ):
         self.machine_id = machine_id
         self.source = source
@@ -135,6 +136,7 @@ class App:
         self.clock = clock
         self.mono = mono
         self.cloud = cloud
+        self.send_s0 = SEND_S0 if send_s0 is None else send_s0
 
         self.cm = CycleMachine(CYCLE_TIMEOUT_SEC)
         self.tracker = MemoryTracker()
@@ -344,7 +346,7 @@ class App:
             self.confirm_retry_at = now + CONFIRM_RETRY_SEC
             return
         try:
-            conf = self.store.confirm(cycle_id, path)
+            conf = self.store.confirm(cycle_id, path, send_s0=self.send_s0)
         except sqlite3.Error as e:
             logger.error(f"❌ [STORAGE FAULT] รอบ {cycle_id[:8]}: บันทึก DB ไม่ได้ ({e}) → ไม่ยืนยัน")
             self.confirm_retry_at = now + CONFIRM_RETRY_SEC
@@ -353,7 +355,8 @@ class App:
 
         self.cm.mark_confirmed()
         self.today_count = conf.daily_sequence
-        self.controller.request_s0(cycle_id, self.last_cmd_seq)
+        if self.send_s0:
+            self.controller.request_s0(cycle_id, self.last_cmd_seq)
         daily_log.append(self.daily_log_dir, conf)
         self._queue_item_landed(conf, obj_id)
 
@@ -361,9 +364,10 @@ class App:
         self.bg.rebaseline(frame_gray, now)
         self.tracker.clear_all()
         ms = (time.perf_counter() - t0) * 1000
+        s0 = "ส่ง S0" if self.send_s0 else "S0 NOT SENT (observe mode)"
         logger.info(
-            f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — ยอดวันนี้ {conf.daily_sequence} "
-            f"(บันทึก {ms:.0f}ms) → ส่ง S0"
+            f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — item confirmed, ยอดวันนี้ {conf.daily_sequence} "
+            f"(บันทึก {ms:.0f}ms) -> {s0}"
         )
 
     def _queue_item_landed(self, conf, obj_id):
@@ -547,6 +551,9 @@ def main():
     logger.info(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
     logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'} / คำสั่งจาก {CONTROL_MODE}")
     logger.info(config.summary())
+    logger.info(
+        "S0 response: ENABLED (SEND_S0=1)" if SEND_S0 else "S0 response: DISABLED (observe mode, SEND_S0=0)"
+    )
     for warning in config.inactive_warnings():
         logger.warning(warning)
 
@@ -564,6 +571,7 @@ def main():
         ctrl_key=REDIS_CTRL_KEY,
         response_key=REDIS_RESPONSE_KEY,
         enabled=(CONTROL_MODE == "redis"),
+        send_s0=SEND_S0,
     )
     source = FrameSource(CAMERA_INDEX)
     roi_manager = ROIManager(FRAME_W, FRAME_H, config_path=ROI_CONFIG_PATH)

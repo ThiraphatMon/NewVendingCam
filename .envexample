@@ -20,6 +20,9 @@ REDIS_DB=0
 REDIS_PASSWORD=
 # REDIS_CTRL_KEY=CTRL
 # REDIS_RESPONSE_KEY=CAMERA
+# ส่ง S0 กลับ controller: 0 = โหมดเก็บข้อมูล (default) ทำงานเหมือนเดิมทุกอย่างแต่ไม่เขียน CAMERA เลย
+#   (DB บันทึก S0 เป็น NOT_SENT พร้อมเวลาที่จะได้ส่ง ไว้เทียบกับเวลา STOP จริง) | 1 = ส่ง S0 จริง
+SEND_S0=0
 # REDIS_CONNECT_TIMEOUT_SEC=1.0
 # REDIS_SOCKET_TIMEOUT_SEC=1.0
 

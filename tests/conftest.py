@@ -125,12 +125,13 @@ def env(tmp_path, clock):
 def make_app(env):
     from main import App
 
-    def _make(controller=None, store=None, cloud=None):
+    # send_s0=True: เทสต์เดิมทั้งหมดทดสอบพฤติกรรม SEND_S0=1 (default ของ config เป็น 0 = โหมดเก็บข้อมูล)
+    def _make(controller=None, store=None, cloud=None, send_s0=True):
         app = App(
             "VENDING_01", env.source, env.roi, store or env.open_store(),
             controller or FakeController(),
             headless=True, evidence_dir=env.evidence_dir, daily_log_dir=env.daily_dir,
-            clock=env.clock, mono=env.clock, cloud=cloud,
+            clock=env.clock, mono=env.clock, cloud=cloud, send_s0=send_s0,
         )
         return app
 

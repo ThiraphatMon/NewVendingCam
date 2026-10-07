@@ -4,6 +4,13 @@ tests/integration/redis_e2e.py — integration test ระดับ 3: main.py �
 ไม่ใช่ pytest test (pytest ปกติไม่รัน) — รันเอง:
     .venv\\Scripts\\python.exe tests\\integration\\redis_e2e.py --clip C:\\path\\big1_pickup_cutted.mp4
     .venv\\Scripts\\python.exe tests\\integration\\redis_e2e.py --clip ... --scenarios 1,3,7
+    .venv\\Scripts\\python.exe tests\\integration\\redis_e2e.py --clip ... --send-s0 0   (เฉพาะโหมดเก็บข้อมูล)
+
+โหมด SEND_S0 (--send-s0, ค่าเริ่ม "1,0" = รันทุกข้อทั้ง 2 โหมด):
+  1 = ส่ง S0 จริง: ตรวจเหมือนเดิม (นับ S0 จาก list CAMERA)
+  0 = โหมดเก็บข้อมูล: "S0" ในการตรวจนับจากแถว NOT_SENT ใน DB (= S0 ที่จะได้ส่ง) และวัด START→confirm
+      จาก confirmed_at_utc แทน START→S0 + ทุกข้อต้องมี list CAMERA ยาว 0 และ MONITOR ไม่เห็นคำสั่งที่แตะ CAMERA
+      + outcome ของทุกรอบใน DB ต้องเหมือนโหมด 1 (เมื่อรันทั้ง 2 โหมด)
 
 ความปลอดภัย:
   - ใช้ Redis ใน container ทดสอบ vendingcam-redis-test พอร์ต 6380 เท่านั้น (สร้างเอง ลบเองตอนจบ)
@@ -25,7 +32,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from datetime import datetime
 
 import redis
 
@@ -37,6 +46,42 @@ IMAGE = "redis:7-alpine"
 # โฟลเดอร์ชั่วคราวอยู่ในโปรเจค (.e2e_tmp/ — อยู่ใน .gitignore) ไม่ใช้ Temp ของ Windows
 TMP_BASE = os.path.join(REPO, ".e2e_tmp")
 FIRST_FRAME_RE = re.compile(r"FIRST_FRAME t=(\d+\.\d+)")
+
+# โหมดของรอบที่กำลังรัน (main() ตั้ง) — s0s / wait_s0 อ่านจากที่นี่
+MODE = {"send_s0": True, "wd": None}
+
+
+class CameraMonitor:
+    """MONITOR ของ Redis ทดสอบ: จดทุกคำสั่งที่แตะ key CAMERA (ต่อใหม่เองเมื่อ Redis ดับ เช่นข้อ 4)
+    ไม่นับคำสั่งอ่าน/ล้างของตัวทดสอบเอง (LLEN / DEL / LRANGE)"""
+
+    OWN = ("LLEN", "DEL", "LRANGE")
+
+    def __init__(self):
+        self.seen = []
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                with test_redis().monitor() as mon:
+                    for ev in mon.listen():
+                        if self._stop.is_set():
+                            return
+                        parts = ev.get("command", "").split()
+                        if parts and parts[0].upper() not in self.OWN and "CAMERA" in parts[1:]:
+                            self.seen.append(ev["command"])
+            except Exception:
+                time.sleep(0.2)
+
+    def take(self):
+        out, self.seen = self.seen, []
+        return out
+
+    def stop(self):
+        self._stop.set()
 
 
 # ── docker ───────────────────────────────────────────────────────────────────
@@ -57,7 +102,24 @@ def docker(*args, check=True):
     return r.stdout.strip()
 
 
+_keepalive = None
+
+
+def _wsl_keepalive(on):
+    """docker ผ่าน WSL: WSL รุ่นใหม่ (2.7) ปิด distro ที่ไม่มี wsl.exe ค้าง ~15s → port 6380 จาก Windows ต่อใหม่ไม่ได้
+    (connection เดิมยังอยู่ แต่สถานการณ์ถัดไปต่อไม่ติด) → ค้าง `wsl ... sleep infinity` ไว้ตลอดการทดสอบ"""
+    global _keepalive
+    if on and _keepalive is None and docker_cmd()[0] == "wsl":
+        distro = docker_cmd()[:-2]  # ["wsl", "-d", "Ubuntu"]
+        _keepalive = subprocess.Popen(distro + ["--", "sleep", "infinity"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif not on and _keepalive is not None:
+        _keepalive.kill()
+        _keepalive = None
+
+
 def redis_up():
+    _wsl_keepalive(True)
     docker("rm", "-f", CONTAINER, check=False)
     docker("run", "-d", "--name", CONTAINER, "-p", f"{PORT}:6379", IMAGE)
     r = test_redis()
@@ -73,6 +135,7 @@ def redis_up():
 
 def redis_down():
     docker("rm", "-f", CONTAINER, check=False)
+    _wsl_keepalive(False)
 
 
 def test_redis():
@@ -110,6 +173,7 @@ class MainProc:
             "STATE_DB_PATH": "data/vending_state.sqlite3",
             "DAILY_LOG_DIR": "logs/item_drops",
             "PYTHONIOENCODING": "utf-8",
+            "SEND_S0": "1" if MODE["send_s0"] else "0",
         })
         env.update(self.extra_env)
         self.out = open(os.path.join(self.workdir, "stdout.txt"), "ab")
@@ -200,8 +264,18 @@ def images(workdir):
     return sorted(os.listdir(d)) if os.path.isdir(d) else []
 
 
+def not_sent_times(workdir):
+    """โหมดเก็บข้อมูล: epoch ของการยืนยันที่ S0 เป็น NOT_SENT (= S0 ที่จะได้ส่ง) เรียงตามลำดับ"""
+    rows = db_query(workdir, "SELECT c.confirmed_at_utc FROM confirmations c JOIN responses r "
+                             "ON r.cycle_id = c.cycle_id WHERE r.state = 'NOT_SENT' ORDER BY c.id")
+    return [datetime.fromisoformat(t).timestamp() for (t,) in rows]
+
+
 def s0s(r):
-    return r.llen("CAMERA")
+    """จำนวน S0: โหมด 1 = ความยาว list CAMERA | โหมด 0 = S0 ที่จะได้ส่ง (NOT_SENT ใน DB)"""
+    if MODE["send_s0"]:
+        return r.llen("CAMERA")
+    return len(not_sent_times(MODE["wd"]))
 
 
 def push(r, cmd):
@@ -210,11 +284,17 @@ def push(r, cmd):
 
 
 def wait_s0(r, n, timeout):
-    """รอจน CAMERA มี S0 ครบ n รายการ คืนเวลาที่เห็น หรือ None"""
+    """รอจน CAMERA มี S0 ครบ n รายการ คืนเวลาที่เห็น หรือ None
+    โหมด 0: รอจน DB มีการยืนยัน (NOT_SENT) ครบ n → คืนเวลายืนยันของรายการที่ n (วัด START→confirm)"""
     end = time.time() + timeout
     while time.time() < end:
-        if s0s(r) >= n:
-            return time.time()
+        if MODE["send_s0"]:
+            if s0s(r) >= n:
+                return time.time()
+        else:
+            times = not_sent_times(MODE["wd"])
+            if len(times) >= n:
+                return times[n - 1]
         time.sleep(0.01)
     return None
 
@@ -460,6 +540,7 @@ def main():
     ap.add_argument("--clip", default=os.environ.get("E2E_CLIP"), required=not os.environ.get("E2E_CLIP"))
     ap.add_argument("--scenarios", default="1,2,3,4,5,6,7,7b,8,8b,8c")
     ap.add_argument("--keep", action="store_true", help="ไม่ลบโฟลเดอร์ชั่วคราว (ไว้ดู log)")
+    ap.add_argument("--send-s0", default="1,0", help="โหมด SEND_S0 ที่จะรัน: 1, 0 หรือ 1,0")
     args = ap.parse_args()
     if not os.path.isfile(args.clip):
         raise SystemExit(f"❌ ไม่พบคลิป {args.clip}")
@@ -468,16 +549,27 @@ def main():
     os.makedirs(TMP_BASE, exist_ok=True)
     root = tempfile.mkdtemp(prefix="vendingcam_e2e_", dir=TMP_BASE)
     print(f"📁 โฟลเดอร์ชั่วคราว: {root}")
+    modes = [x.strip() == "1" for x in args.send_s0.split(",")]
+    results = {}  # (send_s0, ข้อ) → outcomes ของทุกรอบ
     r = redis_up()
+    mon = CameraMonitor()
     try:
+      for send in modes:
+        MODE["send_s0"] = send
+        tag = "" if send else "@S0=0"
+        rep.note(f"=== SEND_S0={int(send)} ===")
         for sc in args.scenarios.split(","):
-            wd = os.path.join(root, f"sc{sc}")
+            wd = os.path.join(root, f"s0{int(send)}_sc{sc}")
+            MODE["wd"] = wd
             os.makedirs(os.path.join(wd, "data"))
             shutil.copy(os.path.join(REPO, "data", "roi_config.example.json"), os.path.join(wd, "data", "roi_config.json"))
             reset_keys(r)
+            time.sleep(0.2)
+            mon.take()
             m = MainProc(wd, args.clip, SCENARIO_ENV.get(sc))
-            print(f"▶️ สถานการณ์ {sc}")
+            print(f"▶️ สถานการณ์ {sc}{tag}")
             m.start()
+            first_row = len(rep.rows)
             try:
                 SCENARIOS[sc](r, m, wd, rep)
                 starts = []
@@ -493,7 +585,26 @@ def main():
             finally:
                 m.kill()
                 r = test_redis()
+            results[(send, sc)] = outcomes(wd)
+            time.sleep(0.3)  # ให้ MONITOR อ่านคำสั่งสุดท้ายทัน
+            writes = mon.take()
+            if not send:
+                try:
+                    cam = r.llen("CAMERA")
+                except redis.RedisError as e:
+                    cam = f"error {e}"
+                rep.check(sc, "โหมดเก็บข้อมูล: ไม่แตะ CAMERA", "llen 0, MONITOR 0 คำสั่ง",
+                          f"llen {cam}, MONITOR {len(writes)} {writes[:3]}", cam == 0 and not writes)
+                if (True, sc) in results:
+                    a, b = (",".join(map(str, results[(k, sc)])) for k in (True, False))
+                    rep.check(sc, "outcome ทุกรอบเหมือนโหมด SEND_S0=1", a, b, a == b)
+            else:
+                lp = [w for w in writes if w.split()[0].upper().strip('"') == "LPUSH"]
+                rep.note(f"[{sc}] MONITOR: LPUSH CAMERA {len(lp)} ครั้ง")
+            for i in range(first_row, len(rep.rows)):
+                rep.rows[i] = (f"{rep.rows[i][0]}{tag}",) + rep.rows[i][1:]
     finally:
+        mon.stop()
         redis_down()
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)

@@ -15,6 +15,10 @@ api/redis_controller.py — รับ START/STOP จาก Redis และส่
   - PING ไม่ผ่าน = รู้แน่ว่ายังไม่ได้ส่ง LPUSH → FAILED แล้วลองใหม่ได้ เฉพาะขณะรอบยังได้รับอนุญาต
   - LPUSH error / timeout = ไม่รู้ว่าถึง Redis หรือยัง → UNKNOWN ห้ามส่งซ้ำ (อาจได้ S0 สองรายการ)
   - main เพิกถอน (revoke) ตอนปิดรอบ / worker pop START หรือ STOP ได้ก่อนส่ง → ไม่ส่ง (EXPIRED)
+
+โหมดเก็บข้อมูล (send_s0=False / SEND_S0=0): ไม่เขียน response_key เลยไม่ว่ากรณีใด
+  main ไม่ขอส่งอยู่แล้ว — ที่นี่กันซ้ำอีกชั้น: request_s0 ถูกทิ้ง และ worker ไม่มีทาง LPUSH
+  ยังรับ CTRL ด้วย RPOP เหมือนเดิม
 """
 
 import queue
@@ -94,9 +98,11 @@ class RedisController:
         backoff_min=0.5,
         backoff_max=5.0,
         enabled=True,
+        send_s0=True,
     ):
         """client_factory: ฟังก์ชันสร้าง redis client (test ใส่ fakeredis ได้)
-        enabled=False: ไม่เปิด worker (CONTROL_MODE=keyboard — รับคำสั่งจากปุ่มบน PC อย่างเดียว)"""
+        enabled=False: ไม่เปิด worker (CONTROL_MODE=keyboard — รับคำสั่งจากปุ่มบน PC อย่างเดียว)
+        send_s0=False: โหมดเก็บข้อมูล — ไม่เขียน response_key เลย"""
         self.client_factory = client_factory
         self.ctrl_key = ctrl_key
         self.response_key = response_key
@@ -104,6 +110,7 @@ class RedisController:
         self.backoff_min = backoff_min
         self.backoff_max = backoff_max
         self.enabled = enabled
+        self.send_s0 = send_s0
 
         self.inbox = queue.Queue()
         self._wake = threading.Event()  # ปลุก worker ทันทีเมื่อมีคำขอส่ง S0
@@ -154,6 +161,10 @@ class RedisController:
         """ขอส่ง S0 ของรอบนี้ (main เรียกหลัง DB commit การยืนยันแล้ว)
         after_seq: seq ของคำสั่งล่าสุดที่ main ประมวลผลแล้ว — ถ้า worker pop START/STOP
                    ใหม่กว่านี้ไปแล้ว แปลว่ารอบกำลังจะถูกปิด → ไม่ส่ง"""
+        if not self.send_s0:
+            # โหมดเก็บข้อมูล: main ไม่ควรเรียกอยู่แล้ว — ทิ้งคำขอ ไม่ส่งเหตุการณ์ (DB เป็น NOT_SENT อยู่แล้ว)
+            logger.warning(f"S0 request ignored (cycle={cycle_id[:8]}): SEND_S0=0 observe mode")
+            return
         with self._lock:
             old = self._request
             self._allowed_cycle = cycle_id
@@ -177,9 +188,8 @@ class RedisController:
 
     # ── worker thread ────────────────────────────────────────────────────────
     def _run(self):
-        logger.info(
-            f"🔌 Redis worker เริ่มแล้ว (RPOP {self.ctrl_key} / LPUSH {self.response_key})"
-        )
+        send = f"LPUSH {self.response_key}" if self.send_s0 else f"{self.response_key} disabled (SEND_S0=0)"
+        logger.info(f"🔌 Redis worker เริ่มแล้ว (RPOP {self.ctrl_key} / {send})")
         while not self._stop.is_set():
             try:
                 self._expire_if_revoked()
@@ -272,6 +282,8 @@ class RedisController:
         # 2) LPUSH ครั้งเดียว: error ใด ๆ = ไม่รู้ผล → UNKNOWN ไม่ส่งซ้ำ
         with self._lock:
             self._request = None
+        if not self.send_s0:  # กันซ้ำ: โหมดเก็บข้อมูลห้ามเขียน response_key ไม่ว่าทางไหน
+            return True
         try:
             self._client.lpush(self.response_key, "S0")
         except redis.RedisError as e:

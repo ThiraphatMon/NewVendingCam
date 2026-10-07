@@ -305,3 +305,39 @@ git checkout main && git merge --no-ff auto/round1-finish
 แนะนำ review ทีละ commit (แต่ละขั้นผ่านประตูทดสอบของตัวเองก่อน commit) — ถ้าไม่ต้องการขั้นไหน revert เฉพาะ commit นั้นได้
 (S4 / S5 แยกจาก S3 ได้; S3 ใช้ scene history ใน background.py; S1 ปิดได้ด้วย `ENV_SETTLE_REBASELINE=0`,
 S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud ทั้งหมดด้วย `CLOUD_ENABLED=0` หรือทีละฟีเจอร์ (HANDOVER 7.1) โดยไม่ต้อง revert)
+
+---
+
+# รอบ OBSERVE (S17–S21) — `docs/AUTORUN_TASK_OBSERVE.md`
+
+> เหตุผล: ที่ตู้จริงมีออเดอร์แต่ของไม่ตก แล้วเงาลูกค้าเข้า ROI → S0 ผิด → deploy กลับเป็นโหมดเก็บข้อมูล (ไม่ส่งสัญญาณกลับ controller)
+> ทำต่อบน `auto/round1-finish` · ไม่ push / ไม่ merge / ไม่แตะ main
+
+### S17 — สวิตช์ `SEND_S0` (default 0 = โหมดเก็บข้อมูล)
+- `config.py` / `.envexample`: `SEND_S0` (0/1) **default 0**
+- `main.py`: `App(send_s0=...)` (None = ตาม config) — โหมด 0 ยืนยันตามปกติทุกอย่าง (latch CONFIRMED_WAIT_STOP, ภาพ, SQLite,
+  daily log, ITEM_LANDED ตาม `CLOUD_SEND_EVENTS`) แต่ **ไม่เรียก `request_s0`**;
+  log ตอนยืนยัน `... item confirmed ... -> S0 NOT SENT (observe mode)`;
+  log startup 1 บรรทัด `S0 response: DISABLED (observe mode, SEND_S0=0)` / `S0 response: ENABLED (SEND_S0=1)`
+- `api/redis_controller.py`: `send_s0=False` กันซ้ำอีกชั้น — `request_s0` ถูกทิ้ง + worker return ก่อน LPUSH เสมอ
+  (ไม่มีทางเขียน `REDIS_RESPONSE_KEY` แม้มีคนเรียกผิด) · ยัง RPOP `CTRL` เหมือนเดิม · log worker แสดง `CAMERA disabled (SEND_S0=0)`
+- `utils/state_store.py`: `confirm(..., send_s0=False)` บันทึกแถว `responses` เป็น state ใหม่ **`NOT_SENT`**
+  (`last_error='observe mode (SEND_S0=0)'`, `updated_at` = เวลาที่จะได้ส่ง = เวลายืนยัน) → เทียบกับ `cycles.closed_at_utc` (STOP จริง) ได้
+  - additive: เป็นแค่ค่า state ใหม่ ไม่เปลี่ยน schema / user_version → image เก่า rollback ได้
+    (รุ่นเก่า expire เฉพาะ PENDING/FAILED จึงไม่แตะแถว NOT_SENT)
+- เส้นทางที่เคยเขียน CAMERA ทั้งหมดในโหมด 0: ยืนยันปกติ (ไม่ขอส่ง), ส่งค้างหลัง Redis กลับ (ไม่มีคำขอค้าง + guard ใน worker),
+  restart (S0 ค้างจาก process เก่าถูก EXPIRED ใน DB อย่างเดียว ไม่มีการส่ง — เหมือนเดิม) → ไม่มีทางเขียน
+- pytest: **177 passed** (+6 ใน `tests/test_observe_mode.py`: default=0, ยืนยันปกติ, ส่งจริงเมื่อ =1, Redis หลุดแล้วกลับ,
+  restart ที่มี PENDING ค้าง, controller send_s0=False ไม่ LPUSH แม้ถูกเรียก + ยัง RPOP — ใช้ fakeredis ที่จดทุกคำสั่งที่แตะ CAMERA)
+- redis_e2e (`--send-s0 1,0` = ค่าเริ่มใหม่ รันทุกข้อ 2 โหมด): **ผ่านทุกข้อทั้ง 2 โหมด**
+  - SEND_S0=1: ผลเหมือนเดิมทุกข้อ, MONITOR เห็น `LPUSH CAMERA` ตรงกับจำนวน S0 (ข้อ 1:1, 3:2, 4:1, 5:2, 8/8b/8c:1, อื่น 0)
+  - SEND_S0=0: ทุกข้อ `llen CAMERA = 0` และ MONITOR ไม่เห็นคำสั่งใดที่แตะ CAMERA (นอกจาก LLEN/DEL ของตัวทดสอบ) ·
+    outcome ทุกรอบใน DB เหมือนโหมด 1 ทุกข้อ · ข้อ 4 response=`NOT_SENT`
+  - START→S0 (โหมด 1) ข้อ 1 = 3.05s, ข้อ 3 = 3.02s / 3.05s · START→confirm (โหมด 0, จาก `confirmed_at_utc`) ข้อ 1 = 3.03s, ข้อ 3 = 3.03s / 3.23s
+- **จุดที่แก้เทสต์**: `tests/conftest.py` `make_app(send_s0=True)` — เทสต์เดิมทั้งหมดทดสอบพฤติกรรม SEND_S0=1
+  (default ของ config เปลี่ยนเป็น 0) ไม่มีเทสต์เดิมถูกแก้เงื่อนไข
+- e2e: ในโหมด 0 "S0" ของการตรวจเดิมนับจากแถว `NOT_SENT` ใน DB (= S0 ที่จะได้ส่ง) และเวลาวัดเป็น START→confirm
+  (ข้อความในตารางยังเขียนว่า "START→S0" ตามเดิม) · เพิ่มการตรวจ 2 แถวต่อข้อในโหมด 0 (ไม่แตะ CAMERA / outcome เหมือนโหมด 1)
+- **พบระหว่างทำ (สภาพแวดล้อม ไม่ใช่โค้ด)**: WSL 2.7.12 ปิด distro ที่ไม่มี `wsl.exe` ค้าง ~15s หลังคำสั่ง docker สุดท้าย →
+  ต่อ port 6380 จาก Windows ใหม่ไม่ได้ (connection เดิมยังอยู่ ข้อแรกผ่าน ข้อถัดไปต่อไม่ติด) → `redis_e2e.redis_up()` ค้าง
+  `wsl -d Ubuntu -- sleep infinity` ไว้ตลอดการทดสอบ (`redis_down()` ปิด) — docker_smoke ใช้ร่วมด้วย
