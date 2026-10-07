@@ -27,7 +27,7 @@ def _int(key, default):
     try:
         return int(raw)
     except ValueError:
-        raise SystemExit(f"❌ .env: {key}={raw!r} ต้องเป็นจำนวนเต็ม")
+        raise SystemExit(f".env: {key}={raw!r} must be an integer")
 
 
 def _float(key, default):
@@ -35,7 +35,7 @@ def _float(key, default):
     try:
         return float(raw)
     except ValueError:
-        raise SystemExit(f"❌ .env: {key}={raw!r} ต้องเป็นตัวเลข")
+        raise SystemExit(f".env: {key}={raw!r} must be a number")
 
 
 def _bool(key, default):
@@ -72,9 +72,9 @@ HEADLESS = _bool("HEADLESS", True)
 #   (โหมด redis + HEADLESS=0 ก็กด s/x ได้เช่นกัน)
 CONTROL_MODE = _str("CONTROL_MODE", "redis").lower()
 if CONTROL_MODE not in ("redis", "keyboard"):
-    raise SystemExit(f"❌ .env: CONTROL_MODE={CONTROL_MODE!r} ต้องเป็น redis หรือ keyboard")
+    raise SystemExit(f".env: CONTROL_MODE={CONTROL_MODE!r} must be redis or keyboard")
 if CONTROL_MODE == "keyboard" and HEADLESS:
-    raise SystemExit("❌ .env: CONTROL_MODE=keyboard ต้องใช้คู่กับ HEADLESS=0 (ต้องมีหน้าต่างให้กดปุ่ม)")
+    raise SystemExit(".env: CONTROL_MODE=keyboard requires HEADLESS=0 (needs a window for the keys)")
 
 # Redis ของ controller (อยู่บนบอร์ดเดียวกัน) — ชื่อ key / DB ต้องตรงกับโปรแกรมเก่า
 #   Docker ใช้ network_mode: host จึงใช้ 127.0.0.1 ได้เหมือนรันตรง
@@ -237,7 +237,7 @@ SEND_INTERVAL = _float("SEND_INTERVAL", 60)
 #   ↓ ประหยัดเน็ต (q60 ≈ 30KB) | ↑ ภาพชัด (q95 ≈ 94KB)
 REALTIME_JPEG_QUALITY = _int("REALTIME_JPEG_QUALITY", 80)
 if not 1 <= REALTIME_JPEG_QUALITY <= 100:
-    raise SystemExit(f"❌ .env: REALTIME_JPEG_QUALITY={REALTIME_JPEG_QUALITY} ต้องอยู่ระหว่าง 1-100")
+    raise SystemExit(f".env: REALTIME_JPEG_QUALITY={REALTIME_JPEG_QUALITY} must be between 1-100")
 
 # ดึง ROI จาก server ทุกกี่วินาที / เช็คไฟล์ ROI ในเครื่องว่าเปลี่ยนไหมทุกกี่วินาที
 ROI_POLL_INTERVAL = _float("ROI_POLL_INTERVAL", 10)
@@ -266,7 +266,7 @@ try:
 
     ZoneInfo(COUNT_TIMEZONE)
 except Exception:
-    raise SystemExit(f"❌ .env: COUNT_TIMEZONE={COUNT_TIMEZONE!r} ไม่รู้จัก (ต้องติดตั้ง tzdata)")
+    raise SystemExit(f".env: COUNT_TIMEZONE={COUNT_TIMEZONE!r} unknown (tzdata must be installed)")
 
 # โฟลเดอร์ log ยอดรายวัน (1 ไฟล์ต่อวัน: YYYY-MM-DD.log)
 DAILY_LOG_DIR = _str("DAILY_LOG_DIR", "logs/item_drops")
@@ -318,20 +318,20 @@ def cloud_summary(features=None):
     """1 บรรทัดสรุปฟีเจอร์ cloud ที่เปิด/ปิด (log ตอน startup)"""
     f = cloud_features() if features is None else features
     if not CLOUD_ENABLED:
-        return "☁️ Cloud: ปิดทั้งหมด (CLOUD_ENABLED=0) — ไม่มี HTTP"
+        return "cloud: all off (CLOUD_ENABLED=0) - no HTTP"
     if not CLOUD_API_URL:
-        return "☁️ Cloud: ปิดทั้งหมด — CLOUD_ENABLED=1 แต่ไม่ได้ตั้ง CLOUD_API_URL"
+        return "cloud: all off - CLOUD_ENABLED=1 but CLOUD_API_URL is not set"
 
     def onoff(key, detail=""):
-        return f"เปิด{detail}" if f[key] else "ปิด"
+        return f"on{detail}" if f[key] else "off"
 
     return (
-        "☁️ Cloud: "
+        "cloud: "
         f"register={onoff('register')}, "
-        f"ROI sync={onoff('roi_sync', f' (ทุก {ROI_POLL_INTERVAL:g}s)')}, "
-        f"ภาพสด={onoff('realtime', f' (ทุก {SEND_INTERVAL:g}s q{REALTIME_JPEG_QUALITY})')}, "
+        f"ROI sync={onoff('roi_sync', f' (every {ROI_POLL_INTERVAL:g}s)')}, "
+        f"live image={onoff('realtime', f' (every {SEND_INTERVAL:g}s q{REALTIME_JPEG_QUALITY})')}, "
         f"ITEM_LANDED={onoff('events')}, "
-        f"anomaly={'เปิด (ยังไม่ส่งจริง)' if f['anomaly'] else 'ปิด'}"
+        f"anomaly={'on (not uploaded yet)' if f['anomaly'] else 'off'}"
     )
 # ยกเลิกแล้ว (ไม่มีผล)
 _REMOVED_KEYS = ("ANOMALY_MIN_INTERVAL_SEC", "ANOMALY_MAX_PER_HOUR")
@@ -348,18 +348,18 @@ def inactive_warnings(environ=None):
     cloud = env.get("CLOUD_ENABLED", "0").strip().strip('"').strip("'") in ("1", "true", "True", "yes")
     mode = (env.get("CONTROL_MODE") or "redis").strip().strip('"').strip("'").lower()
     groups = [
-        (_ORDER_ONLY_KEYS, "ระบบ order เดิม ไม่ใช้ในโหมด START–STOP"),
-        (_REMOVED_KEYS, "ยกเลิกแล้ว: ภาพ anomaly ไม่จำกัดความถี่ ใช้ ANOMALY_MAX_PER_DAY แทน"),
+        (_ORDER_ONLY_KEYS, "old order system, not used in START-STOP mode"),
+        (_REMOVED_KEYS, "removed: anomaly images have no rate limit, use ANOMALY_MAX_PER_DAY"),
     ]
     if not cloud:
-        groups.append((_CLOUD_ONLY_KEYS, "มีผลเฉพาะ CLOUD_ENABLED=1"))
+        groups.append((_CLOUD_ONLY_KEYS, "only used with CLOUD_ENABLED=1"))
     if mode != "redis":
-        groups.append((_REDIS_ONLY_KEYS, "มีผลเฉพาะ CONTROL_MODE=redis"))
+        groups.append((_REDIS_ONLY_KEYS, "only used with CONTROL_MODE=redis"))
     out = []
     for keys, why in groups:
         found = [k for k in keys if env.get(k, "").strip()]
         if found:
-            out.append(f"⚠️ .env: {', '.join(found)} ไม่มีผล ({why}) — ลบออกหรือใส่ # ได้")
+            out.append(f".env: {', '.join(found)} has no effect ({why}) - remove it or comment it out with #")
     return out
 
 
@@ -368,7 +368,7 @@ _SECRET_KEYS = {"API_KEY", "REDIS_PASSWORD"}
 
 
 def summary() -> str:
-    lines = ["⚙️  Active config:"]
+    lines = ["active config:"]
     for k, v in globals().items():
         if k.isupper() and not k.startswith("_"):
             shown = "***" if (k in _SECRET_KEYS and v) else v

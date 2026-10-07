@@ -24,7 +24,7 @@ def clear_pending_order():
     global _pending_order
     with _lock:
         _pending_order = None
-        logger.info("🧹 pending_order cleared")
+        logger.info("pending_order cleared")
 
 
 def _on_message(ws, message):
@@ -47,14 +47,14 @@ def _on_message(ws, message):
         if _pending_order is not None:
             # มี order ค้างอยู่ → reject (Phase 4 จะส่งกลับ server ด้วย)
             logger.warning(
-                f"⚠️ มี order #{_pending_order['id']} ค้างอยู่ "
-                f"→ reject order #{order.get('id')} ทิ้ง"
+                f"order #{_pending_order['id']} still pending "
+                f"-> reject order #{order.get('id')}"
             )
             return
 
         _pending_order = order
         logger.info(
-            f"📦 รับ order #{order.get('id')} " f"qty={order.get('qty')} จาก server"
+            f"order #{order.get('id')} received " f"qty={order.get('qty')} from server"
         )
 
 
@@ -63,11 +63,11 @@ def _on_error(ws, error):
 
 
 def _on_close(ws, close_status_code, close_msg):
-    logger.warning("WebSocket ปิดการเชื่อมต่อ")
+    logger.warning("WebSocket connection closed")
 
 
 def _on_open(ws):
-    logger.info(f"✅ WebSocket เชื่อมต่อสำเร็จ → {WS_URL}")
+    logger.info(f"WebSocket connected -> {WS_URL}")
 
 
 def _run_forever():
@@ -84,7 +84,7 @@ def _run_forever():
             ws.run_forever()
         except Exception as e:
             logger.warning(f"WebSocket exception: {e}")
-        logger.info(f"🔄 reconnect ใน {WS_RECONNECT_SEC}s...")
+        logger.info(f"reconnect in {WS_RECONNECT_SEC}s...")
         time.sleep(WS_RECONNECT_SEC)
 
 
@@ -92,4 +92,4 @@ def start_order_listener():
     """เรียกจาก main.py ตอน startup — รัน background thread"""
     t = threading.Thread(target=_run_forever, daemon=True)
     t.start()
-    logger.info("🚀 order_listener thread started")
+    logger.info("order_listener thread started")

@@ -53,13 +53,13 @@ def _cleanup_once(image_dir=EVIDENCE_DIR, now=None, protected=()):
                     os.remove(fpath)
                     removed += 1
             except Exception as e:
-                logger.warning(f"ลบไฟล์ไม่ได้ {fpath}: {e}")
+                logger.warning(f"cannot delete file {fpath}: {e}")
     if kept:
-        logger.info(f"🧹 Disk cleanup: เก็บภาพเก่า {kept} ไฟล์ไว้ก่อน (ยังรอส่งขึ้นเว็บ)")
+        logger.info(f"disk cleanup: kept {kept} old image(s) (still waiting in upload outbox)")
     if removed:
         logger.info(
-            f"🧹 Disk cleanup: ลบ {removed} ไฟล์ "
-            f"(ภาพทั่วไปเก่ากว่า {CLEANUP_KEEP_DAYS} วัน / anomaly เก่ากว่า {ANOMALY_KEEP_DAYS} วัน)"
+            f"disk cleanup: deleted {removed} file(s) "
+            f"(images older than {CLEANUP_KEEP_DAYS} days / anomaly images older than {ANOMALY_KEEP_DAYS} days)"
         )
     return removed
 
@@ -73,7 +73,7 @@ def start_cleanup_thread(protected_paths=None):
             try:
                 protected = protected_paths() if protected_paths else ()
             except Exception as e:
-                logger.warning(f"⚠️ Disk cleanup: อ่านรายการภาพที่รอส่งไม่ได้ ({e}) → ข้ามรอบนี้")
+                logger.warning(f"disk cleanup: cannot read pending upload images ({e}) -> skip this run")
             else:
                 _cleanup_once(protected=protected)
             time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
@@ -81,6 +81,6 @@ def start_cleanup_thread(protected_paths=None):
     t = threading.Thread(target=_loop, daemon=True, name="disk-cleanup")
     t.start()
     logger.info(
-        f"🧹 Disk cleanup thread เริ่มแล้ว (เก็บภาพ {CLEANUP_KEEP_DAYS} วัน, anomaly {ANOMALY_KEEP_DAYS} วัน, "
-        f"cleanup ทุก {CLEANUP_INTERVAL_HOURS} ชม.)"
+        f"disk cleanup thread started (keep images {CLEANUP_KEEP_DAYS} days, anomaly images {ANOMALY_KEEP_DAYS} days, "
+        f"every {CLEANUP_INTERVAL_HOURS} h)"
     )

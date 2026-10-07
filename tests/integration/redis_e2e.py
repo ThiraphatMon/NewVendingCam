@@ -351,6 +351,17 @@ def env_clip_times(m, names):
     return out
 
 
+def non_ascii_lines(workdir):
+    """S20: ทุกบรรทัดที่ main.py พิมพ์ (stdout/stderr + logs/vending.log) ต้องเป็น ASCII — คืนบรรทัดที่ผิด"""
+    bad = []
+    for rel in ("stdout.txt", os.path.join("logs", "vending.log")):
+        path = os.path.join(workdir, rel)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                bad += [l.decode("utf-8", "replace") for l in f.read().splitlines() if any(b > 0x7F for b in l)]
+    return bad
+
+
 def outcomes(workdir):
     return [o for _, o, _ in cycles(workdir)]
 
@@ -447,8 +458,8 @@ def sc4(r, m, wd, rep):
               f"alive={alive}, S0 {s0s(rr)} ({lat}), ยอด {count(wd)}, response={states}",
               alive and m.alive() and s0s(rr) == 1 and count(wd) == 1)
     rep.check(4, "outcome", "CONFIRMED", ",".join(outcomes(wd)), outcomes(wd) == ["CONFIRMED"])
-    rep.check(4, "log เชื่อม Redis คืน", "มี", f"{len(m.grep('เชื่อม Redis สำเร็จ'))} ครั้ง",
-              len(m.grep("เชื่อม Redis สำเร็จ")) >= 2)
+    rep.check(4, "log เชื่อม Redis คืน", "มี", f"{len(m.grep('Redis connected'))} ครั้ง",
+              len(m.grep("Redis connected")) >= 2)
 
 
 def sc5(r, m, wd, rep):
@@ -515,7 +526,7 @@ def sc8(r, m, wd, rep):
     push(r, "STOP")
     time.sleep(0.5)
     m.poll_log()
-    keys = ("FROZEN", "UNFROZEN", "เฝ้าดู", "เปิดรอบ", "ปิดรอบ", "ANOMALY", "ยืนยันสินค้า")
+    keys = ("frozen", "unfrozen", "watch", "cycle opened", "cycle closed", "anomaly image", "item confirmed")
     for line in m.lines[mark:]:
         if any(k in line for k in keys):
             rep.note(f"[8] {line.strip()}")
@@ -538,14 +549,14 @@ def _buy_again(r, m, wd, rep, sc, t_start2):
     seen = None
     while True:
         ct = m.wait_clip(m.clip_time() + 0.02, loop=1)
-        if seen is None and m.grep("env change สงบแล้ว"):
+        if seen is None and m.grep("env change settled"):
             seen = ct
         if ct >= 12.5:
             break
     push(r, "STOP")
     time.sleep(0.5)
-    starts = m.grep("FROZEN [START")
-    bg2 = starts[1].split("—", 1)[-1].strip() if len(starts) > 1 else "-"
+    starts = m.grep("cycle opened (background:")
+    bg2 = starts[1].split("background:", 1)[-1].strip() if len(starts) > 1 else "-"
     rep.note(f"[{sc}] START รอบ 2 @{t_start2}: {bg2[:60]}; ตั้งพื้นหลังใหม่ครั้งแรกที่ clip "
              + (f"{seen:.2f}s" if seen else "- (ไม่มี)"))
     rep.check(sc, f"ซื้อต่อ: START รอบ 2 @{t_start2} → STOP @12.5", "S0 1, ยอด 1, CONFIRMED,UNCONFIRMED",
@@ -557,23 +568,23 @@ def _buy_again(r, m, wd, rep, sc, t_start2):
 def sc8b(r, m, wd, rep):
     # START ตอน slat ยังเปิด → พื้นหลัง = เฟรมปัจจุบัน → slat ปิด (~10.6s) → ตั้งพื้นหลังใหม่
     bg2, seen = _buy_again(r, m, wd, rep, "8b", 9.0)
-    rep.check("8b", "พื้นหลังรอบ 2 + ตั้งพื้นหลังใหม่หลัง slat ปิด", "เฟรมปัจจุบัน, ตั้งใหม่ ≥10.0s",
-              f"{'เฟรมปัจจุบัน' if 'เฟรมปัจจุบัน' in bg2 else bg2[:30]}, "
+    rep.check("8b", "พื้นหลังรอบ 2 + ตั้งพื้นหลังใหม่หลัง slat ปิด", "current frame, ตั้งใหม่ ≥10.0s",
+              f"{'current frame' if 'current frame' in bg2 else bg2[:30]}, "
               + (f"ตั้งใหม่ที่ {seen:.2f}s" if seen else "ไม่ตั้งใหม่"),
-              "เฟรมปัจจุบัน" in bg2 and seen is not None and seen >= 10.0)
+              "current frame" in bg2 and seen is not None and seen >= 10.0)
 
 
 def sc8c(r, m, wd, rep):
     # START หลังถาดนิ่งแล้ว → ใช้ clean_bg (ถาดว่าง)
     bg2, _ = _buy_again(r, m, wd, rep, "8c", 11.0)
-    rep.check("8c", "พื้นหลังรอบ 2", "clean_bg", bg2[:40], "ใช้ clean_bg" in bg2)
+    rep.check("8c", "พื้นหลังรอบ 2", "empty-tray (clean_bg)", bg2[:40], "empty-tray" in bg2)
 
 
 def sc7b(r, m, wd, rep):
     # ข้อ 7 แบบปิดการตั้งพื้นหลังใหม่หลัง env change สงบ → ต้องผ่านด้วยการแยกหยิบออก/ใส่เข้า (core/removal.py) อย่างเดียว
     sc7(r, m, wd, rep)
     rep.rows[-1] = ("7b",) + rep.rows[-1][1:]
-    lines = m.grep("ดูเหมือนหยิบออก") + m.grep("ไม่แน่ใจว่าหยิบออก")
+    lines = m.grep("-> item removed") + m.grep("-> uncertain")
     rep.note("[7b] " + (lines[0].split("vending.main: ", 1)[-1] if lines else "ไม่มี log หยิบออก"))
     rep.check("7b", "จับได้ว่าเป็นการหยิบออก", "POSSIBLE_REMOVAL", ",".join(anomaly_kinds(wd)),
               "POSSIBLE_REMOVAL" in anomaly_kinds(wd))
@@ -629,9 +640,9 @@ def main():
             try:
                 SCENARIOS[sc](r, m, wd, rep)
                 starts = []
-                for line in m.grep("FROZEN [START"):
-                    age = re.search(r"อายุ (\d+\.\d+)s", line)
-                    starts.append(f"clean_bg {age.group(1)}s" if age else "เฟรมปัจจุบัน")
+                for line in m.grep("cycle opened (background:"):
+                    age = re.search(r"age (\d+\.\d+)s", line)
+                    starts.append(f"clean_bg {age.group(1)}s" if age else "current frame")
                 rep.note(f"[{sc}] พื้นหลังของแต่ละ START: {starts or '-'}; anomaly={anomaly_kinds(wd)}")
                 env_imgs = anomaly_images(wd, "ENV_CHANGE")
                 rep.note(f"[{sc}] ENV_CHANGE: ภาพ {len(env_imgs)} ภาพ "
@@ -658,6 +669,9 @@ def main():
                 m.kill()
                 r = test_redis()
             results[(send, sc)] = outcomes(wd)
+            bad = non_ascii_lines(wd)
+            rep.check(sc, "log ASCII ล้วน (stdout + vending.log)", "0 บรรทัดที่มีอักขระ > 0x7F",
+                      f"{len(bad)} บรรทัด" + (f" เช่น {bad[0][:80]!r}" if bad else ""), not bad)
             time.sleep(0.3)  # ให้ MONITOR อ่านคำสั่งสุดท้ายทัน
             writes = mon.take()
             if not send:

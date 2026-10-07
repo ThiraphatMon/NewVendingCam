@@ -128,7 +128,7 @@ class StateStore:
             conn.row_factory = sqlite3.Row
             ok = conn.execute("PRAGMA quick_check").fetchone()[0]
             if ok != "ok":
-                raise StateStoreError(f"DB เสีย (quick_check: {ok})")
+                raise StateStoreError(f"DB corrupted (quick_check: {ok})")
             conn.execute("PRAGMA journal_mode=WAL")
             # FULL: เขียนน้อยมาก (ไม่กี่ครั้งต่อรอบ) จึงเลือกความทนไฟดับมากกว่าความเร็ว
             conn.execute("PRAGMA synchronous=FULL")
@@ -141,14 +141,14 @@ class StateStore:
                 conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise StateStoreError(
-                    f"schema version {version} ไม่ตรงกับโปรแกรม ({SCHEMA_VERSION})"
+                    f"schema version {version} does not match program ({SCHEMA_VERSION})"
                 )
             conn.executescript(_OUTBOX_SCHEMA)
             return conn
         except StateStoreError as e:
-            raise StateStoreError(f"❌ เปิด state DB ไม่ได้ ({self.path}): {e}") from e
+            raise StateStoreError(f"cannot open state DB ({self.path}): {e}") from e
         except (sqlite3.Error, OSError) as e:
-            raise StateStoreError(f"❌ เปิด state DB ไม่ได้ ({self.path}): {e}") from e
+            raise StateStoreError(f"cannot open state DB ({self.path}): {e}") from e
 
     def close(self):
         self.conn.close()
@@ -222,7 +222,7 @@ class StateStore:
                 "SELECT closed_at_utc FROM cycles WHERE cycle_id=?", (cycle_id,)
             ).fetchone()
             if row is None or row["closed_at_utc"] is not None:
-                raise sqlite3.IntegrityError(f"รอบ {cycle_id} ไม่ได้เปิดอยู่")
+                raise sqlite3.IntegrityError(f"cycle {cycle_id} is not open")
             seq = self.conn.execute(
                 "SELECT COALESCE(MAX(daily_sequence), 0) + 1 FROM confirmations "
                 "WHERE machine_id=? AND local_date=?",

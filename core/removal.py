@@ -42,9 +42,11 @@ class Verdict:
     diff_base: float      # ค่าเฉลี่ย |ปัจจุบัน − พื้นหลังของรอบ| ใน patch
     diff_history: float   # ค่าเฉลี่ย |ปัจจุบัน − ฉากก่อนหน้าที่ใกล้สุด| (inf = ไม่มีฉากให้เทียบ)
 
-    def describe(self):
+    def describe(self, edge_threshold=None):
+        """ข้อความ log (ASCII) เช่น edge_ratio=1.12 (threshold 0.60), diff_bg=77.5, diff_prev=12.0"""
         hist = "-" if self.diff_history == float("inf") else f"{self.diff_history:.1f}"
-        return f"ขอบ ×{self.edge_ratio:.2f}, ต่างจากพื้นหลังรอบ {self.diff_base:.1f}, ต่างจากฉากก่อนหน้า {hist}"
+        thr = "" if edge_threshold is None else f" (threshold {edge_threshold:.2f})"
+        return f"edge_ratio={self.edge_ratio:.2f}{thr}, diff_bg={self.diff_base:.1f}, diff_prev={hist}"
 
 
 # ขยายกล่องออกทุกด้าน (px) ให้ขอบของวัตถุอยู่ใน patch เสมอ

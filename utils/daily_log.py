@@ -34,7 +34,7 @@ def append(log_dir, conf):
             f.flush()
             os.fsync(f.fileno())
     except OSError as e:
-        logger.error(f"❌ เขียน daily log ไม่ได้ ({conf.local_date} #{conf.daily_sequence}): {e}")
+        logger.error(f"cannot write daily log ({conf.local_date} #{conf.daily_sequence}): {e}")
 
 
 def rebuild(log_dir, store, local_date):
@@ -53,5 +53,5 @@ def rebuild(log_dir, store, local_date):
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except OSError as e:
-        logger.error(f"❌ สร้าง daily log ใหม่ไม่ได้ ({path}): {e}")
+        logger.error(f"cannot rebuild daily log ({path}): {e}")
     return len(confs)

@@ -64,6 +64,8 @@ EXTRA_AFTER_CONFIRM = "EXTRA_AFTER_CONFIRM"  # ยืนยันแล้ว �
 NO_CONFIRM_AT_CLOSE = "NO_CONFIRM_AT_CLOSE"  # ปิดรอบโดยไม่ได้ยืนยัน
 POSSIBLE_REMOVAL = "POSSIBLE_REMOVAL"        # รอบ ACTIVE: วัตถุนิ่งที่ดูเหมือนของถูกหยิบออก → ไม่ยืนยัน
 ENV_CHANGE = "ENV_CHANGE"                    # env change (ก้อนใหญ่เกิน MAX_BLOB_ROI_RATIO) — 1 ภาพต่อเหตุการณ์ ทุก state
+# เหตุที่ปิดรอบ (ClosedCycle.reason ส่วนแรก) → ข้อความ log
+_CLOSE_TRIGGERS = {"stop": "STOP received", "next_start": "next START received", "timeout": "cycle timeout"}
 _ANOMALY_LABELS = {
     OUTSIDE_CYCLE: "OUTSIDE CYCLE",
     EXTRA_AFTER_CONFIRM: "SUSPICIOUS (extra after confirm)",
@@ -168,13 +170,13 @@ class App:
         if interrupted:
             short = ", ".join(c[:8] for c in interrupted)
             logger.warning(
-                f"♻️ พบรอบค้างจากก่อน restart ({short}) → บันทึกเป็น INTERRUPTED "
-                f"(ไม่ส่ง S0 ของรอบเก่า) แล้วเริ่มที่ WAIT_START"
+                f"interrupted (program restarted): open cycle(s) {short} closed as INTERRUPTED "
+                f"(no S0 for old cycles) -> WAIT_START"
             )
         # [DAILY LOG] สร้างไฟล์ของวันนี้ใหม่จาก DB (ซ่อมบรรทัดที่ขาด/ซ้ำหลัง crash)
         today = store.today()
         n = daily_log.rebuild(self.daily_log_dir, store, today)
-        logger.info(f"📊 ยอดวันนี้ ({today}) = {self.today_count} (daily log {n} บรรทัด)")
+        logger.info(f"today's count ({today}) = {self.today_count} (daily log {n} lines)")
 
     # ── 1 iteration ─────────────────────────────────────────────────────────
     def step(self):
@@ -205,7 +207,7 @@ class App:
             return None, None, {}
         if self.camera_ok is not True:
             if self.camera_ok is False:
-                logger.info("📷 กล้องกลับมาแล้ว")
+                logger.info("camera back (frames received again)")
             self.camera_ok = True
 
         if self.cloud is not None and self.cloud.realtime_due(now):
@@ -264,13 +266,13 @@ class App:
                     result = self.cm.on_start(mono)
                 else:
                     result = self.cm.on_stop(mono)
-                logger.info(f"📥 {ev.text} (#{ev.seq} จาก {ev.source})")
+                logger.info(f"{ev.text} received (#{ev.seq} from {ev.source})")
                 self._apply(result, now)
             elif isinstance(ev, LinkStatus):
                 self.redis_up = ev.up
                 if not ev.up and self.cm.is_open():
                     self.cm.on_redis_gap()
-                    logger.warning(f"⚠️ Redis ขาดระหว่างรอบ {self.cm.cycle_id[:8]} ({ev.error})")
+                    logger.warning(f"[cycle {self.cm.cycle_id[:8]}] Redis disconnected during cycle ({ev.error})")
             elif isinstance(ev, SendResult):
                 self._on_send_result(ev)
 
@@ -281,16 +283,19 @@ class App:
         try:
             self.store.set_response_state(ev.cycle_id, state, ev.error or None)
         except sqlite3.Error as e:
-            logger.error(f"❌ บันทึกสถานะ S0 ({state}) ไม่ได้: {e}")
+            logger.error(f"cannot save S0 state ({state}) to DB: {e}")
         if state != "ENQUEUED":
-            logger.warning(f"📤 S0 ของรอบ {ev.cycle_id[:8]} → {state} {ev.error}")
+            logger.warning(f"[cycle {ev.cycle_id[:8]}] S0 -> {state} {ev.error}")
 
     def _apply(self, result, now):
         """ทำ I/O ตามผลของ CycleMachine (ปิดรอบก่อนเปิดรอบใหม่เสมอ)"""
         if result.anomaly:
-            logger.warning(f"⚠️ [{result.anomaly}] {result.note}")
+            prefix = f"[cycle {self.cm.cycle_id[:8]}] " if self.cm.cycle_id else ""
+            logger.warning(f"{prefix}[{result.anomaly}] {result.note}")
+        elif result.note and not (result.closed or result.opened):
+            logger.info(result.note)
         elif result.note:
-            logger.info(f"🔁 {result.note}")
+            logger.debug(result.note)  # เปิด/ปิดรอบมี log ของตัวเองใน _on_opened / _on_closed
         if result.closed:
             self._on_closed(result.closed, now)
         if result.opened:
@@ -301,29 +306,34 @@ class App:
             self.store.open_cycle(cycle_id)
         except sqlite3.Error as e:
             # รอบนี้ยืนยันไม่ได้ (confirm จะหา cycle ใน DB ไม่เจอ) แต่ยังรับ STOP ได้ตามปกติ
-            logger.critical(f"❌ บันทึกรอบใหม่ลง DB ไม่ได้: {e}")
+            logger.critical(f"[cycle {cycle_id[:8]}] cannot save new cycle to DB: {e}")
 
         # [BG] ใช้พื้นหลังก่อน START ตรึงไว้ทั้งรอบ + ล้าง tracker (ห้ามพาวัตถุจากก่อน START มา)
         self.tracker.clear_all()
         if self.watch_since is not None:
             # START ระหว่างเฝ้าดูนอกรอบ: ไม่ใช้ bg ที่ freeze ไว้ตอนเริ่มเฝ้า (อาจเป็นฉากก่อนลูกค้าหยิบของ)
-            logger.info("👀 START ระหว่างเฝ้าดูนอกรอบ → เลิกเฝ้า ใช้ clean_bg ล่าสุด / เฟรมปัจจุบันเป็นพื้นหลังของรอบ")
+            logger.info(
+                f"[cycle {cycle_id[:8]}] START during outside-cycle watch -> stop watching, "
+                f"use latest empty-tray background / current frame as cycle background"
+            )
             self.watch_since = None
         if self.bg.bg is None or self.frame_gray is None:
             # ยังไม่มีพื้นหลังเลย (กล้องเพิ่งเริ่ม / หลุด) → ห้ามใช้เฟรมหลัง START เป็นพื้นหลัง
             self.cm.on_camera_lost()
-            logger.warning(f"⛔ รอบ {cycle_id[:8]}: ไม่มีพื้นหลังก่อน START → BLOCKED_WAIT_STOP")
+            desc = "none - no background before START -> BLOCKED_WAIT_STOP"
         else:
             self.bg.start_cycle(self.frame_gray, now, reason=f"START {cycle_id[:8]}")
+            desc = self.bg.start_desc
         self.cycle_t0 = now
         self.cycle_motion_at = None
-        logger.info(f"▶️ เปิดรอบ {cycle_id[:8]} (state={self.cm.state})")
+        log = logger.info if self.cm.state == cyc.ACTIVE else logger.warning
+        log(f"[cycle {cycle_id[:8]}] START received -> cycle opened (background: {desc})")
 
     def _on_closed(self, closed, now):
         try:
             self.store.close_cycle(closed.cycle_id, closed.outcome, closed.reason)
         except sqlite3.Error as e:
-            logger.critical(f"❌ บันทึกการปิดรอบลง DB ไม่ได้: {e}")
+            logger.critical(f"[cycle {closed.cycle_id[:8]}] cannot save cycle close to DB: {e}")
         # S0 ที่ยังไม่ได้ส่งของรอบนี้ห้ามส่งอีก
         self.controller.revoke(closed.cycle_id)
         if not closed.confirmed:
@@ -334,15 +344,19 @@ class App:
         if self.bg.frozen:
             self.bg.unfreeze(now)
         self.bg.invalidate_clean_bg()
-        logger.info(f"⏹️ ปิดรอบ {closed.cycle_id[:8]} → {closed.outcome} ({closed.reason})")
+        trigger, *gaps = closed.reason.split(";")
+        what = _CLOSE_TRIGGERS.get(trigger, trigger)
+        extra = f" ({', '.join(gaps)})" if gaps else ""
+        logger.info(f"[cycle {closed.cycle_id[:8]}] {what} -> cycle closed: {closed.outcome}{extra}")
 
     def _on_no_frame(self):
         if self.camera_ok is not False:
-            logger.warning("📷 ไม่มีเฟรมจากกล้อง")
+            logger.warning("camera disconnected (no frame from camera)")
         self.camera_ok = False
         if self.cm.on_camera_lost():
             logger.warning(
-                f"⛔ กล้องหลุดระหว่างรอบ {self.cm.cycle_id[:8]} → BLOCKED_WAIT_STOP (ไม่ยืนยันจนปิดรอบ)"
+                f"[cycle {self.cm.cycle_id[:8]}] camera disconnected during cycle -> BLOCKED_WAIT_STOP "
+                f"(no confirm until cycle closed)"
             )
         self.bg.clear()  # กล้องหลุด → เริ่ม background ใหม่
         self.tracker.clear_all()
@@ -359,13 +373,15 @@ class App:
             frame, image_saver.CONFIRMED, "CONFIRMED", cycle_id, base_dir=self.evidence_dir,
         )
         if path is None:
-            logger.error(f"❌ [EVIDENCE FAULT] รอบ {cycle_id[:8]}: บันทึกภาพไม่ได้ → ไม่ยืนยัน (ลองใหม่ถ้าของยังนิ่ง)")
+            logger.error(
+                f"[cycle {cycle_id[:8]}] [EVIDENCE FAULT] cannot save image -> not confirmed (retry if item still)"
+            )
             self.confirm_retry_at = now + CONFIRM_RETRY_SEC
             return
         try:
             conf = self.store.confirm(cycle_id, path, send_s0=self.send_s0)
         except sqlite3.Error as e:
-            logger.error(f"❌ [STORAGE FAULT] รอบ {cycle_id[:8]}: บันทึก DB ไม่ได้ ({e}) → ไม่ยืนยัน")
+            logger.error(f"[cycle {cycle_id[:8]}] [STORAGE FAULT] cannot save to DB ({e}) -> not confirmed")
             self.confirm_retry_at = now + CONFIRM_RETRY_SEC
             _remove_quietly(path)  # ภาพที่ไม่มี confirmation อ้างถึง
             return
@@ -383,10 +399,10 @@ class App:
         ms = (time.perf_counter() - t0) * 1000
         if obj is not None and self.cycle_t0 is not None:
             logger.info(self._timing_line(cycle_id, now, obj, s3_ms, ms))
-        s0 = "ส่ง S0" if self.send_s0 else "S0 NOT SENT (observe mode)"
+        s0 = "S0 requested" if self.send_s0 else "S0 NOT SENT (observe mode)"
         logger.info(
-            f"📸 ยืนยันสินค้า รอบ {cycle_id[:8]} — item confirmed, ยอดวันนี้ {conf.daily_sequence} "
-            f"(บันทึก {ms:.0f}ms) -> {s0}"
+            f"[cycle {cycle_id[:8]}] item confirmed, today's count {conf.daily_sequence} "
+            f"(saved in {ms:.0f}ms) -> {s0}"
         )
 
     def _timing_line(self, cycle_id, now, obj, s3_ms, save_ms):
@@ -414,18 +430,21 @@ class App:
         try:
             self.store.enqueue_cloud_event(event_id, conf.cycle_id, "ITEM_LANDED", payload, conf.evidence_path)
         except sqlite3.Error as e:
-            logger.error(f"❌ บันทึก ITEM_LANDED ลง outbox ไม่ได้ ({e}) → ไม่ส่งขึ้นเว็บ (ยอด/S0 ปกติ)")
+            logger.error(
+                f"[cycle {conf.cycle_id[:8]}] cannot add ITEM_LANDED to outbox ({e}) -> no upload (count/S0 not affected)"
+            )
             return
         self.cloud.notify_outbox()
 
     def _on_roi_changed(self, now):
         """ใช้ ROI ใหม่แล้ว (WAIT_START เท่านั้น) → ล้าง tracker / clean_bg / scene history ที่ผูกกับ ROI เดิม"""
         if self.watch_since is not None:
-            self._end_watch(now, "ROI เปลี่ยน")
+            self._end_watch(now, "ROI changed")
         self.tracker.clear_all()
         self.bg.forget_roi_history()
         logger.info(
-            f"🗺️ ใช้ ROI ใหม่ ({self.roi_manager.roi_type}) → ล้าง tracker / clean_bg / scene history ของ ROI เดิม"
+            f"new ROI applied ({self.roi_manager.roi_type}) -> cleared tracker / empty-tray background / "
+            f"scene history of old ROI"
         )
 
     def _rebaseline_settled_env(self, frame_gray, now):
@@ -437,8 +456,8 @@ class App:
         self.bg.rebaseline(frame_gray, now)
         self.tracker.clear_all()
         logger.info(
-            f"🔄 รอบ {self.cm.cycle_id[:8]}: env change สงบแล้ว (ROI นิ่ง {CLEAN_BG_STABLE_FRAMES} เฟรม) "
-            f"→ ตั้งพื้นหลังของรอบใหม่เป็นเฟรมนี้"
+            f"[cycle {self.cm.cycle_id[:8]}] env change settled (ROI still {CLEAN_BG_STABLE_FRAMES} frames) "
+            f"-> background reset to this frame"
         )
 
     def _looks_like_removal(self, obj, frame_gray):
@@ -457,20 +476,19 @@ class App:
         cycle = self.cm.cycle_id[:8]
         # log 1 บรรทัดทุกการตัดสิน (INFO ขึ้นไป) — เก็บค่าขอบ/เกณฑ์ตอนทดสอบสินค้าจริง
         detail = (
-            f"{v.describe()} | เกณฑ์: ขอบ < {REMOVAL_EDGE_RATIO:.2f} = ขอบลด, "
-            f"ฉากก่อนหน้า < {v.diff_base * REMOVAL_MATCH_RATIO:.1f} (พื้นหลังรอบ ×{REMOVAL_MATCH_RATIO:.2f}) = ตรง"
+            f"{v.describe(REMOVAL_EDGE_RATIO)}, diff_prev match < {v.diff_base * REMOVAL_MATCH_RATIO:.1f} "
+            f"(diff_bg x{REMOVAL_MATCH_RATIO:.2f})"
         )
         if v.kind == removal.ADDITION:
-            logger.info(f"🔍 รอบ {cycle}: S3={v.kind} candidate เป็นของใส่เข้า ({detail}) → ยืนยัน")
+            logger.info(f"[cycle {cycle}] S3={v.kind} {detail} -> item added -> confirm")
             return False
         if v.kind == removal.UNCERTAIN and REMOVAL_UNCERTAIN_SEND_S0:
             logger.warning(
-                f"🔍 รอบ {cycle}: S3={v.kind} ดูเหมือนหยิบออกแต่ไม่แน่ใจ ({detail}) "
-                f"→ ยืนยันตาม REMOVAL_UNCERTAIN_SEND_S0=1"
+                f"[cycle {cycle}] S3={v.kind} {detail} -> uncertain -> confirm anyway (REMOVAL_UNCERTAIN_SEND_S0=1)"
             )
             return False
-        why = "หยิบออก" if v.kind == removal.REMOVAL else "ไม่แน่ใจว่าหยิบออก (ไม่มีฉากก่อนหน้ายืนยัน)"
-        logger.warning(f"🔍 รอบ {cycle}: S3={v.kind} วัตถุนิ่งดูเหมือน{why} ({detail}) → ไม่ยืนยัน ไม่ส่ง S0")
+        why = "item removed" if v.kind == removal.REMOVAL else "uncertain (no previous scene to compare)"
+        logger.warning(f"[cycle {cycle}] S3={v.kind} {detail} -> {why} -> not confirmed, no S0")
         return True
 
     # ── เฝ้าดูนอกรอบ / anomaly ───────────────────────────────────────────────
@@ -483,16 +501,16 @@ class App:
         ต้องไม่มีวัตถุค้างด้วย ไม่งั้นของที่วางนิ่งจะเลิกเฝ้าก่อนครบเกณฑ์ OUTSIDE_CYCLE"""
         if self.watch_since is None:
             if is_motion_in_roi(tracked) and not self.bg.in_grace(now) and not self.bg.frozen:
-                self.bg.freeze(now, reason="เฝ้าดูนอกรอบ")
+                self.bg.freeze(now, reason="outside-cycle watch")
                 self.watch_since = now
             return
         if self.bg.roi_still() and not tracked:
-            self._end_watch(now, f"ROI นิ่งครบ {CLEAN_BG_STABLE_FRAMES} เฟรม")
+            self._end_watch(now, f"ROI still {CLEAN_BG_STABLE_FRAMES} frames")
         elif now - self.watch_since >= WATCH_TIMEOUT_SEC:
-            self._end_watch(now, f"เฝ้าครบ {WATCH_TIMEOUT_SEC:.0f}s")
+            self._end_watch(now, f"watched {WATCH_TIMEOUT_SEC:.0f}s")
 
     def _end_watch(self, now, why):
-        logger.info(f"👀 จบการเฝ้าดูนอกรอบ ({why}) → ปลด freeze")
+        logger.info(f"outside-cycle watch ended ({why}) -> background unfrozen")
         self.watch_since = None
         self.tracker.clear_all()
         self.bg.unfreeze(now)
@@ -536,7 +554,7 @@ class App:
             )
         return False
 
-    def _save_anomaly(self, kind, cycle_id, frame, why_no_image="ไม่มีเฟรม"):
+    def _save_anomaly(self, kind, cycle_id, frame, why_no_image="no frame"):
         path = None
         if frame is not None and not self._anomaly_image_allowed():
             why_no_image = f"ANOMALY_MAX_PER_DAY={ANOMALY_MAX_PER_DAY} reached"
@@ -550,9 +568,9 @@ class App:
         try:
             self.store.record_anomaly(kind, cycle_id, path)
         except sqlite3.Error as e:
-            logger.error(f"❌ บันทึก anomaly {kind} ลง DB ไม่ได้: {e}")
-        where = f"รอบ {cycle_id[:8]}" if cycle_id else "นอกรอบ"
-        logger.warning(f"🚩 ANOMALY {kind} ({where}) — ไม่นับยอด ภาพ: {path or f'ไม่มี ({why_no_image})'}")
+            logger.error(f"cannot save anomaly {kind} to DB: {e}")
+        where = f"[cycle {cycle_id[:8]}] " if cycle_id else "[outside cycle] "
+        logger.warning(f"{where}anomaly image {kind} (not counted): {path or f'none ({why_no_image})'}")
 
     def view(self):
         """ข้อมูลสำหรับ overlay"""
@@ -612,8 +630,8 @@ def main():
     parser.add_argument("--machine", type=str, default=MACHINE_ID)
     args = parser.parse_args()
 
-    logger.info(f"🖥️ ระบบทำงานในชื่อตู้: {args.machine}")
-    logger.info(f"🖥️ โหมด: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'} / คำสั่งจาก {CONTROL_MODE}")
+    logger.info(f"machine: {args.machine}")
+    logger.info(f"mode: {'HEADLESS (Pi)' if HEADLESS else 'DISPLAY (PC)'} / commands from {CONTROL_MODE}")
     logger.info(config.summary())
     logger.info(
         "S0 response: ENABLED (SEND_S0=1)" if SEND_S0 else "S0 response: DISABLED (observe mode, SEND_S0=0)"
@@ -625,7 +643,7 @@ def main():
         store = StateStore(STATE_DB_PATH, args.machine, COUNT_TIMEZONE)
     except StateStoreError as e:
         logger.critical(str(e))
-        raise SystemExit(f"{e}\n   → ห้ามลบไฟล์ DB เพื่อให้บูตผ่าน: สำรองไฟล์แล้วแจ้งผู้ดูแล")
+        raise SystemExit(f"{e}\n   -> do NOT delete the DB file to make it boot: back it up and contact the maintainer")
 
     controller = RedisController(
         lambda: make_client(
@@ -651,9 +669,9 @@ def main():
         cloud = CloudServices(args.machine, features, roi_path=ROI_CONFIG_PATH, db_path=STATE_DB_PATH).start()
     pending = store.count_pending_cloud_events()
     if pending and not features["events"]:
-        logger.warning(f"☁️ มี event ค้างใน outbox {pending} รายการ — ITEM_LANDED ปิดอยู่ จึงหยุดส่ง (ไม่ลบ)")
+        logger.warning(f"outbox has {pending} pending event(s) - ITEM_LANDED is off, upload paused (not deleted)")
     elif pending:
-        logger.info(f"☁️ มี event ค้างใน outbox {pending} รายการ → ส่งต่อ")
+        logger.info(f"outbox has {pending} pending event(s) -> continue upload")
 
     # เปิดหน้าต่างแบบปรับขนาดได้ (WINDOW_NORMAL) แทน AUTOSIZE ที่ล็อกขนาดตายตัว
     if not HEADLESS:
@@ -664,7 +682,7 @@ def main():
     app = App(args.machine, source, roi_manager, store, controller, headless=HEADLESS, cloud=cloud)
 
     def _shutdown(signum, _frame):
-        logger.info(f"🛑 ได้รับ signal {signum} → ปิดโปรแกรม")
+        logger.info(f"signal {signum} received -> shutting down")
         app.running = False
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -681,7 +699,7 @@ def main():
         store.close()
         if not HEADLESS:
             cv2.destroyAllWindows()
-        logger.info("👋 ปิดโปรแกรมแล้ว")
+        logger.info("program stopped")
 
 
 if __name__ == "__main__":

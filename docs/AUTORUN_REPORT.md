@@ -420,3 +420,35 @@ S3 ด้วย `REMOVAL_CHECK=0`, S4 ด้วย `STRICT_STABILITY=0`, cloud �
   - `test_evidence.py::test_extra_after_confirm_anomaly_rate_limited` → `..._one_image_per_item_no_rate_limit` (เดิม 1 แถว → 2 แถว 2 ภาพ)
   - `test_removal.py::test_possible_removal_recorded_even_when_over_image_quota`: ความหมายเดิม (เกินโควตา → แถว POSSIBLE_REMOVAL ไม่มีภาพ)
     คงไว้ แต่โควตามาจาก `ANOMALY_MAX_PER_DAY=1` (monkeypatch) แทน 30s
+
+### S20 — log ภาษาอังกฤษ ASCII ล้วน
+- ทุกข้อความที่ออก log/print ตอนรัน (main, core/*, utils/*, api/*, config startup summary / `.env` warnings / SystemExit)
+  → ภาษาอังกฤษง่าย ๆ ASCII ล้วน ไม่มีอีโมจิ/อักษรไทย/× · ข้อความเกี่ยวกับรอบขึ้นต้น `[cycle <id8>]` · ใช้คำตามตารางในโจทย์
+  (cycle opened/closed, item confirmed, item removed/uncertain/added, edge_ratio=, background / empty-tray background,
+  env change, still, duplicate START (ignored), cycle timeout, interrupted (program restarted), camera disconnected / stalled / reconnecting,
+  anomaly image, upload / outbox) · คอมเมนต์ / docstring / เอกสาร ยังเป็นไทย
+  - `api/order_listener.py` / `api/retry_queue.py` (ระบบเดิม ไม่ถูกเรียกในโหมด START–STOP) แปลด้วยให้ครบ
+- โครงที่เปลี่ยนเล็กน้อย (ข้อความเท่านั้น ไม่เปลี่ยนพฤติกรรม):
+  - เปิดรอบ = 1 บรรทัด `[cycle x] START received -> cycle opened (background: empty-tray, age 0.3s)`
+    (`BackgroundModel.start_cycle` เก็บคำอธิบายไว้ใน `start_desc`; บรรทัด background ของ START กรณีปกติลดเป็น DEBUG,
+    กรณีไม่แน่นอนยังเป็น WARNING ของตัวเอง)
+  - ปิดรอบ = `[cycle x] STOP received / next START received / cycle timeout -> cycle closed: <OUTCOME> (gap)`;
+    note ของ CycleMachine ที่ซ้ำกับบรรทัดเปิด/ปิดรอบลดเป็น DEBUG (note ที่ไม่มีรอบเปิด/ปิด เช่น STOP ขณะ WAIT_START ยัง INFO)
+  - `Verdict.describe(edge_threshold)` → `edge_ratio=1.12 (threshold 0.60), diff_bg=.., diff_prev=..`
+  - คงไว้: รหัส anomaly, `S3=...`, daily log `dd/mm/yyyy HH:MM:SS : item drop : N`, ชื่อไฟล์ภาพ, ข้อความบนภาพ
+- `docs/LOG_MESSAGES.md`: ตารางเทียบข้อความเดิม → ใหม่ ของรอบ, ยืนยัน, S3, S0, anomaly, พื้นหลัง/ROI, กล้อง, Redis, cloud, startup
+- เทสต์ใหม่ `tests/test_log_ascii.py` (+2): ไม่มี string literal non-ASCII (ยกเว้น docstring) ในโค้ดที่รันทุกไฟล์ +
+  log ทั้งรอบ (นอกรอบ, START ซ้ำ, ยืนยัน, ของเพิ่ม, STOP, กล้องหลุด) เป็น ASCII
+- e2e: ทุกสถานการณ์ตรวจ "log ASCII ล้วน" ทุกบรรทัดของ stdout + `logs/vending.log` (fail ถ้ามีไบต์ > 0x7F)
+- pytest **185 passed** · redis_e2e **ผ่านทุกข้อทั้ง 2 โหมด (88/88)** — log ASCII 22/22 รัน, START→S0 2.31–2.35s
+- **จุดที่แก้เทสต์ (เฉพาะข้อความที่ค้นหา — ความหมายเดิม)**:
+  - `test_evidence.py`: `ใช้ clean_bg (อายุ` → `empty-tray background (age`, `baseline ไม่แน่นอน` → `background uncertain`,
+    `env change สงบแล้ว` → `env change settled` (3 จุด)
+  - `test_removal.py`: `ดูเหมือนหยิบออก` → `-> item removed`, `ไม่แน่ใจว่าหยิบออก` → `-> uncertain`,
+    ข้อความ S3 ADDITION: `ขอบ ×` / `ขอบ < 0.60` / `→ ยืนยัน` → `edge_ratio=` / `(threshold 0.60)` / `-> item added -> confirm`
+  - `test_frame_source.py`: `กล้องค้าง` → `camera stalled` · `test_roi_sync.py`: `พบ ROI ใหม่ระหว่างรอบ` → `new ROI found during cycle`,
+    `ใช้ ROI ใหม่ (rect)` → `new ROI applied (rect)` · `test_state_store.py`: `เปิด state DB ไม่ได้` → `cannot open state DB`
+  - `test_cloud.py`: `ปิดทั้งหมด` → `all off`, `register=เปิด` / `ภาพสด=เปิด (ทุก 300s q80)` / `=ปิด` → `register=on` / `live image=on (every 300s q80)` / `=off`
+  - `redis_e2e.py`: `เชื่อม Redis สำเร็จ` → `Redis connected` (ข้อ 4), `FROZEN [START` + `อายุ` → `cycle opened (background:` + `age`,
+    `เฟรมปัจจุบัน` → `current frame` (8b), `ใช้ clean_bg` → `empty-tray` (8c), `env change สงบแล้ว` → `env change settled` (8b),
+    7b `ดูเหมือนหยิบออก`/`ไม่แน่ใจว่าหยิบออก` → `-> item removed`/`-> uncertain`, คำค้น log ของข้อ 8 เป็นอังกฤษ

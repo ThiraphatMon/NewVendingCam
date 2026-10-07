@@ -36,11 +36,11 @@ def test_roi_change_during_active_waits_until_wait_start(make_app, env, caplog):
     write_roi(env, NEW_RECT)
     run_frames(app, env, empty_frame(), 10)
     assert app.cm.state == cyc.ACTIVE and env.roi.rect == ROI_RECT
-    assert caplog.text.count("พบ ROI ใหม่ระหว่างรอบ") == 1  # log ครั้งเดียว ไม่ทุกเฟรม
+    assert caplog.text.count("new ROI found during cycle") == 1  # log ครั้งเดียว ไม่ทุกเฟรม
     ctl.push("STOP")
     run_frames(app, env, empty_frame(), 1)
     assert app.cm.state == cyc.WAIT_START and env.roi.rect == NEW_RECT
-    assert "ใช้ ROI ใหม่ (rect)" in caplog.text
+    assert "new ROI applied (rect)" in caplog.text
 
 
 def test_roi_change_in_confirmed_wait_stop_waits_and_confirm_unaffected(make_app, env):

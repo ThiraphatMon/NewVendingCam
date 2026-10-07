@@ -73,7 +73,7 @@ class FrameSource:
         if not fps or fps <= 0 or fps != fps:  # 0 / ค่าผิด / NaN
             fps = 30.0
         if self.is_video_file and self.open_count == 1:
-            logger.info(f"🎞️ Video file @ {fps:.2f} FPS → pacing playback ตามเวลาจริง")
+            logger.info(f"video file @ {fps:.2f} FPS -> real-time playback pacing")
         return 1.0 / fps
 
     def _reader(self, gen):
@@ -87,13 +87,13 @@ class FrameSource:
                 if not self._alive(gen):
                     break
                 if not ret:
-                    logger.warning("⚠️ กล้องหลุด กำลัง reconnect...")
+                    logger.warning("camera disconnected -> reconnecting...")
                     self._mark_down()
                     break
                 if first:
                     first = False
                     # log เวลาเฟรมแรกหลังเปิด (ใช้ sync เวลาคลิปใน integration test)
-                    logger.debug(f"🎬 เฟรมแรกหลังเปิด source FIRST_FRAME t={time.time():.3f}")
+                    logger.debug(f"first frame after opening source FIRST_FRAME t={time.time():.3f}")
                 if frame.shape[1] != FRAME_W or frame.shape[0] != FRAME_H:
                     frame = cv2.resize(frame, (FRAME_W, FRAME_H))
                 with self._cond:
@@ -145,7 +145,9 @@ class FrameSource:
             stalled_for = time.time() - self._last_frame_at
         if stalled_for < self.stall_sec:
             return NO_NEW_FRAME
-        logger.warning(f"📷 กล้องค้าง: ไม่มีเฟรมใหม่ {stalled_for:.1f}s (เกิน CAMERA_STALL_SEC) → เปิดกล้องใหม่")
+        logger.warning(
+                        f"camera stalled (no new frame) for {stalled_for:.1f}s (over CAMERA_STALL_SEC) -> reconnecting"
+                    )
         self._mark_down()
         self._start_reader()
         return None

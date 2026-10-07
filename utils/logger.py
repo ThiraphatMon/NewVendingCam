@@ -70,7 +70,7 @@ class LogThrottle:
             self._skipped += 1
             return
         if self._skipped:
-            msg += f" (+ซ้ำอีก {self._skipped} ครั้งใน {self.interval:.0f}s ก่อนหน้า)"
+            msg += f" (+{self._skipped} repeats in previous {self.interval:.0f}s)"
         log_fn(msg)
         self._last = now
         self._skipped = 0

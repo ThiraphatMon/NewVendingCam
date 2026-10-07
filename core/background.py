@@ -165,11 +165,13 @@ class BackgroundModel:
         self.snapshot = src.copy()
         if used_clean:
             age = now - self.clean_bg_last_update
-            logger.info(f"🧊 Background FROZEN{tag} — ใช้ clean_bg (อายุ {age:.1f}s)")
+            self.start_desc = f"empty-tray, age {age:.1f}s"
+            logger.debug(f"background frozen{tag}: empty-tray background (age {age:.1f}s)")
         else:
+            self.start_desc = "current frame, uncertain"
             logger.warning(
-                f"🧊 Background FROZEN{tag} — ไม่มี clean_bg ที่นิ่งหลังการเปลี่ยนแปลงล่าสุด "
-                f"→ ใช้เฟรมปัจจุบัน (baseline ไม่แน่นอน: มือ/ของที่อยู่ในเฟรมนี้จะกลายเป็นพื้นหลัง)"
+                f"background frozen{tag}: no still empty-tray background since last change "
+                f"-> using current frame (background uncertain: hand/item in this frame becomes background)"
             )
         return used_clean
 
@@ -189,11 +191,11 @@ class BackgroundModel:
         tag = f" [{reason}]" if reason else ""
         if used_clean:
             age = now - self.clean_bg_last_update
-            logger.info(f"🧊 Background FROZEN{tag} — ใช้ clean_bg (อายุ {age:.1f}s)")
+            logger.info(f"background frozen{tag}: empty-tray background (age {age:.1f}s)")
         else:
             logger.warning(
-                f"🧊 Background FROZEN{tag} — fallback: ไม่มี clean_bg ใช้ bg ปัจจุบัน "
-                f"(ถ้ามีมือ/ของที่ยังไม่ถูกกลืนเข้า bg อาจถูกตรวจ)"
+                f"background frozen{tag}: fallback, no empty-tray background -> using current background "
+                f"(hand/item not yet absorbed into background may be detected)"
             )
         return used_clean
 
@@ -203,7 +205,7 @@ class BackgroundModel:
         หลัง grace: กลับใช้ BG_LEARNING_RATE ปกติ พร้อมรับของชิ้นใหม่"""
         self.frozen = False
         self.grace_until = now + RESET_GRACE_SEC
-        logger.info(f"🌅 Background UNFROZEN — grace period {RESET_GRACE_SEC}s")
+        logger.info(f"background unfrozen - grace period {RESET_GRACE_SEC}s")
 
     def invalidate_clean_bg(self):
         """ปิดรอบ: clean_bg เก่า (ก่อนรอบ) ไม่ตรงกับถาดตอนนี้แล้ว (อาจมีของค้าง) → ทิ้ง
@@ -237,7 +239,7 @@ class BackgroundModel:
         if self.snapshot is None:
             return False
         self.bg = self.snapshot.copy()
-        _restore_log(logger.info, "🔄 BG restored to frozen snapshot")
+        _restore_log(logger.info, "background restored to frozen snapshot")
         return True
 
 
@@ -250,10 +252,8 @@ def find_env_change(fgmask, roi_areas):
         if blob_px > roi_area["area_px"] * MAX_BLOB_ROI_RATIO:
             _env_log(
                 logger.info,
-                f"⚡ Large motion detected — "
-                f"blob={blob_px}px / roi={roi_area['area_px']}px "
-                f"({blob_px / roi_area['area_px'] * 100:.0f}%) "
-                f"→ env change",
+                f"env change: large motion blob={blob_px}px / roi={roi_area['area_px']}px "
+                f"({blob_px / roi_area['area_px'] * 100:.0f}%)",
             )
             return True
     return False

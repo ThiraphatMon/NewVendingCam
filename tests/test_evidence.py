@@ -443,7 +443,7 @@ def test_start_cycle_uses_valid_clean_bg(caplog):
     t = _feed(bg, [_gray()] * 8, 1000.0)
     assert bg.start_cycle(_with_item(), t, reason="START x") is True
     assert np.array_equal(bg.bg, _gray()) and bg.frozen
-    assert "ใช้ clean_bg (อายุ" in caplog.text
+    assert "empty-tray background (age" in caplog.text
 
 
 def test_start_cycle_without_valid_clean_bg_uses_current_frame(caplog):
@@ -453,7 +453,7 @@ def test_start_cycle_without_valid_clean_bg_uses_current_frame(caplog):
     t = _feed(bg, [_with_item()], t)
     assert bg.start_cycle(_with_item(), t, reason="START x") is False
     assert np.array_equal(bg.bg, _with_item()) and np.array_equal(bg.snapshot, _with_item())
-    assert "baseline ไม่แน่นอน" in caplog.text
+    assert "background uncertain" in caplog.text
 
 
 def test_freeze_reports_source(caplog):
@@ -482,9 +482,9 @@ def test_start_while_slat_open_rebaselines_after_settle_then_confirms(make_app, 
     run_seq(app, env, [_slat(i) for i in range(6)])
     ctl.push("START")
     run_seq(app, env, [_slat(i) for i in range(6, 9)])
-    assert "baseline ไม่แน่นอน" in caplog.text
+    assert "background uncertain" in caplog.text
     run_frames(app, env, empty_frame(), 10)
-    assert "env change สงบแล้ว" in caplog.text
+    assert "env change settled" in caplog.text
     assert np.array_equal(app.bg.bg, empty_frame()[:, :, 0].astype(np.float32))
     run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM)
     assert ctl.s0 == []                     # ถาดว่างหลัง slat ปิด ไม่ใช่ของ
@@ -501,7 +501,7 @@ def test_no_rebaseline_while_env_change_still_moving(make_app, env, caplog):
     run_frames(app, env, empty_frame(), 2)
     base = app.bg.bg.copy()
     run_seq(app, env, [_slat(i) for i in range(30)])
-    assert "env change สงบแล้ว" not in caplog.text
+    assert "env change settled" not in caplog.text
     assert np.array_equal(app.bg.bg, base)
 
 
@@ -515,4 +515,4 @@ def test_no_rebaseline_after_confirm(make_app, env, caplog):
     bright = empty_frame()
     bright[100:400, 100:500] = 200
     run_frames(app, env, bright, 20)
-    assert "env change สงบแล้ว" not in caplog.text
+    assert "env change settled" not in caplog.text

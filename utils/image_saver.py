@@ -49,12 +49,12 @@ def save_evidence(frame, folder, kind, cycle_id, base_dir=EVIDENCE_DIR, label=No
     try:
         os.makedirs(save_dir, exist_ok=True)
         if not cv2.imwrite(tmp, image):
-            raise OSError("cv2.imwrite คืน False")
+            raise OSError("cv2.imwrite returned False")
         with open(tmp, "rb+") as f:
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except (OSError, cv2.error) as e:
-        logger.error(f"❌ บันทึกภาพ {kind} ไม่สำเร็จ ({path}): {e}")
+        logger.error(f"cannot save image {kind} ({path}): {e}")
         try:
             os.remove(tmp)
         except OSError:

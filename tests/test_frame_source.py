@@ -115,7 +115,7 @@ def test_stall_reports_gap_and_reopens(camera, caplog):
     t0 = time.time()
     r, seen = read_until(src, lambda r: r is None)
     assert time.time() - t0 >= 0.25 and NO_NEW_FRAME in seen  # ก่อนครบ stall = NO_NEW_FRAME
-    assert "กล้องค้าง" in caplog.text
+    assert "camera stalled" in caplog.text
     r, _ = read_until(src, lambda r: r is not None and r is not NO_NEW_FRAME)
     assert int(r[0, 0, 0]) == 40 and cam.opened == 2
     src.release()

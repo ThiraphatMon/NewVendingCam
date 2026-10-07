@@ -53,10 +53,10 @@ class ROIManager:
         example_path = os.path.splitext(self.config_path)[0] + ".example.json"
         config = read_json(example_path)
         if isinstance(config, dict) and "roi_type" in config:
-            logger.warning(f"⚠️ ไม่พบ {self.config_path} → copy จาก {example_path}")
+            logger.warning(f"{self.config_path} not found -> copy from {example_path}")
         else:
             config = self._default_config()
-            logger.warning(f"⚠️ ไม่พบ {self.config_path} → สร้าง ROI default (rect ครึ่งขวา)")
+            logger.warning(f"{self.config_path} not found -> create default ROI (right-half rect)")
         write_json_atomic(self.config_path, config)
 
     def load(self):
@@ -84,7 +84,7 @@ class ROIManager:
                 rect = dict(config.get("rect", self.rect))
         except (OSError, ValueError, TypeError, AttributeError) as e:
             logger.warning(
-                f"⚠️ อ่าน ROI จาก {self.config_path} ไม่ได้ ({e}) → ใช้ ROI เดิมต่อ ({self.roi_type})"
+                f"cannot read ROI from {self.config_path} ({e}) -> keep current ROI ({self.roi_type})"
             )
             return False
 
@@ -93,13 +93,13 @@ class ROIManager:
         self.areas, self.points, self.rect = areas, points, rect
 
         if self.roi_type == "multi_polygon":
-            logger.info(f"✅ Loaded multi_polygon ROI: {len(self.areas)} area(s)")
+            logger.info(f"loaded multi_polygon ROI: {len(self.areas)} area(s)")
         elif self.roi_type in ("polygon", "quad"):
-            logger.info(f"✅ Loaded {self.roi_type} ROI: {len(self.points)} point(s)")
+            logger.info(f"loaded {self.roi_type} ROI: {len(self.points)} point(s)")
         elif self.roi_type == "rect":
-            logger.info("✅ Loaded rect ROI")
+            logger.info("loaded rect ROI")
         else:
-            logger.warning(f"⚠️ Unknown roi_type: {self.roi_type}. Fallback to default rect.")
+            logger.warning(f"unknown roi_type: {self.roi_type} -> fallback to default rect")
             self.roi_type = "rect"
             self.rect = self._default_config()["rect"]
         return True
@@ -125,7 +125,7 @@ class ROIManager:
         if not allow_apply:
             if mtime != self._pending_mtime:
                 self._pending_mtime = mtime
-                logger.info("🕒 พบ ROI ใหม่ระหว่างรอบ → รอใช้ตอนจบรอบ (กลับ WAIT_START)")
+                logger.info("new ROI found during cycle -> will apply when cycle ends (back to WAIT_START)")
             return False
         self._pending_mtime = None
         return self.load()

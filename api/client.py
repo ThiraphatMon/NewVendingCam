@@ -50,17 +50,17 @@ def post_event(payload, image_path=None):
                 timeout=10,
             )
 
-        logger.info(f"☁️ Cloud Response: {resp.status_code} - {resp.text}")
+        logger.info(f"cloud response: {resp.status_code} - {resp.text}")
 
         # ถือว่าสำเร็จเมื่อ status 2xx
         if 200 <= resp.status_code < 300:
             return True
         else:
-            logger.warning(f"⚠️ Server ตอบกลับ status ผิดปกติ: {resp.status_code}")
+            logger.warning(f"server returned unexpected status: {resp.status_code}")
             return False
 
     except Exception as e:
-        logger.warning(f"⚠️ Cloud API Error (เน็ตอาจหลุด หรือ Server ปิดอยู่): {e}")
+        logger.warning(f"cloud API error (network down or server off?): {e}")
         return False
 
 
@@ -74,7 +74,7 @@ def send_event(payload, image_path=None, timeout=10):
                 resp = requests.post(CLOUD_API_URL, data=payload, files=files, headers=_headers(), timeout=timeout)
         else:
             if image_path:
-                logger.warning(f"⚠️ ไม่พบภาพ {image_path} → ส่ง event {payload.get('event')} โดยไม่มีภาพ")
+                logger.warning(f"image {image_path} not found -> upload event {payload.get('event')} without image")
             resp = requests.post(CLOUD_API_URL, data=payload, headers=_headers(), timeout=timeout)
     except Exception as e:
         return f"{type(e).__name__}: {e}"
@@ -107,13 +107,13 @@ def register_machine(machine_id: str):
             timeout=5,
         )
         if 200 <= resp.status_code < 300:
-            logger.info(f"[{machine_id}] ✅ ลงทะเบียนตู้สำเร็จ (SYSTEM_ONLINE)")
+            logger.info(f"[{machine_id}] machine registered (SYSTEM_ONLINE)")
             return True
         logger.warning(
-            f"[{machine_id}] ⚠️ register_machine ล้มเหลว: {resp.status_code} - {resp.text[:200]}"
+            f"[{machine_id}] register_machine failed: {resp.status_code} - {resp.text[:200]}"
         )
     except Exception as e:
-        logger.warning(f"[{machine_id}] ⚠️ register_machine error: {e}")
+        logger.warning(f"[{machine_id}] register_machine error: {e}")
     return False
 
 
@@ -129,7 +129,7 @@ def fetch_remote_roi(machine_id, local_config_path=ROI_CONFIG_PATH):
             if data.get("status") != "no_config" and "roi_type" in data:
                 if read_json(local_config_path) != data:
                     write_json_atomic(local_config_path, data)
-                    logger.info(f"[{machine_id}] ☁️ ได้ ROI ใหม่จาก Server → อัปเดต {local_config_path}")
+                    logger.info(f"[{machine_id}] new ROI from server -> updated {local_config_path}")
     except Exception:
         pass
 
@@ -146,16 +146,16 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
 
         check = requests.get(roi_url, headers=_headers(), timeout=5)
         if check.status_code != 200:
-            logger.warning(f"[{machine_id}] ⚠️ ถาม ROI จาก Server ไม่สำเร็จ: {check.status_code}")
+            logger.warning(f"[{machine_id}] cannot get ROI from server: {check.status_code}")
             return False
         data = check.json()
         if data.get("status") != "no_config":
-            logger.info(f"[{machine_id}] ☁️ Server มี ROI อยู่แล้ว ใช้ค่าจาก Server")
+            logger.info(f"[{machine_id}] server already has ROI -> use server ROI")
             return True
 
         if not os.path.exists(local_config_path):
             logger.warning(
-                f"[{machine_id}] ⚠️ ไม่พบ {local_config_path} ไม่สามารถ push default ROI ได้"
+                f"[{machine_id}] {local_config_path} not found -> cannot push default ROI"
             )
             return True
 
@@ -169,11 +169,11 @@ def push_default_roi(machine_id: str, local_config_path: str = ROI_CONFIG_PATH):
             timeout=5,
         )
         if 200 <= resp.status_code < 300:
-            logger.info(f"[{machine_id}] ✅ Push default ROI ขึ้น Server สำเร็จ")
+            logger.info(f"[{machine_id}] default ROI pushed to server")
             return True
-        logger.warning(f"[{machine_id}] ⚠️ Push default ROI ล้มเหลว: {resp.status_code}")
+        logger.warning(f"[{machine_id}] push default ROI failed: {resp.status_code}")
     except Exception as e:
-        logger.warning(f"[{machine_id}] ⚠️ push_default_roi error: {e}")
+        logger.warning(f"[{machine_id}] push_default_roi error: {e}")
     return False
 
 
@@ -186,7 +186,7 @@ def send_frame(machine_id, frame, quality=None):
     success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, int(q)])
 
     if not success:
-        logger.warning("⚠️ Failed to encode realtime frame")
+        logger.warning("failed to encode live image")
         return False
 
     try:
@@ -206,9 +206,9 @@ def send_frame(machine_id, frame, quality=None):
         if 200 <= resp.status_code < 300:
             return True
 
-        _frame_err_log(logger.warning, f"⚠️ Send realtime frame failed: {resp.status_code} - {resp.text}")
+        _frame_err_log(logger.warning, f"send live image failed: {resp.status_code} - {resp.text}")
         return False
 
     except Exception as e:
-        _frame_err_log(logger.warning, f"⚠️ Send realtime frame error: {e}")
+        _frame_err_log(logger.warning, f"send live image error: {e}")
         return False

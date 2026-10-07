@@ -75,7 +75,7 @@ def services(monkeypatch, tmp_path):
 def test_master_switch_off_disables_everything(cloud_cfg):
     cloud_cfg(CLOUD_ENABLED=False)
     assert not any(config.cloud_features().values())
-    assert "ปิดทั้งหมด" in config.cloud_summary()
+    assert "all off" in config.cloud_summary()
 
 
 def test_enabled_without_url_is_off(cloud_cfg):
@@ -95,8 +95,8 @@ def test_feature_switches_map_to_features(cloud_cfg):
 def test_summary_lists_each_feature(cloud_cfg):
     cloud_cfg(CLOUD_SEND_EVENTS=False, SEND_INTERVAL=300.0)
     s = config.cloud_summary()
-    assert "register=เปิด" in s and "ROI sync=เปิด" in s and "ภาพสด=เปิด (ทุก 300s q80)" in s
-    assert "ITEM_LANDED=ปิด" in s and "anomaly=ปิด" in s
+    assert "register=on" in s and "ROI sync=on" in s and "live image=on (every 300s q80)" in s
+    assert "ITEM_LANDED=off" in s and "anomaly=off" in s
 
 
 # ── thread / HTTP ตามสวิตช์ ──────────────────────────────────────────────────

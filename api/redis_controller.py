@@ -129,7 +129,7 @@ class RedisController:
     # ── เรียกจาก main thread ─────────────────────────────────────────────────
     def start(self):
         if not self.enabled:
-            logger.info("⌨️ CONTROL_MODE=keyboard — ไม่เชื่อม Redis (ใช้ปุ่ม s/x บนหน้าต่าง)")
+            logger.info("CONTROL_MODE=keyboard - no Redis connection (use keys s/x on the window)")
             return
         self._thread = threading.Thread(target=self._run, daemon=True, name="redis-worker")
         self._thread.start()
@@ -170,12 +170,12 @@ class RedisController:
             self._allowed_cycle = cycle_id
             self._request = _SendRequest(cycle_id, after_seq)
         if old is not None and old.cycle_id != cycle_id:
-            self.inbox.put(SendResult(old.cycle_id, "EXPIRED", "มีคำขอของรอบใหม่แทน"))
+            self.inbox.put(SendResult(old.cycle_id, "EXPIRED", "replaced by a request for a newer cycle"))
         if not self.enabled:
             # keyboard mode ไม่มี Redis ให้ส่ง → บันทึกว่าส่งไม่ได้แน่นอน
             with self._lock:
                 self._request = None
-            self.inbox.put(SendResult(cycle_id, "EXPIRED", "CONTROL_MODE=keyboard ไม่มี Redis"))
+            self.inbox.put(SendResult(cycle_id, "EXPIRED", "CONTROL_MODE=keyboard has no Redis"))
             return
         self._wake.set()
 
@@ -189,7 +189,7 @@ class RedisController:
     # ── worker thread ────────────────────────────────────────────────────────
     def _run(self):
         send = f"LPUSH {self.response_key}" if self.send_s0 else f"{self.response_key} disabled (SEND_S0=0)"
-        logger.info(f"🔌 Redis worker เริ่มแล้ว (RPOP {self.ctrl_key} / {send})")
+        logger.info(f"Redis worker started (RPOP {self.ctrl_key} / {send})")
         while not self._stop.is_set():
             try:
                 self._expire_if_revoked()
@@ -203,7 +203,7 @@ class RedisController:
                     self._wake.wait(self.poll_interval)
                     self._wake.clear()
             except Exception as e:  # ห้าม worker ตาย ไม่ว่า error อะไร
-                logger.exception(f"❌ Redis worker error ที่ไม่คาดคิด: {e}")
+                logger.exception(f"unexpected Redis worker error: {e}")
                 self._drop_client(str(e))
                 self._sleep_backoff()
         self._close_client()
@@ -213,12 +213,12 @@ class RedisController:
             client = self.client_factory()
             client.ping()
         except redis.RedisError as e:
-            self._mark_down(f"เชื่อมต่อไม่ได้: {e}")
+            self._mark_down(f"cannot connect: {e}")
             return False
         self._client = client
         self._backoff = self.backoff_min
         if self.link_up is not True:
-            logger.info("✅ เชื่อม Redis สำเร็จ")
+            logger.info("Redis connected")
             self.link_up = True
             self.inbox.put(LinkStatus(True))
         return True
@@ -230,7 +230,7 @@ class RedisController:
         try:
             raw = self._client.rpop(self.ctrl_key)
         except redis.RedisError as e:
-            self._drop_client(f"RPOP {self.ctrl_key} ล้มเหลว: {e}")
+            self._drop_client(f"RPOP {self.ctrl_key} failed: {e}")
             return False
         if raw is None:
             return False  # คิวว่าง (ไม่ใช่ error)
@@ -238,10 +238,10 @@ class RedisController:
         try:
             text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
         except UnicodeDecodeError:
-            _bad_msg_log(logger.warning, f"⚠️ {self.ctrl_key}: ข้อความ decode ไม่ได้ {raw[:40]!r} → ไม่ตีความ")
+            _bad_msg_log(logger.warning, f"{self.ctrl_key}: cannot decode message {raw[:40]!r} -> ignored")
             return True
         if text not in VALID_COMMANDS:
-            _bad_msg_log(logger.warning, f"⚠️ {self.ctrl_key}: ข้อความไม่รู้จัก {text[:40]!r} → ไม่ตีความ")
+            _bad_msg_log(logger.warning, f"{self.ctrl_key}: unknown message {text[:40]!r} -> ignored")
             return True
 
         with self._lock:
@@ -262,11 +262,11 @@ class RedisController:
             if not allowed or stale:
                 self._request = None
         if not allowed:
-            self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "รอบปิดก่อนส่ง S0"))
+            self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "cycle closed before S0 was sent"))
             return True
         if stale:
-            logger.info(f"⏭️ ไม่ส่ง S0 (cycle={req.cycle_id[:8]}) — รับ START/STOP ใหม่มาก่อนส่ง")
-            self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "START/STOP มาก่อนส่ง S0"))
+            logger.info(f"[cycle {req.cycle_id[:8]}] S0 not sent - newer START/STOP received before sending")
+            self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "START/STOP received before S0 was sent"))
             return True
 
         # 1) PING: ไม่ผ่าน = ยังไม่ได้ส่ง LPUSH แน่นอน → retry ได้
@@ -276,7 +276,7 @@ class RedisController:
             if not req.failed_once:
                 req.failed_once = True
                 self.inbox.put(SendResult(req.cycle_id, "FAILED", f"PING: {e}"))
-            self._drop_client(f"PING ก่อนส่ง S0 ล้มเหลว: {e}")
+            self._drop_client(f"PING before S0 failed: {e}")
             return True
 
         # 2) LPUSH ครั้งเดียว: error ใด ๆ = ไม่รู้ผล → UNKNOWN ไม่ส่งซ้ำ
@@ -287,11 +287,11 @@ class RedisController:
         try:
             self._client.lpush(self.response_key, "S0")
         except redis.RedisError as e:
-            logger.error(f"❓ LPUSH S0 ไม่รู้ผล (cycle={req.cycle_id[:8]}): {e} → UNKNOWN ไม่ส่งซ้ำ")
+            logger.error(f"[cycle {req.cycle_id[:8]}] LPUSH S0 result unknown: {e} -> UNKNOWN, not resent")
             self.inbox.put(SendResult(req.cycle_id, "UNKNOWN", str(e)))
-            self._drop_client(f"LPUSH ล้มเหลว: {e}")
+            self._drop_client(f"LPUSH failed: {e}")
             return True
-        logger.info(f"📤 LPUSH {self.response_key} S0 สำเร็จ (cycle={req.cycle_id[:8]})")
+        logger.info(f"[cycle {req.cycle_id[:8]}] LPUSH {self.response_key} S0 OK")
         self.inbox.put(SendResult(req.cycle_id, "ENQUEUED"))
         return True
 
@@ -302,10 +302,10 @@ class RedisController:
             if req is None or self._allowed_cycle == req.cycle_id:
                 return
             self._request = None
-        self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "รอบปิดก่อนส่ง S0"))
+        self.inbox.put(SendResult(req.cycle_id, "EXPIRED", "cycle closed before S0 was sent"))
 
     def _mark_down(self, error):
-        _down_log(logger.warning, f"⚠️ Redis: {error} (ลองใหม่ทุก ≤{self.backoff_max:.0f}s)")
+        _down_log(logger.warning, f"Redis: {error} (retry every <= {self.backoff_max:.0f}s)")
         if self.link_up is not False:
             self.link_up = False
             self.inbox.put(LinkStatus(False, error))

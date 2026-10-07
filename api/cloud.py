@@ -79,13 +79,13 @@ class CloudServices:
         # register / push ROI: เน็ตยังไม่มาตอนบูต → ลองใหม่แบบ backoff จนสำเร็จ (ไม่ busy-loop)
         if f["register"]:
             self._spawn(
-                lambda: self._retry_until_ok(lambda: client.register_machine(self.machine_id), "register ตู้"),
+                lambda: self._retry_until_ok(lambda: client.register_machine(self.machine_id), "machine register"),
                 "cloud-register",
             )
         if f["roi_sync"]:
             self._spawn(
                 lambda: self._retry_until_ok(
-                    lambda: client.push_default_roi(self.machine_id, self.roi_path), "push ROI ตอนเริ่ม"
+                    lambda: client.push_default_roi(self.machine_id, self.roi_path), "startup ROI push"
                 ),
                 "cloud-roi-push",
             )
@@ -109,11 +109,11 @@ class CloudServices:
         while not self.stop_event.is_set():
             if fn():
                 if attempts:
-                    logger.info(f"☁️ {what} สำเร็จ (หลังลองใหม่ {attempts} ครั้ง)")
+                    logger.info(f"{what} OK (after {attempts} retries)")
                 return True
             attempts += 1
             delay = backoff_delay(attempts)
-            logger.warning(f"⚠️ {what} ไม่สำเร็จ → ลองใหม่ใน {delay:.0f}s (ครั้งที่ {attempts})")
+            logger.warning(f"{what} failed -> retry in {delay:.0f}s (attempt {attempts})")
             self.stop_event.wait(delay)
         return False
 
@@ -123,7 +123,7 @@ class CloudServices:
             try:
                 client.fetch_remote_roi(self.machine_id, self.roi_path)
             except Exception as e:
-                logger.warning(f"⚠️ roi polling error: {e}")
+                logger.warning(f"ROI polling error: {e}")
             self.stop_event.wait(ROI_POLL_INTERVAL)
 
     # ── event ขึ้นเว็บ (outbox) ─────────────────────────────────────────────────
@@ -139,7 +139,7 @@ class CloudServices:
                     outbox = CloudOutbox(self.db_path)
                 self._outbox_step(outbox)
             except sqlite3.Error as e:
-                _outbox_err_log(logger.error, f"❌ outbox DB error: {e} → ลองใหม่ใน {OUTBOX_DB_RETRY_SEC:.0f}s")
+                _outbox_err_log(logger.error, f"outbox DB error: {e} -> retry in {OUTBOX_DB_RETRY_SEC:.0f}s")
                 if outbox is not None:
                     outbox.close()
                     outbox = None
@@ -160,11 +160,11 @@ class CloudServices:
         name = f"{row['event']} {json.loads(row['payload']).get('transaction_id', row['event_id'])}"
         if err is None:
             outbox.mark_sent(row["id"])
-            logger.info(f"☁️ ส่ง {name} สำเร็จ (ครั้งที่ {row['attempts'] + 1})")
+            logger.info(f"upload {name} OK (attempt {row['attempts'] + 1})")
         else:
             delay = backoff_delay(row["attempts"] + 1)
             outbox.mark_failed(row["id"], err, time.time() + delay)
-            _outbox_err_log(logger.warning, f"⚠️ ส่ง {name} ไม่สำเร็จ ({err}) → ลองใหม่ใน {delay:.0f}s")
+            _outbox_err_log(logger.warning, f"upload {name} failed ({err}) -> retry in {delay:.0f}s")
 
     # ── ภาพสด ───────────────────────────────────────────────────────────────
     def realtime_due(self, now):

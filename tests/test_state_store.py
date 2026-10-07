@@ -162,7 +162,7 @@ def test_anomaly_recorded(db_path, wall):
 def test_corrupt_db_raises_clear_error(db_path, wall, tmp_path):
     bad = tmp_path / "bad.sqlite3"
     bad.write_bytes(b"this is not a sqlite database" * 100)
-    with pytest.raises(StateStoreError, match="เปิด state DB ไม่ได้"):
+    with pytest.raises(StateStoreError, match="cannot open state DB"):
         make(str(bad), wall)
 
 

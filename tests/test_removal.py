@@ -143,7 +143,7 @@ def test_item_removed_during_cycle_is_not_confirmed(make_app, env, caplog):
     run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM * 2)
     assert ctl.s0 == [] and app.store.count_today() == 0
     assert "POSSIBLE_REMOVAL" in _anomaly_kinds(app)
-    assert "ดูเหมือนหยิบออก" in caplog.text
+    assert "-> item removed" in caplog.text
     assert _anomaly_rows(app)[-1] == ("POSSIBLE_REMOVAL", app.cm.cycle_id, 1)
     assert app.cm.state == cyc.ACTIVE
     # รอบยังรับของจริงได้ต่อ
@@ -160,7 +160,7 @@ def test_removal_without_history_is_uncertain_no_s0_by_default(make_app, env, ca
     run_frames(app, env, frame_with(ITEM_POS), 5)
     _run_seq(app, env, _remove_item_by_hand())
     run_frames(app, env, empty_frame(), FRAMES_TO_CONFIRM * 2)
-    assert ctl.s0 == [] and "ไม่แน่ใจว่าหยิบออก" in caplog.text
+    assert ctl.s0 == [] and "-> uncertain" in caplog.text
     assert _anomaly_kinds(app) == ["POSSIBLE_REMOVAL"]
 
 
@@ -198,7 +198,7 @@ def test_addition_verdict_logged_at_info_with_threshold(make_app, env, caplog):
     lines = [r for r in caplog.records if "S3=ADDITION" in r.getMessage()]
     assert len(lines) == 1 and lines[0].levelno == logging.INFO
     msg = lines[0].getMessage()
-    assert "ขอบ ×" in msg and f"ขอบ < {main.REMOVAL_EDGE_RATIO:.2f}" in msg and "→ ยืนยัน" in msg
+    assert "edge_ratio=" in msg and f"(threshold {main.REMOVAL_EDGE_RATIO:.2f})" in msg and "-> item added -> confirm" in msg
 
 
 def test_rebuy_same_spot_after_pickup_outside_cycle_is_confirmed(make_app, env):

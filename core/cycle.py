@@ -92,7 +92,7 @@ class CycleMachine:
     # ── คำสั่งจาก controller ─────────────────────────────────────────────────
     def on_start(self, now):
         if self.state == WAIT_START:
-            return Result(opened=self._open(now), note="เปิดรอบใหม่")
+            return Result(opened=self._open(now), note="START -> cycle opened")
 
         if self.state in (CONFIRMED_WAIT_STOP, BLOCKED_WAIT_STOP):
             # เหมือนตัวเก่า: จบรอบแล้ว (ส่ง S0 / กล้องเสีย) พร้อมรับ START ถัดไปทันที
@@ -100,19 +100,19 @@ class CycleMachine:
             closed = self._close("next_start")
             return Result(
                 closed=closed, opened=self._open(now),
-                note=f"START ขณะ {prev} → ปิดรอบเดิม ({closed.outcome}) และเปิดรอบใหม่",
+                note=f"START while {prev} -> previous cycle closed ({closed.outcome}) and new cycle opened",
             )
 
         # ACTIVE: ไม่เปิดรอบซ้อน ไม่ล้างอะไร (ตัวเก่า pop ทิ้ง)
         return Result(
             anomaly="DUPLICATE_START",
-            note="START ซ้ำขณะ ACTIVE → ไม่เปิดรอบใหม่ รอบเดิมเดินต่อ",
+            note="duplicate START (ignored) while ACTIVE -> current cycle continues",
         )
 
     def on_stop(self, now):
         if self.is_open():
-            return Result(closed=self._close("stop"), note="STOP → ปิดรอบ")
-        return Result(note="STOP ขณะ WAIT_START → no-op")
+            return Result(closed=self._close("stop"), note="STOP -> cycle closed")
+        return Result(note="STOP while WAIT_START (no open cycle) -> ignored")
 
     # ── เหตุการณ์ภายใน ───────────────────────────────────────────────────────
     def tick(self, now):
@@ -120,14 +120,14 @@ class CycleMachine:
         if self.is_open() and now - self.started_at >= self.timeout_sec:
             return Result(
                 closed=self._close("timeout"),
-                note=f"ไม่มี STOP ภายใน {self.timeout_sec:.0f}s → ปิดรอบเอง",
+                note=f"cycle timeout: no STOP within {self.timeout_sec:.0f}s -> cycle closed",
             )
         return None
 
     def mark_confirmed(self):
         """เรียกหลัง DB commit การยืนยันสำเร็จแล้วเท่านั้น → latch ไม่ยืนยันซ้ำในรอบนี้"""
         if self.state != ACTIVE:
-            raise RuntimeError(f"mark_confirmed ขณะ {self.state}")
+            raise RuntimeError(f"mark_confirmed while {self.state}")
         self.state = CONFIRMED_WAIT_STOP
 
     def on_camera_lost(self):
